@@ -1,25 +1,343 @@
+<file path="Ast.cs">
+using System.Collections.Generic;
+
+namespace CTilde;
+
+// Base classes
+public abstract record AstNode;
+public abstract record StatementNode : AstNode;
+public abstract record ExpressionNode : AstNode;
+
+// Program structure
+public record ProgramNode(FunctionDeclarationNode Function) : AstNode;
+public record FunctionDeclarationNode(string Name, StatementNode Body) : AstNode;
+
+// Statements
+public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;
+public record ReturnStatementNode(ExpressionNode Expression) : StatementNode;
+
+// Expressions
+public record IntegerLiteralNode(int Value) : ExpressionNode;
+</file>
+
+<file path="Generator.cs">
+using System;
+using System.Text;
+
+namespace CTilde;
+
+public class Generator
+{
+    private readonly ProgramNode _program;
+    private readonly StringBuilder _sb = new();
+
+    public Generator(ProgramNode program)
+    {
+        _program = program;
+    }
+
+    public string Generate()
+    {
+        _sb.AppendLine("format PE console");
+        _sb.AppendLine("entry start");
+        _sb.AppendLine();
+        _sb.AppendLine("include 'win32a.inc'");
+        _sb.AppendLine();
+        _sb.AppendLine("section '.text' code readable executable");
+        _sb.AppendLine();
+        _sb.AppendLine("start:");
+        _sb.AppendLine("    call main");
+        _sb.AppendLine("    mov ebx, eax"); // EAX holds the return value from main
+        _sb.AppendLine("    push ebx");
+        _sb.AppendLine("    call [ExitProcess]");
+        _sb.AppendLine();
+
+        GenerateFunction(_program.Function);
+
+        _sb.AppendLine();
+        _sb.AppendLine("section '.idata' import data readable");
+        _sb.AppendLine();
+        _sb.AppendLine("    library kernel32,'kernel32.dll'");
+        _sb.AppendLine("    import kernel32, ExitProcess,'ExitProcess'");
+
+        return _sb.ToString();
+    }
+
+    private void GenerateFunction(FunctionDeclarationNode function)
+    {
+        _sb.AppendLine($"{function.Name}:");
+        _sb.AppendLine("    push ebp");
+        _sb.AppendLine("    mov ebp, esp");
+        _sb.AppendLine();
+
+        if (function.Body is BlockStatementNode block)
+        {
+            foreach (var stmt in block.Statements)
+            {
+                GenerateStatement(stmt);
+            }
+        }
+    }
+
+    private void GenerateStatement(StatementNode statement)
+    {
+        switch (statement)
+        {
+            case ReturnStatementNode ret:
+                GenerateReturn(ret);
+                break;
+            default:
+                throw new NotImplementedException($"Unsupported statement type: {statement.GetType().Name}");
+        }
+    }
+
+    private void GenerateReturn(ReturnStatementNode ret)
+    {
+        switch (ret.Expression)
+        {
+            case IntegerLiteralNode literal:
+                _sb.AppendLine($"    mov eax, {literal.Value}");
+                _sb.AppendLine("    mov esp, ebp");
+                _sb.AppendLine("    pop ebp");
+                _sb.AppendLine("    ret");
+                break;
+            default:
+                throw new NotImplementedException($"Unsupported expression in return: {ret.Expression.GetType().Name}");
+        }
+    }
+}
+</file>
+
+<file path="Parser.cs">
+using System;
+using System.Collections.Generic;
+
+namespace CTilde;
+
+public class Parser
+{
+    private readonly List<Token> _tokens;
+    private int _position;
+
+    public Parser(List<Token> tokens)
+    {
+        _tokens = tokens;
+        _position = 0;
+    }
+
+    private Token Current => _position < _tokens.Count ? _tokens[_position] : new(TokenType.Unknown, string.Empty);
+
+    private Token Eat(TokenType expectedType)
+    {
+        var currentToken = Current;
+        if (currentToken.Type == expectedType)
+        {
+            _position++;
+            return currentToken;
+        }
+        throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type}");
+    }
+
+    public ProgramNode Parse()
+    {
+        var function = ParseFunction();
+        return new ProgramNode(function);
+    }
+
+    private FunctionDeclarationNode ParseFunction()
+    {
+        Eat(TokenType.Keyword); // "int"
+        var identifier = Eat(TokenType.Identifier); // "main"
+        Eat(TokenType.LeftParen);
+        Eat(TokenType.RightParen);
+
+        var body = ParseBlockStatement();
+
+        return new FunctionDeclarationNode(identifier.Value, body);
+    }
+
+    private BlockStatementNode ParseBlockStatement()
+    {
+        Eat(TokenType.LeftBrace);
+        var statements = new List<StatementNode>();
+        while (Current.Type != TokenType.RightBrace)
+        {
+            statements.Add(ParseStatement());
+        }
+        Eat(TokenType.RightBrace);
+        return new BlockStatementNode(statements);
+    }
+
+    private StatementNode ParseStatement()
+    {
+        if (Current.Type == TokenType.Keyword && Current.Value == "return")
+        {
+            return ParseReturnStatement();
+        }
+
+        throw new InvalidOperationException($"Unexpected statement starting with token {Current.Type}");
+    }
+
+    private ReturnStatementNode ParseReturnStatement()
+    {
+        Eat(TokenType.Keyword); // "return"
+        var expression = ParseExpression();
+        Eat(TokenType.Semicolon);
+        return new ReturnStatementNode(expression);
+    }
+
+    private ExpressionNode ParseExpression()
+    {
+        if (Current.Type == TokenType.IntegerLiteral)
+        {
+            var token = Eat(TokenType.IntegerLiteral);
+            if (int.TryParse(token.Value, out int value))
+            {
+                return new IntegerLiteralNode(value);
+            }
+            throw new InvalidOperationException($"Could not parse integer literal: {token.Value}");
+        }
+
+        throw new InvalidOperationException($"Unexpected expression token: {Current.Type}");
+    }
+}
+</file>
+
 <file path="Program.cs">
+using System;
+using System.IO;
+
 namespace CTilde;
 
 public class Program
 {
     public static void Main(string[] args)
     {
-        string code = File.ReadAllText("main.c");
+        string code = File.ReadAllText("Output/main.c");
 
-        Tokenizer.Tokenize(code);
+        // 1. Tokenize
+        var tokens = Tokenizer.Tokenize(code);
+
+        // 2. Parse
+        var parser = new Parser(tokens);
+        var ast = parser.Parse();
+
+        // 3. Generate
+        var generator = new Generator(ast);
+        string asmCode = generator.Generate();
+
+        // 4. Output
+        File.WriteAllText("Output/output.asm", asmCode);
+        Console.WriteLine("Compilation successful. Assembly code written to output.asm");
     }
 }
 </file>
 
 <file path="Tokenizer.cs">
+using System.Collections.Generic;
+
 namespace CTilde;
+
+public enum TokenType
+{
+    Keyword,
+    Identifier,
+    IntegerLiteral,
+    Semicolon,
+    LeftParen,
+    RightParen,
+    LeftBrace,
+    RightBrace,
+    Unknown
+}
+
+public record Token(TokenType Type, string Value);
 
 public class Tokenizer
 {
-    public static void Tokenize(string input)
-    {
+    private static readonly HashSet<string> Keywords =
+    [
+        "int",
+        "return"
+    ];
 
+    public static List<Token> Tokenize(string input)
+    {
+        List<Token> tokens = [];
+        int i = 0;
+
+        while (i < input.Length)
+        {
+            char c = input[i];
+
+            if (char.IsWhiteSpace(c))
+            {
+                i++;
+                continue;
+            }
+
+            switch (c)
+            {
+                case '(':
+                    tokens.Add(new(TokenType.LeftParen, "("));
+                    i++;
+                    continue;
+                case ')':
+                    tokens.Add(new(TokenType.RightParen, ")"));
+                    i++;
+                    continue;
+                case '{':
+                    tokens.Add(new(TokenType.LeftBrace, "{"));
+                    i++;
+                    continue;
+                case '}':
+                    tokens.Add(new(TokenType.RightBrace, "}"));
+                    i++;
+                    continue;
+                case ';':
+                    tokens.Add(new(TokenType.Semicolon, ";"));
+                    i++;
+                    continue;
+            }
+
+            if (char.IsLetter(c))
+            {
+                int start = i;
+
+                while (i < input.Length && char.IsLetterOrDigit(input[i]))
+                {
+                    i++;
+                }
+
+                string value = input[start..i];
+
+                TokenType type = Keywords.Contains(value)
+                    ? TokenType.Keyword
+                    : TokenType.Identifier;
+
+                tokens.Add(new(type, value));
+                continue;
+            }
+
+            if (char.IsDigit(c))
+            {
+                int start = i;
+
+                while (i < input.Length && char.IsDigit(input[i]))
+                {
+                    i++;
+                }
+
+                string value = input[start..i];
+                tokens.Add(new(TokenType.IntegerLiteral, value));
+                continue;
+            }
+
+            tokens.Add(new(TokenType.Unknown, c.ToString()));
+            i++;
+        }
+
+        return tokens;
     }
 }
 </file>

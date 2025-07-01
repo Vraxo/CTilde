@@ -1,4 +1,6 @@
-﻿namespace CTilde;
+﻿using System.Collections.Generic;
+
+namespace CTilde;
 
 public enum TokenType
 {
@@ -23,7 +25,7 @@ public class Tokenizer
         "return"
     ];
 
-    public static void Tokenize(string input)
+    public static List<Token> Tokenize(string input)
     {
         List<Token> tokens = [];
         int i = 0;
@@ -65,7 +67,7 @@ public class Tokenizer
             if (char.IsLetter(c))
             {
                 int start = i;
-                
+
                 while (i < input.Length && char.IsLetterOrDigit(input[i]))
                 {
                     i++;
@@ -73,8 +75,8 @@ public class Tokenizer
 
                 string value = input[start..i];
 
-                TokenType type = Keywords.Contains(value) 
-                    ? TokenType.Keyword 
+                TokenType type = Keywords.Contains(value)
+                    ? TokenType.Keyword
                     : TokenType.Identifier;
 
                 tokens.Add(new(type, value));
@@ -99,9 +101,6 @@ public class Tokenizer
             i++;
         }
 
-        foreach (Token token in tokens)
-        {
-            Console.WriteLine($"Type: {token.Type,-15} Value: '{token.Value}'");
-        }
+        return tokens;
     }
 }

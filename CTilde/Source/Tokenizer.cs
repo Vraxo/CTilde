@@ -12,6 +12,7 @@ public enum TokenType
     RightParen,
     LeftBrace,
     RightBrace,
+    Assignment,
     Unknown
 }
 
@@ -61,6 +62,10 @@ public class Tokenizer
                     continue;
                 case ';':
                     tokens.Add(new(TokenType.Semicolon, ";"));
+                    i++;
+                    continue;
+                case '=':
+                    tokens.Add(new(TokenType.Assignment, "="));
                     i++;
                     continue;
             }

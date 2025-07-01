@@ -15,13 +15,20 @@ public record FunctionDeclarationNode(string Name, StatementNode Body) : AstNode
 // Statements
 public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;
 public record ReturnStatementNode(ExpressionNode Expression) : StatementNode;
+public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
+public record DeclarationStatementNode(Token Identifier, ExpressionNode? Initializer) : StatementNode;
+public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
+
 
 // Expressions
 public record IntegerLiteralNode(int Value) : ExpressionNode;
+public record AssignmentExpressionNode(Token Identifier, ExpressionNode Value) : ExpressionNode;
+public record VariableExpressionNode(Token Identifier) : ExpressionNode;
 </file>
 
 <file path="Generator.cs">
 using System;
+using System.Collections.Generic;
 using System.Text;
 
 namespace CTilde;
@@ -30,6 +37,11 @@ public class Generator
 {
     private readonly ProgramNode _program;
     private readonly StringBuilder _sb = new();
+    private int _labelCounter;
+
+    // Rudimentary symbol table for a function's scope
+    private Dictionary<string, int> _variables = new();
+    private int _stackOffset;
 
     public Generator(ProgramNode program)
     {
@@ -65,18 +77,15 @@ public class Generator
 
     private void GenerateFunction(FunctionDeclarationNode function)
     {
+        _variables = new Dictionary<string, int>();
+        _stackOffset = 0;
+
         _sb.AppendLine($"{function.Name}:");
         _sb.AppendLine("    push ebp");
         _sb.AppendLine("    mov ebp, esp");
         _sb.AppendLine();
 
-        if (function.Body is BlockStatementNode block)
-        {
-            foreach (var stmt in block.Statements)
-            {
-                GenerateStatement(stmt);
-            }
-        }
+        GenerateStatement(function.Body);
     }
 
     private void GenerateStatement(StatementNode statement)
@@ -86,23 +95,95 @@ public class Generator
             case ReturnStatementNode ret:
                 GenerateReturn(ret);
                 break;
+            case BlockStatementNode block:
+                foreach (var stmt in block.Statements)
+                {
+                    GenerateStatement(stmt);
+                }
+                break;
+            case WhileStatementNode whileStmt:
+                GenerateWhile(whileStmt);
+                break;
+            case DeclarationStatementNode decl:
+                GenerateDeclaration(decl);
+                break;
+            case ExpressionStatementNode exprStmt:
+                GenerateExpression(exprStmt.Expression);
+                break;
             default:
                 throw new NotImplementedException($"Unsupported statement type: {statement.GetType().Name}");
         }
     }
 
+    private void GenerateDeclaration(DeclarationStatementNode decl)
+    {
+        if (_variables.ContainsKey(decl.Identifier.Value))
+        {
+            throw new InvalidOperationException($"Variable '{decl.Identifier.Value}' is already defined.");
+        }
+
+        _stackOffset -= 4; // 4 bytes for an int
+        _variables[decl.Identifier.Value] = _stackOffset;
+        _sb.AppendLine("    sub esp, 4          ; Allocate space for variable " + decl.Identifier.Value);
+
+        if (decl.Initializer != null)
+        {
+            GenerateExpression(decl.Initializer);
+            _sb.AppendLine($"    mov [ebp + {_stackOffset}], eax");
+        }
+    }
+
+    private void GenerateWhile(WhileStatementNode whileStmt)
+    {
+        int labelIndex = _labelCounter++;
+        string startLabel = $"_while_start_{labelIndex}";
+        string endLabel = $"_while_end_{labelIndex}";
+
+        _sb.AppendLine($"{startLabel}:");
+
+        GenerateExpression(whileStmt.Condition);
+        _sb.AppendLine("    cmp eax, 0");
+        _sb.AppendLine($"    je {endLabel}");
+
+        GenerateStatement(whileStmt.Body);
+
+        _sb.AppendLine($"    jmp {startLabel}");
+
+        _sb.AppendLine($"{endLabel}:");
+    }
+
     private void GenerateReturn(ReturnStatementNode ret)
     {
-        switch (ret.Expression)
+        GenerateExpression(ret.Expression);
+        _sb.AppendLine("    mov esp, ebp");
+        _sb.AppendLine("    pop ebp");
+        _sb.AppendLine("    ret");
+    }
+
+    private void GenerateExpression(ExpressionNode expression)
+    {
+        switch (expression)
         {
             case IntegerLiteralNode literal:
                 _sb.AppendLine($"    mov eax, {literal.Value}");
-                _sb.AppendLine("    mov esp, ebp");
-                _sb.AppendLine("    pop ebp");
-                _sb.AppendLine("    ret");
+                break;
+            case VariableExpressionNode varExpr:
+                if (!_variables.TryGetValue(varExpr.Identifier.Value, out var offset))
+                {
+                    throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
+                }
+                _sb.AppendLine($"    mov eax, [ebp + {offset}] ; Load variable {varExpr.Identifier.Value}");
+                break;
+            case AssignmentExpressionNode assignExpr:
+                if (!_variables.TryGetValue(assignExpr.Identifier.Value, out var assignOffset))
+                {
+                    throw new InvalidOperationException($"Undeclared variable '{assignExpr.Identifier.Value}' for assignment.");
+                }
+                GenerateExpression(assignExpr.Value);
+                _sb.AppendLine($"    mov [ebp + {assignOffset}], eax ; Assign to variable {assignExpr.Identifier.Value}");
                 break;
             default:
-                throw new NotImplementedException($"Unsupported expression in return: {ret.Expression.GetType().Name}");
+                throw new NotImplementedException($"Unsupported expression type: {expression.GetType().Name}");
         }
     }
 }
@@ -126,6 +207,8 @@ public class Parser
     }
 
     private Token Current => _position < _tokens.Count ? _tokens[_position] : new(TokenType.Unknown, string.Empty);
+    private Token Peek(int offset) => _position + offset < _tokens.Count ? _tokens[_position + offset] : new(TokenType.Unknown, string.Empty);
+
 
     private Token Eat(TokenType expectedType)
     {
@@ -175,7 +258,51 @@ public class Parser
             return ParseReturnStatement();
         }
 
-        throw new InvalidOperationException($"Unexpected statement starting with token {Current.Type}");
+        if (Current.Type == TokenType.Keyword && Current.Value == "while")
+        {
+            return ParseWhileStatement();
+        }
+
+        if (Current.Type == TokenType.Keyword && Current.Value == "int")
+        {
+            return ParseDeclarationStatement();
+        }
+
+        if (Current.Type == TokenType.LeftBrace)
+        {
+            return ParseBlockStatement();
+        }
+
+        // Otherwise, it must be an expression statement (e.g. assignment)
+        var expression = ParseExpression();
+        Eat(TokenType.Semicolon);
+        return new ExpressionStatementNode(expression);
+    }
+
+    private StatementNode ParseDeclarationStatement()
+    {
+        Eat(TokenType.Keyword); // "int"
+        var identifier = Eat(TokenType.Identifier);
+        ExpressionNode? initializer = null;
+
+        if (Current.Type == TokenType.Assignment)
+        {
+            Eat(TokenType.Assignment); // "="
+            initializer = ParseExpression();
+        }
+
+        Eat(TokenType.Semicolon);
+        return new DeclarationStatementNode(identifier, initializer);
+    }
+
+    private WhileStatementNode ParseWhileStatement()
+    {
+        Eat(TokenType.Keyword); // "while"
+        Eat(TokenType.LeftParen);
+        var condition = ParseExpression();
+        Eat(TokenType.RightParen);
+        var body = ParseStatement();
+        return new WhileStatementNode(condition, body);
     }
 
     private ReturnStatementNode ParseReturnStatement()
@@ -188,6 +315,21 @@ public class Parser
 
     private ExpressionNode ParseExpression()
     {
+        // For now, assignment is the only non-primary expression
+        // Check if it's an assignment: id = ...
+        if (Current.Type == TokenType.Identifier && Peek(1).Type == TokenType.Assignment)
+        {
+            var identifier = Eat(TokenType.Identifier);
+            Eat(TokenType.Assignment);
+            var value = ParseExpression(); // Right-associative
+            return new AssignmentExpressionNode(identifier, value);
+        }
+
+        return ParsePrimaryExpression();
+    }
+
+    private ExpressionNode ParsePrimaryExpression()
+    {
         if (Current.Type == TokenType.IntegerLiteral)
         {
             var token = Eat(TokenType.IntegerLiteral);
@@ -196,6 +338,12 @@ public class Parser
                 return new IntegerLiteralNode(value);
             }
             throw new InvalidOperationException($"Could not parse integer literal: {token.Value}");
+        }
+
+        if (Current.Type == TokenType.Identifier)
+        {
+            var token = Eat(TokenType.Identifier);
+            return new VariableExpressionNode(token);
         }
 
         throw new InvalidOperationException($"Unexpected expression token: {Current.Type}");
@@ -248,6 +396,7 @@ public enum TokenType
     RightParen,
     LeftBrace,
     RightBrace,
+    Assignment,
     Unknown
 }
 
@@ -258,7 +407,8 @@ public class Tokenizer
     private static readonly HashSet<string> Keywords =
     [
         "int",
-        "return"
+        "return",
+        "while"
     ];
 
     public static List<Token> Tokenize(string input)
@@ -296,6 +446,10 @@ public class Tokenizer
                     continue;
                 case ';':
                     tokens.Add(new(TokenType.Semicolon, ";"));
+                    i++;
+                    continue;
+                case '=':
+                    tokens.Add(new(TokenType.Assignment, "="));
                     i++;
                     continue;
             }

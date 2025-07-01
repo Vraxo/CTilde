@@ -22,7 +22,8 @@ public class Tokenizer
     private static readonly HashSet<string> Keywords =
     [
         "int",
-        "return"
+        "return",
+        "while"
     ];
 
     public static List<Token> Tokenize(string input)

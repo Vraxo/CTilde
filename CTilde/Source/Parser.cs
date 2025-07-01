@@ -64,7 +64,27 @@ public class Parser
             return ParseReturnStatement();
         }
 
+        if (Current.Type == TokenType.Keyword && Current.Value == "while")
+        {
+            return ParseWhileStatement();
+        }
+
+        if (Current.Type == TokenType.LeftBrace)
+        {
+            return ParseBlockStatement();
+        }
+
         throw new InvalidOperationException($"Unexpected statement starting with token {Current.Type}");
+    }
+
+    private WhileStatementNode ParseWhileStatement()
+    {
+        Eat(TokenType.Keyword); // "while"
+        Eat(TokenType.LeftParen);
+        var condition = ParseExpression();
+        Eat(TokenType.RightParen);
+        var body = ParseStatement();
+        return new WhileStatementNode(condition, body);
     }
 
     private ReturnStatementNode ParseReturnStatement()

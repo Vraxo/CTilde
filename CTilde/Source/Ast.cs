@@ -14,6 +14,7 @@ public record FunctionDeclarationNode(string Name, StatementNode Body) : AstNode
 // Statements
 public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;
 public record ReturnStatementNode(ExpressionNode Expression) : StatementNode;
+public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 
 // Expressions
 public record IntegerLiteralNode(int Value) : ExpressionNode;

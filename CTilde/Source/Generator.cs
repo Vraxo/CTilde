@@ -7,6 +7,7 @@ public class Generator
 {
     private readonly ProgramNode _program;
     private readonly StringBuilder _sb = new();
+    private int _labelCounter;
 
     public Generator(ProgramNode program)
     {
@@ -47,13 +48,7 @@ public class Generator
         _sb.AppendLine("    mov ebp, esp");
         _sb.AppendLine();
 
-        if (function.Body is BlockStatementNode block)
-        {
-            foreach (var stmt in block.Statements)
-            {
-                GenerateStatement(stmt);
-            }
-        }
+        GenerateStatement(function.Body);
     }
 
     private void GenerateStatement(StatementNode statement)
@@ -63,23 +58,56 @@ public class Generator
             case ReturnStatementNode ret:
                 GenerateReturn(ret);
                 break;
+            case BlockStatementNode block:
+                foreach (var stmt in block.Statements)
+                {
+                    GenerateStatement(stmt);
+                }
+                break;
+            case WhileStatementNode whileStmt:
+                GenerateWhile(whileStmt);
+                break;
             default:
                 throw new NotImplementedException($"Unsupported statement type: {statement.GetType().Name}");
         }
     }
 
+    private void GenerateWhile(WhileStatementNode whileStmt)
+    {
+        int labelIndex = _labelCounter++;
+        string startLabel = $"_while_start_{labelIndex}";
+        string endLabel = $"_while_end_{labelIndex}";
+
+        _sb.AppendLine($"{startLabel}:");
+
+        GenerateExpression(whileStmt.Condition);
+        _sb.AppendLine("    cmp eax, 0");
+        _sb.AppendLine($"    je {endLabel}");
+
+        GenerateStatement(whileStmt.Body);
+
+        _sb.AppendLine($"    jmp {startLabel}");
+
+        _sb.AppendLine($"{endLabel}:");
+    }
+
     private void GenerateReturn(ReturnStatementNode ret)
     {
-        switch (ret.Expression)
+        GenerateExpression(ret.Expression);
+        _sb.AppendLine("    mov esp, ebp");
+        _sb.AppendLine("    pop ebp");
+        _sb.AppendLine("    ret");
+    }
+
+    private void GenerateExpression(ExpressionNode expression)
+    {
+        switch (expression)
         {
             case IntegerLiteralNode literal:
                 _sb.AppendLine($"    mov eax, {literal.Value}");
-                _sb.AppendLine("    mov esp, ebp");
-                _sb.AppendLine("    pop ebp");
-                _sb.AppendLine("    ret");
                 break;
             default:
-                throw new NotImplementedException($"Unsupported expression in return: {ret.Expression.GetType().Name}");
+                throw new NotImplementedException($"Unsupported expression type: {expression.GetType().Name}");
         }
     }
 }

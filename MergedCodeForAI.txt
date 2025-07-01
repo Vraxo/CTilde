@@ -1,0 +1,26 @@
+<file path="Program.cs">
+namespace CTilde;
+
+public class Program
+{
+    public static void Main(string[] args)
+    {
+        string code = File.ReadAllText("main.c");
+
+        Tokenizer.Tokenize(code);
+    }
+}
+</file>
+
+<file path="Tokenizer.cs">
+namespace CTilde;
+
+public class Tokenizer
+{
+    public static void Tokenize(string input)
+    {
+
+    }
+}
+</file>
+

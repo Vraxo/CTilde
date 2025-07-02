@@ -17,6 +17,7 @@ public record ReturnStatementNode(ExpressionNode Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record DeclarationStatementNode(Token Identifier, ExpressionNode? Initializer) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
+public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBranch, StatementNode? ElseBranch) : StatementNode;
 
 
 // Expressions

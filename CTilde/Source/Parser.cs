@@ -71,6 +71,11 @@ public class Parser
             return ParseWhileStatement();
         }
 
+        if (Current.Type == TokenType.Keyword && Current.Value == "if")
+        {
+            return ParseIfStatement();
+        }
+
         if (Current.Type == TokenType.Keyword && Current.Value == "int")
         {
             return ParseDeclarationStatement();
@@ -85,6 +90,25 @@ public class Parser
         var expression = ParseExpression();
         Eat(TokenType.Semicolon);
         return new ExpressionStatementNode(expression);
+    }
+
+    private StatementNode ParseIfStatement()
+    {
+        Eat(TokenType.Keyword); // "if"
+        Eat(TokenType.LeftParen);
+        var condition = ParseExpression();
+        Eat(TokenType.RightParen);
+
+        var thenBranch = ParseStatement();
+        StatementNode? elseBranch = null;
+
+        if (Current.Type == TokenType.Keyword && Current.Value == "else")
+        {
+            Eat(TokenType.Keyword); // "else"
+            elseBranch = ParseStatement();
+        }
+
+        return new IfStatementNode(condition, thenBranch, elseBranch);
     }
 
     private StatementNode ParseDeclarationStatement()

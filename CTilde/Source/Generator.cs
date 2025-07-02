@@ -95,6 +95,9 @@ public class Generator
             case WhileStatementNode whileStmt:
                 GenerateWhile(whileStmt);
                 break;
+            case IfStatementNode ifStmt:
+                GenerateIf(ifStmt);
+                break;
             case DeclarationStatementNode decl:
                 GenerateDeclaration(decl);
                 break;
@@ -105,6 +108,42 @@ public class Generator
             default:
                 throw new NotImplementedException($"Unsupported statement type: {statement.GetType().Name}");
         }
+    }
+
+    private void GenerateIf(IfStatementNode ifStmt)
+    {
+        int labelIndex = _labelCounter++;
+        string elseLabel = $"_else_{labelIndex}";
+        string endIfLabel = $"_end_if_{labelIndex}";
+
+        // Evaluate condition
+        GenerateExpression(ifStmt.Condition);
+        AppendAsm("cmp eax, 0");
+
+        if (ifStmt.ElseBranch != null)
+        {
+            // If-Else statement
+            AppendAsm($"je {elseLabel}", "Condition is false, jump to else");
+
+            // Then branch
+            GenerateStatement(ifStmt.ThenBranch);
+            AppendAsm($"jmp {endIfLabel}", "Skip else branch");
+
+            // Else branch
+            _sb.AppendLine($"{elseLabel}:");
+            GenerateStatement(ifStmt.ElseBranch);
+        }
+        else
+        {
+            // If-only statement
+            AppendAsm($"je {endIfLabel}", "Condition is false, jump to end");
+
+            // Then branch
+            GenerateStatement(ifStmt.ThenBranch);
+        }
+
+        // End label for both cases
+        _sb.AppendLine($"{endIfLabel}:");
     }
 
     private void GenerateDeclaration(DeclarationStatementNode decl)

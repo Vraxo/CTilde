@@ -2,6 +2,8 @@
 
 namespace CTilde;
 
+public enum AccessSpecifier { Public, Private }
+
 // Base classes
 public abstract record AstNode
 {
@@ -12,10 +14,11 @@ public abstract record ExpressionNode : AstNode;
 
 // Program structure
 public record ImportDirectiveNode(string LibraryName) : AstNode;
-public record StructDefinitionNode(string Name, List<ParameterNode> Members) : AstNode;
+public record MemberVariableNode(Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode;
+public record StructDefinitionNode(string Name, List<MemberVariableNode> Members) : AstNode;
 public record ProgramNode(List<ImportDirectiveNode> Imports, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
 public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
-public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName) : AstNode;
+public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel) : AstNode;
 
 // Statements
 public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;

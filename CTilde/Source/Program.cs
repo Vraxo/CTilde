@@ -7,10 +7,14 @@ public class Program
 {
     public static void Main(string[] args)
     {
-        string code = File.ReadAllText("Output/main.c");
+        // 0. Preprocess
+        var preprocessor = new Preprocessor();
+        string mergedCode = preprocessor.Process("Output/main.c");
+        File.WriteAllText("Output/merged.c", mergedCode);
+        Console.WriteLine("Preprocessing successful. Merged code written to Output/merged.c");
 
         // 1. Tokenize
-        var tokens = Tokenizer.Tokenize(code);
+        var tokens = Tokenizer.Tokenize(mergedCode);
 
         // 2. Parse
         var parser = new Parser(tokens);

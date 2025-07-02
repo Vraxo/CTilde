@@ -26,9 +26,9 @@ public class ExpressionGenerator
         {
             case VariableExpressionNode varExpr:
                 {
-                    if (CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out var offset, out _, out _)) // Added out _
+                    if (CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out var offset, out _, out _))
                     {
-                        string sign = offset > 0 ? "+" : "";
+                        string sign = offset > 0 ? "+" : ""; // Offset can be positive (param) or negative (local)
                         Builder.AppendInstruction($"lea eax, [ebp {sign} {offset}]", $"Get address of var/param {varExpr.Identifier.Value}");
                     }
                     else if (CurrentFunction.OwnerStructName != null)
@@ -37,7 +37,7 @@ public class ExpressionGenerator
                         {
                             var type = TypeManager.GetStructTypeFromUnqualifiedName(CurrentFunction.OwnerStructName, CurrentFunction.Namespace);
                             var (memberOffset, _) = TypeManager.GetMemberInfo(type.FullName, varExpr.Identifier.Value, CurrentCompilationUnit);
-                            CurrentSymbols.TryGetSymbol("this", out var thisOffset, out _, out _); // Added out _
+                            CurrentSymbols.TryGetSymbol("this", out var thisOffset, out _, out _);
                             Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
                             if (memberOffset > 0)
                             {
@@ -102,26 +102,49 @@ public class ExpressionGenerator
             case IntegerLiteralNode literal: Builder.AppendInstruction($"mov eax, {literal.Value}"); break;
             case StringLiteralNode str: Builder.AppendInstruction($"mov eax, {str.Label}"); break;
             case VariableExpressionNode varExpr:
-                CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out _, out _); // Added out _
-                if (offset > 0) // It's a parameter or local variable
+                if (CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out string symbolResolvedType, out _))
                 {
-                    var exprType = CurrentSymbols.GetSymbolType(varExpr.Identifier.Value); // Already resolved FQN from SymbolTable
-                    if (TypeManager.IsStruct(exprType))
+                    // It's a parameter or local variable
+                    if (TypeManager.IsStruct(symbolResolvedType))
                     {
-                        Builder.AppendInstruction($"lea eax, [ebp + {offset}]");
+                        // If it's a struct, we push its address into EAX (L-value).
+                        // This assumes struct values are typically used as pointers/addresses for assignments/passing.
+                        string sign = offset > 0 ? "+" : ""; // offset is positive for parameters, negative for local variables
+                        Builder.AppendInstruction($"lea eax, [ebp {sign} {offset}]", $"Get address of var/param {varExpr.Identifier.Value}");
                     }
                     else
                     {
-                        if (TypeManager.GetSizeOfType(exprType, CurrentCompilationUnit) == 1) Builder.AppendInstruction($"movzx eax, byte [ebp + {offset}]");
-                        else Builder.AppendInstruction($"mov eax, [ebp + {offset}]");
+                        // Primitive type or pointer
+                        string sign = offset > 0 ? "+" : "";
+                        if (TypeManager.GetSizeOfType(symbolResolvedType, CurrentCompilationUnit) == 1)
+                            Builder.AppendInstruction($"movzx eax, byte [ebp {sign} {offset}]", $"Load value of {varExpr.Identifier.Value}");
+                        else
+                            Builder.AppendInstruction($"mov eax, [ebp {sign} {offset}]", $"Load value of {varExpr.Identifier.Value}");
                     }
                 }
-                else // It's a struct member (implicit 'this')
+                else
                 {
-                    GenerateLValueAddress(varExpr);
-                    var type = TypeManager.GetExpressionType(varExpr, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
-                    if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
-                    else Builder.AppendInstruction("mov eax, [eax]");
+                    // Not a local variable or parameter.
+                    // Check if it's an unqualified enum member (like KEY_D)
+                    var enumValue = TypeManager.ResolveUnqualifiedEnumMember(varExpr.Identifier.Value, CurrentCompilationUnit, CurrentFunction.Namespace);
+                    if (enumValue.HasValue)
+                    {
+                        Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {varExpr.Identifier.Value}");
+                    }
+                    // Else if inside a method, it could be an implicit 'this->member'
+                    else if (CurrentFunction.OwnerStructName != null)
+                    {
+                        // Generate L-value address and then load its value
+                        GenerateLValueAddress(varExpr); // This will handle the 'this' offset and member offset
+                        var type = TypeManager.GetExpressionType(varExpr, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                        if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
+                        else Builder.AppendInstruction("mov eax, [eax]");
+                    }
+                    else
+                    {
+                        // Truly undefined variable
+                        throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'.");
+                    }
                 }
                 break;
             case UnaryExpressionNode u:
@@ -211,7 +234,31 @@ public class ExpressionGenerator
                 }
             case BinaryExpressionNode binExpr: GenerateBinaryExpression(binExpr); break;
             case CallExpressionNode callExpr: GenerateCallExpression(callExpr); break;
-            case QualifiedAccessExpressionNode: throw new InvalidOperationException("Qualified access expression cannot be evaluated as a value directly. It must be part of a call.");
+            case QualifiedAccessExpressionNode qNode:
+                {
+                    // Check if it's an enum member access
+                    // Note: This call to ResolveEnumMember is for qualified access (e.g., `Namespace::Member`).
+                    var enumValue = TypeManager.ResolveEnumMember(qNode.Namespace.Value, qNode.Member.Value, CurrentCompilationUnit, CurrentFunction.Namespace);
+                    if (enumValue.HasValue)
+                    {
+                        Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {qNode.Namespace.Value}::{qNode.Member.Value}");
+                        break;
+                    }
+                    // If not an enum, it must be a qualified function call
+                    var func = TypeManager.ResolveFunctionCall(qNode, CurrentCompilationUnit, CurrentFunction);
+
+                    if (func.Body == null)
+                    {
+                        ExternalFunctions.Add(func.Name);
+                        Builder.AppendInstruction($"mov eax, [{func.Name}]");
+                    }
+                    else
+                    {
+                        var nameParts = new List<string?> { func.Namespace, func.OwnerStructName, func.Name }.Where(n => n != null);
+                        Builder.AppendInstruction($"mov eax, _{string.Join("_", nameParts)}");
+                    }
+                    break;
+                }
             default: throw new NotImplementedException($"Expr: {expression.GetType().Name}");
         }
     }

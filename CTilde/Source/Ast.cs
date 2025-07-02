@@ -25,13 +25,15 @@ public abstract record ExpressionNode : AstNode;
 // Program structure
 public record ImportDirectiveNode(string LibraryName) : AstNode;
 public record UsingDirectiveNode(string Namespace, string? Alias) : AstNode;
-public record MemberVariableNode(bool IsConst, Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode; // Added IsConst
+public record MemberVariableNode(bool IsConst, Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode;
 public record StructDefinitionNode(string Name, string? Namespace, List<MemberVariableNode> Members) : AstNode;
 public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
 public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, string? Namespace) : AstNode;
+public record EnumDefinitionNode(string Name, string? Namespace, List<EnumMemberNode> Members) : AstNode; // NEW
+public record EnumMemberNode(Token Name, int Value) : AstNode; // NEW
 
 // New top-level structure for compilation units
-public record CompilationUnitNode(string FilePath, List<UsingDirectiveNode> Usings, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
+public record CompilationUnitNode(string FilePath, List<UsingDirectiveNode> Usings, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions, List<EnumDefinitionNode> Enums) : AstNode; // MODIFIED
 public record ProgramNode(List<ImportDirectiveNode> Imports, List<CompilationUnitNode> CompilationUnits) : AstNode;
 
 

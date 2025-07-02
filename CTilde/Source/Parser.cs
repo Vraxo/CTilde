@@ -40,6 +40,7 @@ public class Parser
         var usings = new List<UsingDirectiveNode>();
         var structs = new List<StructDefinitionNode>();
         var functions = new List<FunctionDeclarationNode>();
+        var enums = new List<EnumDefinitionNode>(); // NEW
 
         while (Current.Type != TokenType.Unknown)
         {
@@ -71,13 +72,17 @@ public class Parser
             {
                 structs.Add(ParseStructDefinition(functions));
             }
+            else if (Current.Type == TokenType.Keyword && Current.Value == "enum") // NEW
+            {
+                enums.Add(ParseEnumDefinition()); // NEW
+            }
             else
             {
                 functions.Add(ParseGlobalFunction());
             }
         }
 
-        var unitNode = new CompilationUnitNode(filePath, usings, structs, functions);
+        var unitNode = new CompilationUnitNode(filePath, usings, structs, functions, enums); // MODIFIED
         SetParents(unitNode);
         return unitNode;
     }
@@ -126,6 +131,45 @@ public class Parser
         Eat(TokenType.Identifier); // include
         Eat(TokenType.StringLiteral); // "filename"
         // No AST node for include, as it's handled by the preprocessor
+    }
+
+    private EnumDefinitionNode ParseEnumDefinition() // NEW
+    {
+        Eat(TokenType.Keyword); // enum
+        var enumName = Eat(TokenType.Identifier);
+        Eat(TokenType.LeftBrace);
+
+        var members = new List<EnumMemberNode>();
+        int currentValue = 0; // Default enum value starts at 0 and increments
+
+        while (Current.Type != TokenType.RightBrace)
+        {
+            var memberName = Eat(TokenType.Identifier);
+            if (Current.Type == TokenType.Assignment)
+            {
+                Eat(TokenType.Assignment);
+                var valueToken = Eat(TokenType.IntegerLiteral);
+                if (!int.TryParse(valueToken.Value, out currentValue))
+                {
+                    throw new InvalidOperationException($"Invalid integer value for enum member '{memberName.Value}': '{valueToken.Value}'");
+                }
+            }
+            members.Add(new EnumMemberNode(memberName, currentValue));
+            currentValue++; // Increment for next default value
+
+            if (Current.Type == TokenType.Comma)
+            {
+                Eat(TokenType.Comma);
+            }
+            else if (Current.Type != TokenType.RightBrace)
+            {
+                throw new InvalidOperationException($"Expected ',' or '}}' after enum member '{memberName.Value}'");
+            }
+        }
+
+        Eat(TokenType.RightBrace);
+        Eat(TokenType.Semicolon);
+        return new EnumDefinitionNode(enumName.Value, _currentNamespace, members);
     }
 
     private StructDefinitionNode ParseStructDefinition(List<FunctionDeclarationNode> programFunctions)

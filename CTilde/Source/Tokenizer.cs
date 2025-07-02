@@ -31,7 +31,8 @@ public enum TokenType
     Ampersand,
     Arrow,
     Colon,
-    DoubleColon
+    DoubleColon,
+    Enum // NEW
 }
 
 public record Token(TokenType Type, string Value);
@@ -52,7 +53,8 @@ public class Tokenizer
         "private",
         "namespace",
         "using",
-        "const" // Added const keyword
+        "const",
+        "enum" // MODIFIED
     ];
 
     public static List<Token> Tokenize(string input)

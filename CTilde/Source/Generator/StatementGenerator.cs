@@ -34,7 +34,10 @@ public class StatementGenerator
                         if (!TypeManager.IsStruct(typeName))
                             throw new InvalidOperationException($"Initializer list can only be used for struct types, not '{typeName}'.");
 
-                        var structDef = Program.Structs.First(s => s.Name == typeName);
+                        var structDef = TypeManager.FindStruct(typeName);
+                        if (structDef == null)
+                            throw new InvalidOperationException($"Could not find struct definition for initializer list type '{typeName}'.");
+
 
                         if (initList.Values.Count > structDef.Members.Count)
                             throw new InvalidOperationException($"Too many values in initializer list for struct '{structDef.Name}'.");

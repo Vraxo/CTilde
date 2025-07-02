@@ -10,6 +10,7 @@ public class Parser
     private readonly List<Token> _tokens;
     private int _position;
     private int _stringLabelCounter;
+    private string? _currentNamespace;
 
     public Parser(List<Token> tokens)
     {
@@ -43,6 +44,10 @@ public class Parser
             {
                 imports.Add(ParseImportDirective());
             }
+            else if (Current.Type == TokenType.Keyword && Current.Value == "namespace")
+            {
+                ParseNamespaceDirective();
+            }
             else if (Current.Type == TokenType.Keyword && Current.Value == "struct")
             {
                 structs.Add(ParseStructDefinition(functions));
@@ -56,6 +61,14 @@ public class Parser
         var programNode = new ProgramNode(imports, structs, functions);
         SetParents(programNode);
         return programNode;
+    }
+
+    private void ParseNamespaceDirective()
+    {
+        Eat(TokenType.Keyword); // namespace
+        var name = Eat(TokenType.Identifier);
+        Eat(TokenType.Semicolon);
+        _currentNamespace = name.Value;
     }
 
     private ImportDirectiveNode ParseImportDirective()
@@ -92,7 +105,7 @@ public class Parser
             if (Current.Type == TokenType.LeftParen)
             {
                 // This is a method definition.
-                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value, currentAccess);
+                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value, currentAccess, _currentNamespace);
                 programFunctions.Add(methodNode);
             }
             else
@@ -105,7 +118,7 @@ public class Parser
 
         Eat(TokenType.RightBrace);
         Eat(TokenType.Semicolon);
-        return new StructDefinitionNode(structName.Value, members);
+        return new StructDefinitionNode(structName.Value, _currentNamespace, members);
     }
 
     private void SetParents(AstNode node)
@@ -134,6 +147,14 @@ public class Parser
     private (Token type, int pointerLevel) ParseType()
     {
         Token typeToken;
+        string? namespaceQualifier = null;
+
+        if (Current.Type == TokenType.Identifier && Peek(1).Type == TokenType.DoubleColon)
+        {
+            namespaceQualifier = Eat(TokenType.Identifier).Value;
+            Eat(TokenType.DoubleColon);
+        }
+
         if (Current.Type == TokenType.Keyword && Current.Value == "struct")
         {
             Eat(TokenType.Keyword); // struct
@@ -141,9 +162,26 @@ public class Parser
         }
         else
         {
-            // A type is a keyword (int, void, char) or an identifier (another struct name)
             typeToken = Current;
             _position++;
+        }
+
+        // Only qualify if it's an identifier (a UDT), not a keyword (int, char)
+        if (typeToken.Type == TokenType.Identifier)
+        {
+            if (namespaceQualifier != null)
+            {
+                typeToken = new Token(typeToken.Type, $"{namespaceQualifier}::{typeToken.Value}");
+            }
+            else if (_currentNamespace != null)
+            {
+                // Automatically qualify unqualified types with current namespace, unless it's a call to a global function
+                var nextToken = Current;
+                if (nextToken.Type != TokenType.LeftParen) // Simple heuristic: if not a call, it's likely a type
+                {
+                    typeToken = new Token(typeToken.Type, $"{_currentNamespace}::{typeToken.Value}");
+                }
+            }
         }
 
         int pointerLevel = 0;
@@ -160,10 +198,10 @@ public class Parser
         var (returnType, returnPointerLevel) = ParseType();
         var identifier = Eat(TokenType.Identifier);
         // Global functions are implicitly public
-        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null, AccessSpecifier.Public);
+        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null, AccessSpecifier.Public, _currentNamespace);
     }
 
-    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName, AccessSpecifier accessLevel)
+    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName, AccessSpecifier accessLevel, string? namespaceName)
     {
         Eat(TokenType.LeftParen);
 
@@ -183,7 +221,8 @@ public class Parser
         // If this is a method, prepend the implicit 'this' pointer to the parameter list.
         if (ownerStructName != null)
         {
-            var thisParam = new ParameterNode(new Token(TokenType.Identifier, ownerStructName), 1, new Token(TokenType.Identifier, "this"));
+            var thisTypeTokenValue = namespaceName != null ? $"{namespaceName}::{ownerStructName}" : ownerStructName;
+            var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeTokenValue), 1, new Token(TokenType.Identifier, "this"));
             parameters.Insert(0, thisParam);
         }
 
@@ -197,7 +236,7 @@ public class Parser
             Eat(TokenType.Semicolon); // For function prototypes
         }
 
-        return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName, accessLevel);
+        return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName, accessLevel, namespaceName);
     }
 
     private BlockStatementNode ParseBlockStatement()
@@ -225,8 +264,29 @@ public class Parser
             }
         }
 
-        // `TypeName varName;` is a declaration.
-        if (Current.Type == TokenType.Identifier && (Peek(1).Type == TokenType.Identifier || Peek(1).Type == TokenType.Star))
+        // Disambiguate between a declaration and an expression statement
+        bool isDeclaration = false;
+        if (Current.Type == TokenType.Identifier)
+        {
+            var lookahead1 = Peek(1).Type;
+            if (lookahead1 == TokenType.Identifier || lookahead1 == TokenType.Star)
+            {
+                // Case: `TypeName varName;` or `TypeName* pVar;`
+                isDeclaration = true;
+            }
+            else if (lookahead1 == TokenType.DoubleColon && Peek(2).Type == TokenType.Identifier)
+            {
+                // Case: `ns::TypeName ...`
+                var lookahead3 = Peek(3).Type;
+                if (lookahead3 == TokenType.Identifier || lookahead3 == TokenType.Star)
+                {
+                    // `ns::TypeName varName;` or `ns::TypeName* pVar;`
+                    isDeclaration = true;
+                }
+            }
+        }
+
+        if (isDeclaration)
         {
             return ParseDeclarationStatement();
         }
@@ -435,6 +495,13 @@ public class Parser
         {
             var token = Eat(TokenType.StringLiteral);
             return new StringLiteralNode(token.Value, $"str{_stringLabelCounter++}");
+        }
+        if (Current.Type == TokenType.Identifier && Peek(1).Type == TokenType.DoubleColon)
+        {
+            var ns = Eat(TokenType.Identifier);
+            Eat(TokenType.DoubleColon);
+            var member = Eat(TokenType.Identifier);
+            return new QualifiedAccessExpressionNode(ns, member);
         }
         if (Current.Type == TokenType.Identifier) return new VariableExpressionNode(Eat(TokenType.Identifier));
         if (Current.Type == TokenType.LeftParen)

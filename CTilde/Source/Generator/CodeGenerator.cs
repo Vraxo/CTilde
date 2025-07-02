@@ -19,6 +19,7 @@ public class CodeGenerator
 
     internal SymbolTable CurrentSymbols { get; set; } = null!;
     internal string? CurrentMethodOwnerStruct { get; set; }
+    internal string? CurrentNamespace { get; private set; }
 
     public CodeGenerator(ProgramNode program)
     {
@@ -84,11 +85,23 @@ public class CodeGenerator
     private void GenerateFunction(FunctionDeclarationNode function)
     {
         CurrentMethodOwnerStruct = function.OwnerStructName;
+        CurrentNamespace = function.Namespace;
         CurrentSymbols = new SymbolTable(function, TypeManager);
 
-        string mangledName = function.OwnerStructName != null
-            ? $"_{function.OwnerStructName}_{function.Name}"
-            : $"_{function.Name}";
+        string mangledName;
+        // The 'main' function is special and must not be namespace-mangled.
+        if (function.Name == "main")
+        {
+            mangledName = "_main";
+        }
+        else
+        {
+            var nameParts = new List<string>();
+            if (function.Namespace != null) nameParts.Add(function.Namespace);
+            if (function.OwnerStructName != null) nameParts.Add(function.OwnerStructName);
+            nameParts.Add(function.Name);
+            mangledName = "_" + string.Join("_", nameParts);
+        }
 
         Builder.AppendLabel(mangledName);
         Builder.AppendInstruction("push ebp");

@@ -13,7 +13,27 @@ public class TypeManager
     public TypeManager(ProgramNode program)
     {
         _program = program;
-        _structs = program.Structs.ToDictionary(s => s.Name);
+        _structs = program.Structs.ToDictionary(s => s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name);
+    }
+
+    public StructDefinitionNode? FindStruct(string qualifiedName)
+    {
+        _structs.TryGetValue(qualifiedName, out var def);
+        return def;
+    }
+
+    public (StructDefinitionNode Def, string FullName) GetStructTypeFromUnqualifiedName(string name, string? currentNamespace)
+    {
+        var qualifiedName = currentNamespace != null ? $"{currentNamespace}::{name}" : name;
+        if (_structs.TryGetValue(qualifiedName, out var def)) return (def, qualifiedName);
+        if (currentNamespace != null && _structs.TryGetValue(name, out def)) return (def, name);
+        throw new InvalidOperationException($"Could not resolve struct type '{name}' in context '{currentNamespace}'.");
+    }
+
+    public (StructDefinitionNode Def, string FullName) GetStructTypeFromFullName(string fullName)
+    {
+        if (_structs.TryGetValue(fullName, out var def)) return (def, fullName);
+        throw new InvalidOperationException($"Could not find struct definition for '{fullName}'.");
     }
 
     public string GetTypeName(Token type, int pointerLevel)
@@ -56,7 +76,7 @@ public class TypeManager
         throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
     }
 
-    public string GetExpressionType(ExpressionNode expr, SymbolTable symbols, string? currentMethodOwnerStruct)
+    public string GetExpressionType(ExpressionNode expr, SymbolTable symbols, string? currentMethodOwnerStruct, string? currentNamespace)
     {
         switch (expr)
         {
@@ -71,53 +91,65 @@ public class TypeManager
                 {
                     try
                     {
-                        var (_, memberType) = GetMemberInfo(currentMethodOwnerStruct, v.Identifier.Value);
+                        var ownerType = GetStructTypeFromUnqualifiedName(currentMethodOwnerStruct, currentNamespace);
+                        var (_, memberType) = GetMemberInfo(ownerType.FullName, v.Identifier.Value);
                         return memberType;
                     }
                     catch (InvalidOperationException) { /* Fall through */ }
                 }
                 throw new InvalidOperationException($"Cannot determine type for undefined variable '{v.Identifier.Value}'.");
 
-            case AssignmentExpressionNode a: return GetExpressionType(a.Left, symbols, currentMethodOwnerStruct);
+            case AssignmentExpressionNode a: return GetExpressionType(a.Left, symbols, currentMethodOwnerStruct, currentNamespace);
 
             case MemberAccessExpressionNode m:
                 {
-                    var leftType = GetExpressionType(m.Left, symbols, currentMethodOwnerStruct);
+                    var leftType = GetExpressionType(m.Left, symbols, currentMethodOwnerStruct, currentNamespace);
                     string baseStructType = leftType.TrimEnd('*');
                     var (_, memberType) = GetMemberInfo(baseStructType, m.Member.Value);
                     return memberType;
                 }
 
             case UnaryExpressionNode u when u.Operator.Type == TokenType.Ampersand:
-                return GetExpressionType(u.Right, symbols, currentMethodOwnerStruct) + "*";
+                return GetExpressionType(u.Right, symbols, currentMethodOwnerStruct, currentNamespace) + "*";
 
             case UnaryExpressionNode u when u.Operator.Type == TokenType.Star:
                 {
-                    var operandType = GetExpressionType(u.Right, symbols, currentMethodOwnerStruct);
+                    var operandType = GetExpressionType(u.Right, symbols, currentMethodOwnerStruct, currentNamespace);
                     if (!operandType.EndsWith("*")) throw new InvalidOperationException($"Cannot dereference non-pointer type '{operandType}'.");
                     return operandType.Substring(0, operandType.Length - 1);
                 }
 
             case CallExpressionNode call:
                 {
-                    string funcName;
-                    string? ownerName = null;
+                    FunctionDeclarationNode? func = null;
+
                     if (call.Callee is VariableExpressionNode v)
                     {
-                        funcName = v.Identifier.Value;
+                        string funcName = v.Identifier.Value;
+                        func = _program.Functions.FirstOrDefault(f => f.Name == funcName && f.OwnerStructName == null && f.Namespace == currentNamespace) ??
+                               _program.Functions.FirstOrDefault(f => f.Name == funcName && f.OwnerStructName == null && f.Namespace == null);
+                    }
+                    else if (call.Callee is QualifiedAccessExpressionNode q)
+                    {
+                        string funcName = q.Member.Value;
+                        string nsName = q.Namespace.Value;
+                        func = _program.Functions.FirstOrDefault(f => f.Name == funcName && f.Namespace == nsName && f.OwnerStructName == null);
                     }
                     else if (call.Callee is MemberAccessExpressionNode m)
                     {
-                        funcName = m.Member.Value;
-                        ownerName = GetExpressionType(m.Left, symbols, currentMethodOwnerStruct).TrimEnd('*');
+                        string funcName = m.Member.Value;
+                        var leftType = GetExpressionType(m.Left, symbols, currentMethodOwnerStruct, currentNamespace).TrimEnd('*');
+                        var (structDef, _) = GetStructTypeFromFullName(leftType);
+                        func = _program.Functions.FirstOrDefault(f => f.Name == funcName && f.OwnerStructName == structDef.Name && f.Namespace == structDef.Namespace);
                     }
-                    else throw new InvalidOperationException("Cannot determine return type of complex call expression.");
 
-                    var func = _program.Functions.FirstOrDefault(f => f.Name == funcName && f.OwnerStructName == ownerName);
-                    if (func == null) throw new InvalidOperationException($"Function '{funcName}' not found.");
+                    if (func == null) throw new InvalidOperationException("Cannot determine return type of unresolved call expression.");
 
                     return GetTypeName(func.ReturnType, func.ReturnPointerLevel);
                 }
+
+            case QualifiedAccessExpressionNode:
+                throw new InvalidOperationException("Qualified access can only be used as part of a call.");
 
             case BinaryExpressionNode: return "int"; // Simple for now
 

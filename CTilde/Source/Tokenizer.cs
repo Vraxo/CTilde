@@ -30,7 +30,8 @@ public enum TokenType
     GreaterThan,
     Ampersand,
     Arrow,
-    Colon
+    Colon,
+    DoubleColon
 }
 
 public record Token(TokenType Type, string Value);
@@ -48,7 +49,8 @@ public class Tokenizer
         "struct",
         "char",
         "public",
-        "private"
+        "private",
+        "namespace"
     ];
 
     public static List<Token> Tokenize(string input)
@@ -93,7 +95,10 @@ public class Tokenizer
             {
                 case '#': tokens.Add(new(TokenType.Hash, "#")); i++; continue;
                 case '.': tokens.Add(new(TokenType.Dot, ".")); i++; continue;
-                case ':': tokens.Add(new(TokenType.Colon, ":")); i++; continue;
+                case ':':
+                    if (i + 1 < input.Length && input[i + 1] == ':') { tokens.Add(new(TokenType.DoubleColon, "::")); i += 2; }
+                    else { tokens.Add(new(TokenType.Colon, ":")); i++; }
+                    continue;
                 case '(': tokens.Add(new(TokenType.LeftParen, "(")); i++; continue;
                 case ')': tokens.Add(new(TokenType.RightParen, ")")); i++; continue;
                 case '{': tokens.Add(new(TokenType.LeftBrace, "{")); i++; continue;

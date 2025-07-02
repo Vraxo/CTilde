@@ -11,6 +11,8 @@ public class StatementGenerator
     private ProgramNode Program => _context.Program;
     private SymbolTable CurrentSymbols => _context.CurrentSymbols;
     private ExpressionGenerator ExpressionGenerator => _context.ExpressionGenerator;
+    private string? CurrentNamespace => _context.CurrentNamespace;
+    private List<string> ActiveUsings => _context.ActiveUsings;
 
     public StatementGenerator(CodeGenerator context)
     {
@@ -30,13 +32,15 @@ public class StatementGenerator
                 {
                     if (decl.Initializer is InitializerListExpressionNode initList)
                     {
-                        string typeName = TypeManager.GetTypeName(decl.Type, decl.PointerLevel);
-                        if (!TypeManager.IsStruct(typeName))
-                            throw new InvalidOperationException($"Initializer list can only be used for struct types, not '{typeName}'.");
+                        string rawTypeName = TypeManager.GetTypeName(decl.Type, decl.PointerLevel);
+                        string resolvedTypeName = TypeManager.ResolveTypeName(rawTypeName, CurrentNamespace, ActiveUsings);
 
-                        var structDef = TypeManager.FindStruct(typeName);
+                        if (!TypeManager.IsStruct(resolvedTypeName))
+                            throw new InvalidOperationException($"Initializer list can only be used for struct types, not '{rawTypeName}'.");
+
+                        var structDef = TypeManager.FindStruct(resolvedTypeName);
                         if (structDef == null)
-                            throw new InvalidOperationException($"Could not find struct definition for initializer list type '{typeName}'.");
+                            throw new InvalidOperationException($"Could not find struct definition for initializer list type '{resolvedTypeName}'.");
 
 
                         if (initList.Values.Count > structDef.Members.Count)

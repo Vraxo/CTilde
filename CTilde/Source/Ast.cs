@@ -14,9 +14,10 @@ public abstract record ExpressionNode : AstNode;
 
 // Program structure
 public record ImportDirectiveNode(string LibraryName) : AstNode;
+public record UsingDirectiveNode(string Namespace) : AstNode;
 public record MemberVariableNode(Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode;
 public record StructDefinitionNode(string Name, string? Namespace, List<MemberVariableNode> Members) : AstNode;
-public record ProgramNode(List<ImportDirectiveNode> Imports, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
+public record ProgramNode(List<ImportDirectiveNode> Imports, List<UsingDirectiveNode> Usings, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
 public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
 public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, string? Namespace) : AstNode;
 

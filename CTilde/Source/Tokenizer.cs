@@ -50,7 +50,8 @@ public class Tokenizer
         "char",
         "public",
         "private",
-        "namespace"
+        "namespace",
+        "using"
     ];
 
     public static List<Token> Tokenize(string input)

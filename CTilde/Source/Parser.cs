@@ -35,6 +35,7 @@ public class Parser
     public ProgramNode Parse()
     {
         var imports = new List<ImportDirectiveNode>();
+        var usings = new List<UsingDirectiveNode>();
         var structs = new List<StructDefinitionNode>();
         var functions = new List<FunctionDeclarationNode>();
 
@@ -43,6 +44,10 @@ public class Parser
             if (Current.Type == TokenType.Hash)
             {
                 imports.Add(ParseImportDirective());
+            }
+            else if (Current.Type == TokenType.Keyword && Current.Value == "using")
+            {
+                usings.Add(ParseUsingDirective());
             }
             else if (Current.Type == TokenType.Keyword && Current.Value == "namespace")
             {
@@ -58,9 +63,17 @@ public class Parser
             }
         }
 
-        var programNode = new ProgramNode(imports, structs, functions);
+        var programNode = new ProgramNode(imports, usings, structs, functions);
         SetParents(programNode);
         return programNode;
+    }
+
+    private UsingDirectiveNode ParseUsingDirective()
+    {
+        Eat(TokenType.Keyword); // using
+        var ns = Eat(TokenType.Identifier);
+        Eat(TokenType.Semicolon);
+        return new UsingDirectiveNode(ns.Value);
     }
 
     private void ParseNamespaceDirective()
@@ -172,15 +185,6 @@ public class Parser
             if (namespaceQualifier != null)
             {
                 typeToken = new Token(typeToken.Type, $"{namespaceQualifier}::{typeToken.Value}");
-            }
-            else if (_currentNamespace != null)
-            {
-                // Automatically qualify unqualified types with current namespace, unless it's a call to a global function
-                var nextToken = Current;
-                if (nextToken.Type != TokenType.LeftParen) // Simple heuristic: if not a call, it's likely a type
-                {
-                    typeToken = new Token(typeToken.Type, $"{_currentNamespace}::{typeToken.Value}");
-                }
             }
         }
 

@@ -10,38 +10,54 @@ public class SymbolTable
 
     public int TotalLocalSize { get; }
 
-    public SymbolTable(FunctionDeclarationNode function, TypeManager typeManager)
+    public SymbolTable(FunctionDeclarationNode function, TypeManager typeManager, IEnumerable<string> usings)
     {
+        var localDeclarations = function.Body is BlockStatementNode bodyBlock
+            ? bodyBlock.Statements.OfType<DeclarationStatementNode>().ToList()
+            : new List<DeclarationStatementNode>();
+
         // Pre-calculate space for all local variables
         TotalLocalSize = 0;
-        if (function.Body is BlockStatementNode bodyBlock)
+        foreach (var d in localDeclarations)
         {
-            TotalLocalSize = bodyBlock.Statements
-                .OfType<DeclarationStatementNode>()
-                .Sum(d => typeManager.GetSizeOfType(typeManager.GetTypeName(d.Type, d.PointerLevel)));
+            var rawTypeName = typeManager.GetTypeName(d.Type, d.PointerLevel);
+            var resolvedTypeName = rawTypeName;
+            if (!rawTypeName.EndsWith("*") && d.Type.Type != TokenType.Keyword)
+            {
+                resolvedTypeName = typeManager.ResolveTypeName(rawTypeName, function.Namespace, usings);
+            }
+            TotalLocalSize += typeManager.GetSizeOfType(resolvedTypeName);
         }
 
         // Map parameter offsets (positive on stack frame)
         int currentParamOffset = 8;
         foreach (var param in function.Parameters)
         {
-            var typeName = typeManager.GetTypeName(param.Type, param.PointerLevel);
-            _symbols[param.Name.Value] = (currentParamOffset, typeName);
+            var rawTypeName = typeManager.GetTypeName(param.Type, param.PointerLevel);
+            var resolvedTypeName = rawTypeName;
+            if (!rawTypeName.EndsWith("*") && param.Type.Type != TokenType.Keyword)
+            {
+                resolvedTypeName = typeManager.ResolveTypeName(rawTypeName, function.Namespace, usings);
+            }
+
+            _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName);
             // Arguments on the stack are at least 4 bytes aligned.
-            currentParamOffset += Math.Max(4, typeManager.GetSizeOfType(typeName));
+            currentParamOffset += Math.Max(4, typeManager.GetSizeOfType(resolvedTypeName));
         }
 
         // Map local variable offsets (negative on stack frame)
         int currentLocalOffset = 0;
-        if (function.Body is BlockStatementNode block)
+        foreach (var stmt in localDeclarations)
         {
-            foreach (var stmt in block.Statements.OfType<DeclarationStatementNode>())
+            var rawTypeName = typeManager.GetTypeName(stmt.Type, stmt.PointerLevel);
+            var resolvedTypeName = rawTypeName;
+            if (!rawTypeName.EndsWith("*") && stmt.Type.Type != TokenType.Keyword)
             {
-                var typeName = typeManager.GetTypeName(stmt.Type, stmt.PointerLevel);
-                int size = typeManager.GetSizeOfType(typeName);
-                currentLocalOffset -= size;
-                _symbols[stmt.Identifier.Value] = (currentLocalOffset, typeName);
+                resolvedTypeName = typeManager.ResolveTypeName(rawTypeName, function.Namespace, usings);
             }
+            int size = typeManager.GetSizeOfType(resolvedTypeName);
+            currentLocalOffset -= size;
+            _symbols[stmt.Identifier.Value] = (currentLocalOffset, resolvedTypeName);
         }
     }
 

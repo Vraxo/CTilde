@@ -20,6 +20,7 @@ public class CodeGenerator
     internal SymbolTable CurrentSymbols { get; set; } = null!;
     internal string? CurrentMethodOwnerStruct { get; set; }
     internal string? CurrentNamespace { get; private set; }
+    internal List<string> ActiveUsings { get; private set; } = new();
 
     public CodeGenerator(ProgramNode program)
     {
@@ -32,6 +33,8 @@ public class CodeGenerator
 
     public string Generate()
     {
+        ActiveUsings = Program.Usings.Select(u => u.Namespace).Distinct().ToList();
+
         FindAllStringLiterals(Program);
         foreach (var f in Program.Functions.Where(f => f.Body == null))
         {
@@ -86,7 +89,7 @@ public class CodeGenerator
     {
         CurrentMethodOwnerStruct = function.OwnerStructName;
         CurrentNamespace = function.Namespace;
-        CurrentSymbols = new SymbolTable(function, TypeManager);
+        CurrentSymbols = new SymbolTable(function, TypeManager, ActiveUsings);
 
         string mangledName;
         // The 'main' function is special and must not be namespace-mangled.

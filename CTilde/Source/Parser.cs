@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 namespace CTilde;
 
@@ -303,15 +304,27 @@ public class Parser
 
     private ExpressionNode ParseMultiplicativeExpression()
     {
-        var left = ParseCallExpression();
+        var left = ParseUnaryExpression();
         while (Current.Type is TokenType.Star or TokenType.Slash)
         {
             var op = Current;
             _position++;
-            var right = ParseCallExpression();
+            var right = ParseUnaryExpression();
             left = new BinaryExpressionNode(left, op, right);
         }
         return left;
+    }
+
+    private ExpressionNode ParseUnaryExpression()
+    {
+        if (Current.Type is TokenType.Minus or TokenType.Plus)
+        {
+            var op = Current;
+            _position++;
+            var right = ParseUnaryExpression();
+            return new UnaryExpressionNode(op, right);
+        }
+        return ParseCallExpression();
     }
 
     private ExpressionNode ParseCallExpression()
@@ -352,6 +365,17 @@ public class Parser
                 return new IntegerLiteralNode(value);
             }
             throw new InvalidOperationException($"Could not parse integer literal: {token.Value}");
+        }
+
+        if (Current.Type == TokenType.HexLiteral)
+        {
+            var token = Eat(TokenType.HexLiteral);
+            var hexString = token.Value.StartsWith("0x") ? token.Value.Substring(2) : token.Value;
+            if (int.TryParse(hexString, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int value))
+            {
+                return new IntegerLiteralNode(value);
+            }
+            throw new InvalidOperationException($"Could not parse hex literal: {token.Value}");
         }
 
         if (Current.Type == TokenType.StringLiteral)

@@ -8,6 +8,7 @@ public enum TokenType
     Keyword,
     Identifier,
     IntegerLiteral,
+    HexLiteral,
     StringLiteral,
     Semicolon,
     LeftParen,
@@ -57,26 +58,22 @@ public class Tokenizer
                 continue;
             }
 
-            // Handle single-line comments
             if (c == '/' && i + 1 < input.Length && input[i + 1] == '/')
             {
-                while (i < input.Length && input[i] != '\n')
-                {
-                    i++;
-                }
+                while (i < input.Length && input[i] != '\n') i++;
                 continue;
             }
 
             if (c == '"')
             {
-                i++; // Skip opening quote
+                i++;
                 var sb = new StringBuilder();
                 while (i < input.Length && input[i] != '"')
                 {
                     char current = input[i];
                     if (current == '\\' && i + 1 < input.Length)
                     {
-                        i++; // consume backslash
+                        i++;
                         switch (input[i])
                         {
                             case 'n': sb.Append('\n'); break;
@@ -127,29 +124,34 @@ public class Tokenizer
                     continue;
             }
 
-            if (char.IsLetter(c) || c == '_')
+            if (c == '0' && i + 1 < input.Length && (input[i + 1] == 'x' || input[i + 1] == 'X'))
             {
                 int start = i;
-                while (i < input.Length && (char.IsLetterOrDigit(input[i]) || input[i] == '_'))
+                i += 2; // Skip '0x'
+                while (i < input.Length && "0123456789abcdefABCDEF".Contains(input[i]))
                 {
                     i++;
                 }
-
-                string value = input.Substring(start, i - start);
-                TokenType type = Keywords.Contains(value) ? TokenType.Keyword : TokenType.Identifier;
-                tokens.Add(new(type, value));
+                tokens.Add(new Token(TokenType.HexLiteral, input.Substring(start, i - start)));
                 continue;
             }
 
             if (char.IsDigit(c))
             {
                 int start = i;
-                while (i < input.Length && char.IsDigit(input[i]))
-                {
-                    i++;
-                }
+                while (i < input.Length && char.IsDigit(input[i])) i++;
                 string value = input.Substring(start, i - start);
                 tokens.Add(new(TokenType.IntegerLiteral, value));
+                continue;
+            }
+
+            if (char.IsLetter(c) || c == '_')
+            {
+                int start = i;
+                while (i < input.Length && (char.IsLetterOrDigit(input[i]) || input[i] == '_')) i++;
+                string value = input.Substring(start, i - start);
+                TokenType type = Keywords.Contains(value) ? TokenType.Keyword : TokenType.Identifier;
+                tokens.Add(new(type, value));
                 continue;
             }
 

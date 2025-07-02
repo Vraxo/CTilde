@@ -88,8 +88,8 @@ public class Generator
             foreach (var import in _program.Imports)
             {
                 // This is a simplification. A real compiler would need to know which DLL a function belongs to.
-                // For now, we try to add it to a user-specified DLL.
-                if (libraries.ContainsKey(import.LibraryName))
+                // For now, we add the function to the first custom DLL we find.
+                if (import.LibraryName != "kernel32.dll" && import.LibraryName != "msvcrt.dll")
                 {
                     libraries[import.LibraryName].Add(funcName);
                     found = true;
@@ -98,9 +98,9 @@ public class Generator
             }
             if (!found && funcName != "printf")
             {
-                // We could default to a common library like msvcrt or user32, or throw an error.
-                // For now, let's assume it's in msvcrt if not specified.
-                libraries["msvcrt.dll"].Add(funcName);
+                // Default to user32 if no other home is found, as it's common for GUI apps.
+                if (!libraries.ContainsKey("user32.dll")) libraries["user32.dll"] = new List<string>();
+                if (!libraries["user32.dll"].Contains(funcName)) libraries["user32.dll"].Add(funcName);
             }
         }
 
@@ -118,7 +118,7 @@ public class Generator
             if (functions.Count > 0)
             {
                 string libAlias = libName.Split('.')[0];
-                var importDefs = functions.Select(f => $"{f},'{f}'");
+                var importDefs = functions.Distinct().Select(f => $"{f},'{f}'");
                 _sb.AppendLine($"    import {libAlias}, {string.Join(", ", importDefs)}");
             }
         }
@@ -352,6 +352,14 @@ public class Generator
                 break;
             case StringLiteralNode str:
                 AppendAsm($"mov eax, {str.Label}");
+                break;
+            case UnaryExpressionNode unaryExpr:
+                GenerateExpression(unaryExpr.Right);
+                if (unaryExpr.Operator.Type == TokenType.Minus)
+                {
+                    AppendAsm("neg eax", "Negate value");
+                }
+                // Unary plus is a no-op.
                 break;
             case VariableExpressionNode varExpr:
                 if (!_variables.TryGetValue(varExpr.Identifier.Value, out var offset))

@@ -28,6 +28,7 @@ public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode
 // Expressions
 public record IntegerLiteralNode(int Value) : ExpressionNode;
 public record StringLiteralNode(string Value, string Label) : ExpressionNode;
+public record UnaryExpressionNode(Token Operator, ExpressionNode Right) : ExpressionNode;
 public record AssignmentExpressionNode(Token Identifier, ExpressionNode Value) : ExpressionNode;
 public record VariableExpressionNode(Token Identifier) : ExpressionNode;
 public record CallExpressionNode(Token Callee, List<ExpressionNode> Arguments) : ExpressionNode;

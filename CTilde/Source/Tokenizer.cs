@@ -24,9 +24,7 @@ public class Tokenizer
     [
         "int",
         "return",
-        "while",
-        "if",
-        "else"
+        "while"
     ];
 
     public static List<Token> Tokenize(string input)

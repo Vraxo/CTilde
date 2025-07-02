@@ -7,6 +7,7 @@ public class Parser
 {
     private readonly List<Token> _tokens;
     private int _position;
+    private int _stringLabelCounter;
 
     public Parser(List<Token> tokens)
     {
@@ -26,15 +27,7 @@ public class Parser
             _position++;
             return currentToken;
         }
-        throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type}");
-    }
-
-    private void EatOptional(TokenType type)
-    {
-        if (Current.Type == type)
-        {
-            _position++;
-        }
+        throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type} ('{currentToken.Value}')");
     }
 
     public ProgramNode Parse()
@@ -42,9 +35,59 @@ public class Parser
         var functions = new List<FunctionDeclarationNode>();
         while (_position < _tokens.Count)
         {
-            functions.Add(ParseFunction());
+            // Stop if we hit padding tokens at the end.
+            if (Current.Type == TokenType.Unknown && Current.Value == string.Empty)
+            {
+                break;
+            }
+
+            // Check if the current token is a valid start of a function.
+            if (Current.Type == TokenType.Keyword && (Current.Value == "int" || Current.Value == "void"))
+            {
+                functions.Add(ParseFunction());
+            }
+            else
+            {
+                throw new InvalidOperationException($"Unexpected token '{Current.Value}' at top level. Only function definitions are allowed.");
+            }
         }
-        return new ProgramNode(functions);
+        var programNode = new ProgramNode(functions);
+        SetParents(programNode);
+        return programNode;
+    }
+
+    private void SetParents(AstNode node)
+    {
+        foreach (var property in node.GetType().GetProperties())
+        {
+            if (property.CanWrite && property.Name == "Parent" && property.PropertyType == typeof(AstNode))
+            {
+                // This property is already the parent link, skip it.
+                continue;
+            }
+
+            if (property.GetValue(node) is AstNode child)
+            {
+                var parentProp = child.GetType().GetProperty("Parent");
+                if (parentProp != null && parentProp.CanWrite)
+                {
+                    parentProp.SetValue(child, node);
+                }
+                SetParents(child);
+            }
+            else if (property.GetValue(node) is IEnumerable<AstNode> children)
+            {
+                foreach (var c in children)
+                {
+                    var parentProp = c.GetType().GetProperty("Parent");
+                    if (parentProp != null && parentProp.CanWrite)
+                    {
+                        parentProp.SetValue(c, node);
+                    }
+                    SetParents(c);
+                }
+            }
+        }
     }
 
     private FunctionDeclarationNode ParseFunction()
@@ -101,7 +144,6 @@ public class Parser
                 case "while":
                     return ParseWhileStatement();
                 case "int":
-                    // Check if it's a declaration or part of a function definition (which shouldn't happen here)
                     if (Peek(1).Type == TokenType.Identifier && Peek(2).Type != TokenType.LeftParen)
                     {
                         return ParseDeclarationStatement();
@@ -299,6 +341,13 @@ public class Parser
                 return new IntegerLiteralNode(value);
             }
             throw new InvalidOperationException($"Could not parse integer literal: {token.Value}");
+        }
+
+        if (Current.Type == TokenType.StringLiteral)
+        {
+            var token = Eat(TokenType.StringLiteral);
+            string label = $"str{_stringLabelCounter++}";
+            return new StringLiteralNode(token.Value, label);
         }
 
         if (Current.Type == TokenType.Identifier)

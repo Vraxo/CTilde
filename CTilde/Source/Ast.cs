@@ -3,7 +3,10 @@
 namespace CTilde;
 
 // Base classes
-public abstract record AstNode;
+public abstract record AstNode
+{
+    public AstNode? Parent { get; set; }
+}
 public abstract record StatementNode : AstNode;
 public abstract record ExpressionNode : AstNode;
 
@@ -23,6 +26,7 @@ public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode
 
 // Expressions
 public record IntegerLiteralNode(int Value) : ExpressionNode;
+public record StringLiteralNode(string Value, string Label) : ExpressionNode;
 public record AssignmentExpressionNode(Token Identifier, ExpressionNode Value) : ExpressionNode;
 public record VariableExpressionNode(Token Identifier) : ExpressionNode;
 public record CallExpressionNode(Token Callee, List<ExpressionNode> Arguments) : ExpressionNode;

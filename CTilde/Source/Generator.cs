@@ -10,6 +10,8 @@ public class Generator
     private readonly ProgramNode _program;
     private readonly StringBuilder _sb = new();
     private int _labelCounter;
+    private readonly Dictionary<string, string> _stringLiterals = new();
+
 
     // Rudimentary symbol table for a function's scope
     private Dictionary<string, int> _variables = new();
@@ -22,13 +24,19 @@ public class Generator
 
     public string Generate()
     {
+        // Pre-pass to find all string literals
+        FindAllStringLiterals(_program);
+
         _sb.AppendLine("format PE console");
         _sb.AppendLine("entry start");
         _sb.AppendLine();
         _sb.AppendLine("include 'win32a.inc'");
         _sb.AppendLine();
         _sb.AppendLine("section '.data' data readable writeable");
-        _sb.AppendLine("    format_int db '%d', 10, 0 ; Format string for printing an integer with a newline");
+        foreach (var (label, value) in _stringLiterals)
+        {
+            _sb.AppendLine($"    {label} db {FormatStringForFasm(value)}");
+        }
         _sb.AppendLine();
         _sb.AppendLine("section '.text' code readable executable");
         _sb.AppendLine();
@@ -54,6 +62,74 @@ public class Generator
 
         return _sb.ToString();
     }
+
+    private string FormatStringForFasm(string value)
+    {
+        var parts = new List<string>();
+        var currentString = new StringBuilder();
+
+        foreach (char c in value)
+        {
+            // Check for non-printable characters or characters that need special handling
+            if (c == '\n' || c == '\t' || c == '\r' || c == '\'' || c == '"')
+            {
+                if (currentString.Length > 0)
+                {
+                    parts.Add($"'{currentString}'");
+                    currentString.Clear();
+                }
+
+                // Add the character code
+                parts.Add(((byte)c).ToString());
+            }
+            else
+            {
+                currentString.Append(c);
+            }
+        }
+
+        if (currentString.Length > 0)
+        {
+            parts.Add($"'{currentString}'");
+        }
+
+        parts.Add("0"); // Null terminator
+
+        return string.Join(", ", parts);
+    }
+
+    private void FindAllStringLiterals(AstNode node)
+    {
+        if (node is StringLiteralNode str)
+        {
+            if (!_stringLiterals.ContainsValue(str.Value))
+            {
+                _stringLiterals.Add(str.Label, str.Value);
+            }
+        }
+
+        foreach (var property in node.GetType().GetProperties())
+        {
+            // FIX: Ignore the Parent property to prevent infinite recursion.
+            if (property.Name == "Parent")
+            {
+                continue;
+            }
+
+            if (property.GetValue(node) is AstNode child)
+            {
+                FindAllStringLiterals(child);
+            }
+            else if (property.GetValue(node) is IEnumerable<AstNode> children)
+            {
+                foreach (var c in children)
+                {
+                    FindAllStringLiterals(c);
+                }
+            }
+        }
+    }
+
 
     private void AppendAsm(string instruction, string? comment = null)
     {
@@ -124,10 +200,14 @@ public class Generator
                 break;
             case ExpressionStatementNode exprStmt:
                 GenerateExpression(exprStmt.Expression);
-                if (exprStmt.Expression is CallExpressionNode)
+                if (exprStmt.Expression is CallExpressionNode call)
                 {
-                    // For expression statements that are calls, the EAX return value is discarded,
-                    // but the stack cleanup must still have happened. No extra ASM needed here.
+                    // Caller cleans up the stack for expression statement calls
+                    int bytesToClean = call.Arguments.Count * 4;
+                    if (bytesToClean > 0)
+                    {
+                        AppendAsm($"add esp, {bytesToClean}", "Clean up stack for call in expr stmt");
+                    }
                 }
                 else
                 {
@@ -225,6 +305,9 @@ public class Generator
             case IntegerLiteralNode literal:
                 AppendAsm($"mov eax, {literal.Value}");
                 break;
+            case StringLiteralNode str:
+                AppendAsm($"mov eax, {str.Label}");
+                break;
             case VariableExpressionNode varExpr:
                 if (!_variables.TryGetValue(varExpr.Identifier.Value, out var offset))
                 {
@@ -262,27 +345,24 @@ public class Generator
             AppendAsm("push eax");
         }
 
-        if (callExpr.Callee.Value == "print")
+        // Check for imported function (like printf) vs user-defined function
+        string callTarget = $"_{callExpr.Callee.Value}";
+        if (callExpr.Callee.Value == "printf")
         {
-            if (callExpr.Arguments.Count != 1)
-                throw new InvalidOperationException("print() intrinsic requires exactly one argument.");
-
-            AppendAsm("push format_int", "Push format string for printf");
-            AppendAsm("call [printf]");
-            // Caller cleans up stack: 1 arg + 1 format string = 8 bytes
-            AppendAsm("add esp, 8", "Clean up stack for printf");
-            AppendAsm("mov eax, 0", "A print expression evaluates to 0");
+            callTarget = "[printf]";
         }
-        else
+
+        AppendAsm($"call {callTarget}");
+
+        // For calls that are part of a larger expression, the caller cleans up the stack.
+        // If the call is a statement itself, stack cleanup is handled in GenerateStatement.
+        if (callExpr.Parent is not ExpressionStatementNode)
         {
-            AppendAsm($"call _{callExpr.Callee.Value}");
-            // Caller cleans up the stack
             if (callExpr.Arguments.Count > 0)
             {
                 int bytesToClean = callExpr.Arguments.Count * 4;
                 AppendAsm($"add esp, {bytesToClean}", $"Clean up {callExpr.Arguments.Count} args from stack");
             }
-            // Return value is in EAX, as per convention.
         }
     }
 

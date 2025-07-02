@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Text;
 
 namespace CTilde;
 
@@ -7,6 +8,7 @@ public enum TokenType
     Keyword,
     Identifier,
     IntegerLiteral,
+    StringLiteral,
     Semicolon,
     LeftParen,
     RightParen,
@@ -61,6 +63,44 @@ public class Tokenizer
                 {
                     i++;
                 }
+                continue;
+            }
+
+            if (c == '"')
+            {
+                i++; // Skip opening quote
+                var sb = new StringBuilder();
+                while (i < input.Length && input[i] != '"')
+                {
+                    char current = input[i];
+                    if (current == '\\' && i + 1 < input.Length)
+                    {
+                        i++; // consume backslash
+                        switch (input[i])
+                        {
+                            case 'n': sb.Append('\n'); break;
+                            case 't': sb.Append('\t'); break;
+                            case '\\': sb.Append('\\'); break;
+                            case '"': sb.Append('"'); break;
+                            default: // Not a recognized escape, treat literally
+                                sb.Append('\\');
+                                sb.Append(input[i]);
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        sb.Append(current);
+                    }
+                    i++;
+                }
+
+                if (i < input.Length)
+                {
+                    i++; // Skip closing quote
+                }
+
+                tokens.Add(new Token(TokenType.StringLiteral, sb.ToString()));
                 continue;
             }
 
@@ -149,7 +189,7 @@ public class Tokenizer
                     i++;
                 }
 
-                string value = input[start..i];
+                string value = input.Substring(start, i - start);
 
                 TokenType type = Keywords.Contains(value)
                     ? TokenType.Keyword
@@ -168,7 +208,7 @@ public class Tokenizer
                     i++;
                 }
 
-                string value = input[start..i];
+                string value = input.Substring(start, i - start);
                 tokens.Add(new(TokenType.IntegerLiteral, value));
                 continue;
             }

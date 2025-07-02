@@ -29,8 +29,7 @@ public enum TokenType
     LessThan,
     GreaterThan,
     Ampersand,
-    Arrow,
-    DoubleColon
+    Arrow
 }
 
 public record Token(TokenType Type, string Value);
@@ -105,10 +104,6 @@ public class Tokenizer
                 case '*': tokens.Add(new(TokenType.Star, "*")); i++; continue;
                 case '/': tokens.Add(new(TokenType.Slash, "/")); i++; continue;
                 case '&': tokens.Add(new(TokenType.Ampersand, "&")); i++; continue;
-                case ':':
-                    if (i + 1 < input.Length && input[i + 1] == ':') { tokens.Add(new(TokenType.DoubleColon, "::")); i += 2; }
-                    else { tokens.Add(new(TokenType.Unknown, c.ToString())); i++; }
-                    continue;
                 case '<': tokens.Add(new(TokenType.LessThan, "<")); i++; continue;
                 case '>': tokens.Add(new(TokenType.GreaterThan, ">")); i++; continue;
                 case '=':

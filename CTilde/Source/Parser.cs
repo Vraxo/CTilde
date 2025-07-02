@@ -43,15 +43,13 @@ public class Parser
             {
                 imports.Add(ParseImportDirective());
             }
-            // `struct Identifier {` is a struct definition
-            else if (Current.Type == TokenType.Keyword && Current.Value == "struct" && Peek(2).Type == TokenType.LeftBrace)
+            else if (Current.Type == TokenType.Keyword && Current.Value == "struct")
             {
-                structs.Add(ParseStructDefinition());
+                structs.Add(ParseStructDefinition(functions));
             }
-            // Otherwise, assume it's a function or method declaration
             else
             {
-                functions.Add(ParseFunction());
+                functions.Add(ParseGlobalFunction());
             }
         }
 
@@ -69,24 +67,35 @@ public class Parser
         return new ImportDirectiveNode(libNameToken.Value);
     }
 
-    private StructDefinitionNode ParseStructDefinition()
+    private StructDefinitionNode ParseStructDefinition(List<FunctionDeclarationNode> programFunctions)
     {
         Eat(TokenType.Keyword); // struct
-        var name = Eat(TokenType.Identifier);
+        var structName = Eat(TokenType.Identifier);
         Eat(TokenType.LeftBrace);
 
         var members = new List<ParameterNode>();
         while (Current.Type != TokenType.RightBrace)
         {
-            var (memberType, pointerLevel) = ParseType();
-            var memberName = Eat(TokenType.Identifier);
-            members.Add(new ParameterNode(memberType, pointerLevel, memberName));
-            Eat(TokenType.Semicolon);
+            var (type, pointerLevel) = ParseType();
+            var name = Eat(TokenType.Identifier);
+
+            if (Current.Type == TokenType.LeftParen)
+            {
+                // This is a method definition.
+                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value);
+                programFunctions.Add(methodNode);
+            }
+            else
+            {
+                // This is a member variable.
+                members.Add(new ParameterNode(type, pointerLevel, name));
+                Eat(TokenType.Semicolon);
+            }
         }
 
         Eat(TokenType.RightBrace);
         Eat(TokenType.Semicolon);
-        return new StructDefinitionNode(name.Value, members);
+        return new StructDefinitionNode(structName.Value, members);
     }
 
     private void SetParents(AstNode node)
@@ -136,56 +145,48 @@ public class Parser
         return (typeToken, pointerLevel);
     }
 
-    private FunctionDeclarationNode ParseFunction()
+    private FunctionDeclarationNode ParseGlobalFunction()
     {
         var (returnType, returnPointerLevel) = ParseType();
-        var id1 = Eat(TokenType.Identifier);
+        var identifier = Eat(TokenType.Identifier);
+        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null);
+    }
 
-        string functionName;
-        string? ownerStructName = null;
-
-        if (Current.Type == TokenType.DoubleColon) // Method syntax: void MyStruct::MyMethod()
-        {
-            ownerStructName = id1.Value;
-            Eat(TokenType.DoubleColon);
-            var methodName = Eat(TokenType.Identifier);
-            functionName = methodName.Value;
-        }
-        else // Regular function syntax: void my_func()
-        {
-            functionName = id1.Value;
-        }
-
+    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName)
+    {
         Eat(TokenType.LeftParen);
 
         var parameters = new List<ParameterNode>();
-        if (ownerStructName != null)
-        {
-            var thisParam = new ParameterNode(new Token(TokenType.Identifier, ownerStructName), 1, new Token(TokenType.Identifier, "this"));
-            parameters.Add(thisParam);
-        }
-
         if (Current.Type != TokenType.RightParen)
         {
             do
             {
-                if (parameters.Count > (ownerStructName != null ? 1 : 0))
-                {
-                    Eat(TokenType.Comma);
-                }
                 var (paramType, paramPointerLevel) = ParseType();
                 var paramName = Eat(TokenType.Identifier);
                 parameters.Add(new ParameterNode(paramType, paramPointerLevel, paramName));
-            } while (Current.Type == TokenType.Comma);
+            } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
         }
 
         Eat(TokenType.RightParen);
 
-        StatementNode? body = null;
-        if (Current.Type == TokenType.LeftBrace) body = ParseBlockStatement();
-        else Eat(TokenType.Semicolon);
+        // If this is a method, prepend the implicit 'this' pointer to the parameter list.
+        if (ownerStructName != null)
+        {
+            var thisParam = new ParameterNode(new Token(TokenType.Identifier, ownerStructName), 1, new Token(TokenType.Identifier, "this"));
+            parameters.Insert(0, thisParam);
+        }
 
-        return new FunctionDeclarationNode(returnType, returnPointerLevel, functionName, parameters, body, ownerStructName);
+        StatementNode? body = null;
+        if (Current.Type == TokenType.LeftBrace)
+        {
+            body = ParseBlockStatement();
+        }
+        else
+        {
+            Eat(TokenType.Semicolon); // For function prototypes
+        }
+
+        return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName);
     }
 
     private BlockStatementNode ParseBlockStatement()

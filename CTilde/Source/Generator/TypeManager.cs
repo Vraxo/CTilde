@@ -254,7 +254,7 @@ public class TypeManager
             case IntegerLiteralNode: return "int";
             case StringLiteralNode: return "char*";
             case VariableExpressionNode v:
-                if (symbols.TryGetSymbol(v.Identifier.Value, out _, out var type)) return type;
+                if (symbols.TryGetSymbol(v.Identifier.Value, out _, out _, out _)) return symbols.GetSymbolType(v.Identifier.Value); // Added out _
                 if (currentFunction.OwnerStructName != null)
                 {
                     try

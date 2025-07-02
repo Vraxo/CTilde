@@ -124,17 +124,20 @@ public class SymbolTable
         // Add other statement types if they can contain declarations
     }
 
-    public bool TryGetSymbol(string name, out int offset, out string type)
+    // Updated TryGetSymbol to include isConst
+    public bool TryGetSymbol(string name, out int offset, out string type, out bool isConst)
     {
         if (_symbols.TryGetValue(name, out var symbol))
         {
             offset = symbol.Offset;
             type = symbol.Type;
+            isConst = symbol.IsConst;
             return true;
         }
 
         offset = 0;
         type = string.Empty;
+        isConst = false;
         return false;
     }
 
@@ -147,14 +150,13 @@ public class SymbolTable
         throw new InvalidOperationException($"Symbol '{name}' not found in current scope.");
     }
 
+    // This method is now less critical as TryGetSymbol is updated, but kept for clarity
     public bool IsSymbolConst(string name)
     {
-        // For const check, if symbol isn't found, it means it's not a local/param,
-        // so it cannot be a const local/param. Return false, let other checks handle.
         if (_symbols.TryGetValue(name, out var symbol))
         {
             return symbol.IsConst;
         }
-        return false; // Not a local/parameter, so not a const local/parameter.
+        return false;
     }
 }

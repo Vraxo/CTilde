@@ -46,7 +46,7 @@ public class StatementGenerator
                         if (initList.Values.Count > structDef.Members.Count)
                             throw new InvalidOperationException($"Too many values in initializer list for struct '{structDef.Name}'.");
 
-                        _context.CurrentSymbols.TryGetSymbol(decl.Identifier.Value, out var structBaseOffset, out _);
+                        _context.CurrentSymbols.TryGetSymbol(decl.Identifier.Value, out var structBaseOffset, out _, out _); // Added out _
                         int currentMemberOffset = 0;
 
                         for (int j = 0; j < initList.Values.Count; j++)
@@ -86,7 +86,7 @@ public class StatementGenerator
                         var varType = _context.CurrentSymbols.GetSymbolType(variableName); // Get FQN type from symbol table
 
                         ExpressionGenerator.GenerateExpression(decl.Initializer); // Value to assign is in EAX
-                        _context.CurrentSymbols.TryGetSymbol(variableName, out var offset, out _);
+                        _context.CurrentSymbols.TryGetSymbol(variableName, out var offset, out _, out _); // Added out _
 
                         if (TypeManager.GetSizeOfType(varType, CurrentCompilationUnit) == 1)
                         {

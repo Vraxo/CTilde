@@ -26,7 +26,7 @@ public class ExpressionGenerator
         {
             case VariableExpressionNode varExpr:
                 {
-                    if (CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out var offset, out _))
+                    if (CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out var offset, out _, out _)) // Added out _
                     {
                         string sign = offset > 0 ? "+" : "";
                         Builder.AppendInstruction($"lea eax, [ebp {sign} {offset}]", $"Get address of var/param {varExpr.Identifier.Value}");
@@ -37,7 +37,7 @@ public class ExpressionGenerator
                         {
                             var type = TypeManager.GetStructTypeFromUnqualifiedName(CurrentFunction.OwnerStructName, CurrentFunction.Namespace);
                             var (memberOffset, _) = TypeManager.GetMemberInfo(type.FullName, varExpr.Identifier.Value, CurrentCompilationUnit);
-                            CurrentSymbols.TryGetSymbol("this", out var thisOffset, out _);
+                            CurrentSymbols.TryGetSymbol("this", out var thisOffset, out _, out _); // Added out _
                             Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
                             if (memberOffset > 0)
                             {
@@ -69,7 +69,7 @@ public class ExpressionGenerator
 
                     if (memberVar.AccessLevel == AccessSpecifier.Private && callerStructName != baseStructType)
                     {
-                        throw new InvalidOperationException($"Cannot access private member '{baseStructType}::{memberAccess.Member.Value}' from context '{callerStructName ?? "global"}'.");
+                        throw new InvalidOperationException($"Cannot access private member '{baseStructType}::{memberVar.Name.Value}' from context '{callerStructName ?? "global"}'.");
                     }
 
                     if (memberAccess.Operator.Type == TokenType.Dot)
@@ -102,7 +102,7 @@ public class ExpressionGenerator
             case IntegerLiteralNode literal: Builder.AppendInstruction($"mov eax, {literal.Value}"); break;
             case StringLiteralNode str: Builder.AppendInstruction($"mov eax, {str.Label}"); break;
             case VariableExpressionNode varExpr:
-                CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out _);
+                CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out _, out _); // Added out _
                 if (offset > 0) // It's a parameter or local variable
                 {
                     var exprType = CurrentSymbols.GetSymbolType(varExpr.Identifier.Value); // Already resolved FQN from SymbolTable
@@ -146,22 +146,36 @@ public class ExpressionGenerator
                 break;
             case AssignmentExpressionNode assign:
                 {
+                    bool isConstAssignment = false;
+                    string? targetNameForError = null;
+
                     if (assign.Left is VariableExpressionNode varTarget)
                     {
-                        if (CurrentSymbols.IsSymbolConst(varTarget.Identifier.Value))
+                        targetNameForError = varTarget.Identifier.Value;
+                        // Check if it's a local variable or parameter
+                        if (CurrentSymbols.TryGetSymbol(varTarget.Identifier.Value, out _, out _, out bool isLocalConst))
                         {
-                            throw new InvalidOperationException($"Cannot assign to constant variable '{varTarget.Identifier.Value}'.");
+                            isConstAssignment = isLocalConst;
+                        }
+                        else if (CurrentFunction.OwnerStructName != null)
+                        {
+                            // If not a local/param, and inside a method, assume it's an implicit 'this->member'
+                            string ownerStructFQN = TypeManager.GetStructTypeFromUnqualifiedName(CurrentFunction.OwnerStructName, CurrentFunction.Namespace).FullName;
+                            isConstAssignment = TypeManager.IsMemberConst(ownerStructFQN, varTarget.Identifier.Value);
                         }
                     }
                     else if (assign.Left is MemberAccessExpressionNode memberTarget)
                     {
+                        targetNameForError = memberTarget.Member.Value;
+                        // It's an explicit member access (e.g., 'obj.member = ...')
                         var ownerType = TypeManager.GetExpressionType(memberTarget.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
-                        string ownerStructName = ownerType.TrimEnd('*');
+                        string ownerStructFQN = ownerType.TrimEnd('*');
+                        isConstAssignment = TypeManager.IsMemberConst(ownerStructFQN, memberTarget.Member.Value);
+                    }
 
-                        if (TypeManager.IsMemberConst(ownerStructName, memberTarget.Member.Value))
-                        {
-                            throw new InvalidOperationException($"Cannot assign to constant member '{memberTarget.Member.Value}' of struct '{ownerStructName}'.");
-                        }
+                    if (isConstAssignment)
+                    {
+                        throw new InvalidOperationException($"Cannot assign to constant target '{targetNameForError ?? assign.Left.ToString()}'.");
                     }
 
                     var lValueType = TypeManager.GetExpressionType(assign.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);

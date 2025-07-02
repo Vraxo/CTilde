@@ -48,7 +48,7 @@ public class Parser
             {
                 structs.Add(ParseStructDefinition());
             }
-            // Otherwise, assume it's a function declaration or a global variable (not supported)
+            // Otherwise, assume it's a function or method declaration
             else
             {
                 functions.Add(ParseFunction());
@@ -122,7 +122,7 @@ public class Parser
         }
         else
         {
-            // A type is a keyword (int, char) or an identifier (struct name)
+            // A type is a keyword (int, void, char) or an identifier (another struct name)
             typeToken = Current;
             _position++;
         }
@@ -139,18 +139,44 @@ public class Parser
     private FunctionDeclarationNode ParseFunction()
     {
         var (returnType, returnPointerLevel) = ParseType();
-        var identifier = Eat(TokenType.Identifier);
+        var id1 = Eat(TokenType.Identifier);
+
+        string functionName;
+        string? ownerStructName = null;
+
+        if (Current.Type == TokenType.DoubleColon) // Method syntax: void MyStruct::MyMethod()
+        {
+            ownerStructName = id1.Value;
+            Eat(TokenType.DoubleColon);
+            var methodName = Eat(TokenType.Identifier);
+            functionName = methodName.Value;
+        }
+        else // Regular function syntax: void my_func()
+        {
+            functionName = id1.Value;
+        }
+
         Eat(TokenType.LeftParen);
 
         var parameters = new List<ParameterNode>();
+        if (ownerStructName != null)
+        {
+            var thisParam = new ParameterNode(new Token(TokenType.Identifier, ownerStructName), 1, new Token(TokenType.Identifier, "this"));
+            parameters.Add(thisParam);
+        }
+
         if (Current.Type != TokenType.RightParen)
         {
             do
             {
+                if (parameters.Count > (ownerStructName != null ? 1 : 0))
+                {
+                    Eat(TokenType.Comma);
+                }
                 var (paramType, paramPointerLevel) = ParseType();
                 var paramName = Eat(TokenType.Identifier);
                 parameters.Add(new ParameterNode(paramType, paramPointerLevel, paramName));
-            } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+            } while (Current.Type == TokenType.Comma);
         }
 
         Eat(TokenType.RightParen);
@@ -159,7 +185,7 @@ public class Parser
         if (Current.Type == TokenType.LeftBrace) body = ParseBlockStatement();
         else Eat(TokenType.Semicolon);
 
-        return new FunctionDeclarationNode(returnType, returnPointerLevel, identifier.Value, parameters, body);
+        return new FunctionDeclarationNode(returnType, returnPointerLevel, functionName, parameters, body, ownerStructName);
     }
 
     private BlockStatementNode ParseBlockStatement()
@@ -341,28 +367,16 @@ public class Parser
             var op = Current; _position++;
             return new UnaryExpressionNode(op, ParseUnaryExpression());
         }
-        return ParseMemberAccessExpression();
+        return ParsePostfixExpression();
     }
 
-    private ExpressionNode ParseMemberAccessExpression()
-    {
-        var left = ParseCallExpression();
-        while (Current.Type is TokenType.Dot or TokenType.Arrow)
-        {
-            var op = Current;
-            _position++;
-            var member = Eat(TokenType.Identifier);
-            left = new MemberAccessExpressionNode(left, op, member);
-        }
-        return left;
-    }
-
-    private ExpressionNode ParseCallExpression()
+    private ExpressionNode ParsePostfixExpression()
     {
         var expr = ParsePrimaryExpression();
-        if (Current.Type == TokenType.LeftParen)
+
+        while (true)
         {
-            if (expr is VariableExpressionNode varNode)
+            if (Current.Type == TokenType.LeftParen) // Call
             {
                 Eat(TokenType.LeftParen);
                 var arguments = new List<ExpressionNode>();
@@ -372,10 +386,21 @@ public class Parser
                     while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
                 }
                 Eat(TokenType.RightParen);
-                return new CallExpressionNode(varNode.Identifier, arguments);
+                expr = new CallExpressionNode(expr, arguments);
             }
-            throw new InvalidOperationException("Expression is not callable.");
+            else if (Current.Type is TokenType.Dot or TokenType.Arrow) // Member access
+            {
+                var op = Current;
+                _position++;
+                var member = Eat(TokenType.Identifier);
+                expr = new MemberAccessExpressionNode(expr, op, member);
+            }
+            else
+            {
+                break;
+            }
         }
+
         return expr;
     }
 

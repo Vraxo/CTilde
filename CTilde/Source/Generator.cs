@@ -188,7 +188,11 @@ public class Generator
         _variableTypes.Clear();
         _stackOffset = 0;
 
-        _sb.AppendLine($"_{function.Name}:");
+        string mangledName = function.OwnerStructName != null
+            ? $"_{function.OwnerStructName}_{function.Name}"
+            : $"_{function.Name}";
+
+        _sb.AppendLine($"{mangledName}:");
         AppendAsm("push ebp");
         AppendAsm("mov ebp, esp");
         _sb.AppendLine();
@@ -399,10 +403,25 @@ public class Generator
                 }
             case CallExpressionNode call:
                 {
-                    var func = _program.Functions.First(f => f.Name == call.Callee.Value);
-                    var sb = new StringBuilder(func.ReturnType.Value);
-                    for (int i = 0; i < func.ReturnPointerLevel; i++) sb.Append('*');
-                    return sb.ToString();
+                    // This is now more complex. We need to find the function/method declaration.
+                    // This simplified approach might not be robust enough for function pointers later.
+                    if (call.Callee is VariableExpressionNode v)
+                    {
+                        var func = _program.Functions.First(f => f.Name == v.Identifier.Value && f.OwnerStructName == null);
+                        var sb = new StringBuilder(func.ReturnType.Value);
+                        for (int i = 0; i < func.ReturnPointerLevel; i++) sb.Append('*');
+                        return sb.ToString();
+                    }
+                    if (call.Callee is MemberAccessExpressionNode m)
+                    {
+                        var leftType = GetExpressionType(m.Left);
+                        var baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
+                        var func = _program.Functions.First(f => f.Name == m.Member.Value && f.OwnerStructName == baseStructType);
+                        var sb = new StringBuilder(func.ReturnType.Value);
+                        for (int i = 0; i < func.ReturnPointerLevel; i++) sb.Append('*');
+                        return sb.ToString();
+                    }
+                    throw new InvalidOperationException("Cannot determine return type of complex call expression.");
                 }
             case BinaryExpressionNode: return "int"; // Assume all binary ops result in int for now
             default: throw new NotImplementedException($"GetExpressionType not implemented for {expr.GetType().Name}");
@@ -472,6 +491,37 @@ public class Generator
     private void GenerateCallExpression(CallExpressionNode callExpr)
     {
         int totalArgSize = 0;
+        string calleeTarget;
+
+        // Handle 'this' pointer for method calls
+        if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
+        {
+            if (memberAccess.Operator.Type == TokenType.Dot) // obj.method()
+            {
+                GenerateLValueAddress(memberAccess.Left);
+            }
+            else // ptr->method()
+            {
+                GenerateExpression(memberAccess.Left);
+            }
+            AppendAsm("push eax", "Push 'this' pointer");
+            totalArgSize += 4;
+
+            var leftType = GetExpressionType(memberAccess.Left);
+            var baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
+            calleeTarget = $"_{baseStructType}_{memberAccess.Member.Value}";
+        }
+        else if (callExpr.Callee is VariableExpressionNode varNode)
+        {
+            string calleeName = varNode.Identifier.Value;
+            calleeTarget = _externalFunctions.Contains(calleeName) ? $"[{calleeName}]" : $"_{calleeName}";
+        }
+        else
+        {
+            throw new NotSupportedException($"Unsupported callee type for call: {callExpr.Callee.GetType().Name}");
+        }
+
+        // Push explicit arguments
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
             string argType = GetExpressionType(arg);
@@ -494,14 +544,11 @@ public class Generator
             }
         }
 
-        string calleeName = callExpr.Callee.Value;
-        string callTarget = _externalFunctions.Contains(calleeName) ? $"[{calleeName}]" : $"_{calleeName}";
-
-        AppendAsm($"call {callTarget}");
+        AppendAsm($"call {calleeTarget}");
 
         if (totalArgSize > 0)
         {
-            AppendAsm($"add esp, {totalArgSize}", $"Clean up {callExpr.Arguments.Count} args");
+            AppendAsm($"add esp, {totalArgSize}", $"Clean up args");
         }
     }
 

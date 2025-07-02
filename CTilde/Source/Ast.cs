@@ -15,7 +15,7 @@ public record ImportDirectiveNode(string LibraryName) : AstNode;
 public record StructDefinitionNode(string Name, List<ParameterNode> Members) : AstNode;
 public record ProgramNode(List<ImportDirectiveNode> Imports, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
 public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
-public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body) : AstNode;
+public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName) : AstNode;
 
 // Statements
 public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;
@@ -33,6 +33,6 @@ public record StringLiteralNode(string Value, string Label) : ExpressionNode;
 public record UnaryExpressionNode(Token Operator, ExpressionNode Right) : ExpressionNode;
 public record AssignmentExpressionNode(ExpressionNode Left, ExpressionNode Right) : ExpressionNode;
 public record VariableExpressionNode(Token Identifier) : ExpressionNode;
-public record CallExpressionNode(Token Callee, List<ExpressionNode> Arguments) : ExpressionNode;
+public record CallExpressionNode(ExpressionNode Callee, List<ExpressionNode> Arguments) : ExpressionNode;
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;
 public record MemberAccessExpressionNode(ExpressionNode Left, Token Operator, Token Member) : ExpressionNode;

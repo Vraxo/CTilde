@@ -32,7 +32,9 @@ public class Tokenizer
     [
         "int",
         "return",
-        "while"
+        "while",
+        "if",
+        "else"
     ];
 
     public static List<Token> Tokenize(string input)

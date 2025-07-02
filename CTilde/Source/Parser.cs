@@ -61,19 +61,22 @@ public class Parser
 
     private StatementNode ParseStatement()
     {
-        if (Current.Type == TokenType.Keyword && Current.Value == "return")
+        if (Current.Type == TokenType.Keyword)
         {
-            return ParseReturnStatement();
-        }
-
-        if (Current.Type == TokenType.Keyword && Current.Value == "while")
-        {
-            return ParseWhileStatement();
-        }
-
-        if (Current.Type == TokenType.Keyword && Current.Value == "int")
-        {
-            return ParseDeclarationStatement();
+            switch (Current.Value)
+            {
+                case "return":
+                    return ParseReturnStatement();
+                case "if":
+                    return ParseIfStatement();
+                case "while":
+                    return ParseWhileStatement();
+                case "int":
+                    return ParseDeclarationStatement();
+                default:
+                    // An 'else' on its own, or other future keywords, are syntax errors here.
+                    throw new InvalidOperationException($"Unexpected keyword '{Current.Value}' at the beginning of a statement.");
+            }
         }
 
         if (Current.Type == TokenType.LeftBrace)
@@ -85,6 +88,25 @@ public class Parser
         var expression = ParseExpression();
         Eat(TokenType.Semicolon);
         return new ExpressionStatementNode(expression);
+    }
+
+    private IfStatementNode ParseIfStatement()
+    {
+        Eat(TokenType.Keyword); // "if"
+        Eat(TokenType.LeftParen);
+        var condition = ParseExpression();
+        Eat(TokenType.RightParen);
+
+        var thenBody = ParseStatement();
+        StatementNode? elseBody = null;
+
+        if (Current.Type == TokenType.Keyword && Current.Value == "else")
+        {
+            Eat(TokenType.Keyword); // "else"
+            elseBody = ParseStatement();
+        }
+
+        return new IfStatementNode(condition, thenBody, elseBody);
     }
 
     private StatementNode ParseDeclarationStatement()

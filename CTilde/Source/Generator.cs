@@ -95,6 +95,9 @@ public class Generator
             case WhileStatementNode whileStmt:
                 GenerateWhile(whileStmt);
                 break;
+            case IfStatementNode ifStmt:
+                GenerateIf(ifStmt);
+                break;
             case DeclarationStatementNode decl:
                 GenerateDeclaration(decl);
                 break;
@@ -140,6 +143,36 @@ public class Generator
         GenerateStatement(whileStmt.Body);
 
         AppendAsm($"jmp {startLabel}");
+
+        _sb.AppendLine($"{endLabel}:");
+    }
+
+    private void GenerateIf(IfStatementNode ifStmt)
+    {
+        int labelIndex = _labelCounter++;
+        string elseLabel = $"_if_else_{labelIndex}";
+        string endLabel = $"_if_end_{labelIndex}";
+
+        GenerateExpression(ifStmt.Condition);
+        AppendAsm("cmp eax, 0");
+
+        if (ifStmt.ElseBody != null)
+        {
+            AppendAsm($"je {elseLabel}");
+        }
+        else
+        {
+            AppendAsm($"je {endLabel}");
+        }
+
+        GenerateStatement(ifStmt.ThenBody);
+
+        if (ifStmt.ElseBody != null)
+        {
+            AppendAsm($"jmp {endLabel}");
+            _sb.AppendLine($"{elseLabel}:");
+            GenerateStatement(ifStmt.ElseBody);
+        }
 
         _sb.AppendLine($"{endLabel}:");
     }

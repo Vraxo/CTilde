@@ -174,6 +174,9 @@ public class Generator
                 GenerateExpression(assignExpr.Value);
                 AppendAsm($"mov [ebp + {assignOffset}], eax", $"Assign to variable {assignExpr.Identifier.Value}");
                 break;
+            case BinaryExpressionNode binExpr:
+                GenerateBinaryExpression(binExpr);
+                break;
             case CallExpressionNode callExpr:
                 if (callExpr.Callee.Value != "print")
                 {
@@ -189,6 +192,58 @@ public class Generator
                 break;
             default:
                 throw new NotImplementedException($"Unsupported expression type: {expression.GetType().Name}");
+        }
+    }
+
+    private void GenerateBinaryExpression(BinaryExpressionNode binExpr)
+    {
+        // Generate right operand first, push to stack
+        GenerateExpression(binExpr.Right);
+        AppendAsm("push eax");
+
+        // Generate left operand, result is in EAX
+        GenerateExpression(binExpr.Left);
+
+        // Pop right operand into ECX
+        AppendAsm("pop ecx");
+
+        switch (binExpr.Operator.Type)
+        {
+            case TokenType.Plus:
+                AppendAsm("add eax, ecx", "eax = eax + ecx");
+                break;
+            case TokenType.Minus:
+                AppendAsm("sub eax, ecx", "eax = eax - ecx");
+                break;
+            case TokenType.Star:
+                AppendAsm("imul eax, ecx", "eax = eax * ecx");
+                break;
+            case TokenType.Slash:
+                AppendAsm("cdq", "Sign-extend EAX into EDX:EAX");
+                AppendAsm("idiv ecx", "eax = edx:eax / ecx");
+                break;
+            case TokenType.DoubleEquals:
+                AppendAsm("cmp eax, ecx");
+                AppendAsm("sete al", "Set AL if equal");
+                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
+                break;
+            case TokenType.NotEquals:
+                AppendAsm("cmp eax, ecx");
+                AppendAsm("setne al", "Set AL if not equal");
+                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
+                break;
+            case TokenType.LessThan:
+                AppendAsm("cmp eax, ecx");
+                AppendAsm("setl al", "Set AL if less");
+                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
+                break;
+            case TokenType.GreaterThan:
+                AppendAsm("cmp eax, ecx");
+                AppendAsm("setg al", "Set AL if greater");
+                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
+                break;
+            default:
+                throw new NotImplementedException($"Unsupported binary operator: {binExpr.Operator.Type}");
         }
     }
 }

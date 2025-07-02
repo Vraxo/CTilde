@@ -13,7 +13,15 @@ public enum TokenType
     LeftBrace,
     RightBrace,
     Assignment,
-    Unknown
+    Unknown,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    DoubleEquals,
+    NotEquals,
+    LessThan,
+    GreaterThan
 }
 
 public record Token(TokenType Type, string Value);
@@ -42,6 +50,16 @@ public class Tokenizer
                 continue;
             }
 
+            // Handle single-line comments
+            if (c == '/' && i + 1 < input.Length && input[i + 1] == '/')
+            {
+                while (i < input.Length && input[i] != '\n')
+                {
+                    i++;
+                }
+                continue;
+            }
+
             switch (c)
             {
                 case '(':
@@ -64,9 +82,53 @@ public class Tokenizer
                     tokens.Add(new(TokenType.Semicolon, ";"));
                     i++;
                     continue;
-                case '=':
-                    tokens.Add(new(TokenType.Assignment, "="));
+                case '+':
+                    tokens.Add(new(TokenType.Plus, "+"));
                     i++;
+                    continue;
+                case '-':
+                    tokens.Add(new(TokenType.Minus, "-"));
+                    i++;
+                    continue;
+                case '*':
+                    tokens.Add(new(TokenType.Star, "*"));
+                    i++;
+                    continue;
+                case '/':
+                    tokens.Add(new(TokenType.Slash, "/"));
+                    i++;
+                    continue;
+                case '<':
+                    tokens.Add(new(TokenType.LessThan, "<"));
+                    i++;
+                    continue;
+                case '>':
+                    tokens.Add(new(TokenType.GreaterThan, ">"));
+                    i++;
+                    continue;
+                case '=':
+                    if (i + 1 < input.Length && input[i + 1] == '=')
+                    {
+                        tokens.Add(new(TokenType.DoubleEquals, "=="));
+                        i += 2;
+                    }
+                    else
+                    {
+                        tokens.Add(new(TokenType.Assignment, "="));
+                        i++;
+                    }
+                    continue;
+                case '!':
+                    if (i + 1 < input.Length && input[i + 1] == '=')
+                    {
+                        tokens.Add(new(TokenType.NotEquals, "!="));
+                        i += 2;
+                    }
+                    else
+                    {
+                        tokens.Add(new(TokenType.Unknown, c.ToString()));
+                        i++;
+                    }
                     continue;
             }
 

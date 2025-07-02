@@ -128,16 +128,13 @@ public class Parser
 
     private ExpressionNode ParseAssignmentExpression()
     {
-        // Parse the left-hand side, which could be a function call or variable
-        var left = ParseCallExpression();
+        var left = ParseEqualityExpression();
 
         if (Current.Type == TokenType.Assignment)
         {
             Eat(TokenType.Assignment);
-            // Assignment is right-associative
-            var right = ParseAssignmentExpression();
+            var right = ParseAssignmentExpression(); // Right-associative
 
-            // The target of an assignment must be a variable
             if (left is VariableExpressionNode varNode)
             {
                 return new AssignmentExpressionNode(varNode.Identifier, right);
@@ -146,6 +143,58 @@ public class Parser
             throw new InvalidOperationException("Invalid assignment target.");
         }
 
+        return left;
+    }
+
+    private ExpressionNode ParseEqualityExpression()
+    {
+        var left = ParseRelationalExpression();
+        while (Current.Type is TokenType.DoubleEquals or TokenType.NotEquals)
+        {
+            var op = Current;
+            _position++;
+            var right = ParseRelationalExpression();
+            left = new BinaryExpressionNode(left, op, right);
+        }
+        return left;
+    }
+
+    private ExpressionNode ParseRelationalExpression()
+    {
+        var left = ParseAdditiveExpression();
+        while (Current.Type is TokenType.LessThan or TokenType.GreaterThan)
+        {
+            var op = Current;
+            _position++;
+            var right = ParseAdditiveExpression();
+            left = new BinaryExpressionNode(left, op, right);
+        }
+        return left;
+    }
+
+    private ExpressionNode ParseAdditiveExpression()
+    {
+        var left = ParseMultiplicativeExpression();
+        while (Current.Type is TokenType.Plus or TokenType.Minus)
+        {
+            var op = Current;
+            _position++;
+            var right = ParseMultiplicativeExpression();
+            left = new BinaryExpressionNode(left, op, right);
+        }
+        return left;
+    }
+
+    private ExpressionNode ParseMultiplicativeExpression()
+    {
+        var left = ParseCallExpression();
+        while (Current.Type is TokenType.Star or TokenType.Slash)
+        {
+            var op = Current;
+            _position++;
+            var right = ParseCallExpression();
+            left = new BinaryExpressionNode(left, op, right);
+        }
         return left;
     }
 
@@ -189,6 +238,14 @@ public class Parser
         {
             var token = Eat(TokenType.Identifier);
             return new VariableExpressionNode(token);
+        }
+
+        if (Current.Type == TokenType.LeftParen)
+        {
+            Eat(TokenType.LeftParen);
+            var expr = ParseExpression();
+            Eat(TokenType.RightParen);
+            return expr;
         }
 
         throw new InvalidOperationException($"Unexpected expression token: {Current.Type}");

@@ -38,9 +38,12 @@ public class Generator
         _sb.AppendLine("    call [ExitProcess]");
         _sb.AppendLine();
 
-        GenerateFunction(_program.Function);
+        foreach (var function in _program.Functions)
+        {
+            GenerateFunction(function);
+            _sb.AppendLine();
+        }
 
-        _sb.AppendLine();
         _sb.AppendLine("section '.idata' import data readable");
         _sb.AppendLine();
         _sb.AppendLine("    library kernel32,'kernel32.dll', msvcrt,'msvcrt.dll'");
@@ -211,20 +214,36 @@ public class Generator
                 GenerateBinaryExpression(binExpr);
                 break;
             case CallExpressionNode callExpr:
-                if (callExpr.Callee.Value != "print")
-                {
-                    throw new InvalidOperationException($"Undefined function call: '{callExpr.Callee.Value}'");
-                }
-                // The 'print' intrinsic
-                GenerateExpression(callExpr.Argument);
-                AppendAsm("push eax", "Push argument for printf");
-                AppendAsm("push format_int", "Push format string");
-                AppendAsm("call [printf]");
-                AppendAsm("add esp, 8", "Clean up stack for printf");
-                AppendAsm("mov eax, 0", "A print expression evaluates to 0");
+                GenerateCallExpression(callExpr);
                 break;
             default:
                 throw new NotImplementedException($"Unsupported expression type: {expression.GetType().Name}");
+        }
+    }
+
+    private void GenerateCallExpression(CallExpressionNode callExpr)
+    {
+        if (callExpr.Callee.Value == "print")
+        {
+            if (callExpr.Arguments.Count != 1)
+                throw new InvalidOperationException("print() intrinsic requires exactly one argument.");
+
+            // The 'print' intrinsic
+            GenerateExpression(callExpr.Arguments[0]);
+            AppendAsm("push eax", "Push argument for printf");
+            AppendAsm("push format_int", "Push format string");
+            AppendAsm("call [printf]");
+            AppendAsm("add esp, 8", "Clean up stack for printf");
+            AppendAsm("mov eax, 0", "A print expression evaluates to 0");
+        }
+        else
+        {
+            // User-defined function call
+            if (callExpr.Arguments.Count != 0)
+                throw new InvalidOperationException($"Function '{callExpr.Callee.Value}' does not support arguments yet.");
+
+            AppendAsm($"call {callExpr.Callee.Value}");
+            // Return value is in EAX, as per convention. No stack cleanup for 0 args.
         }
     }
 

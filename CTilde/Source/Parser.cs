@@ -31,16 +31,20 @@ public class Parser
 
     public ProgramNode Parse()
     {
-        var function = ParseFunction();
-        return new ProgramNode(function);
+        var functions = new List<FunctionDeclarationNode>();
+        while (_position < _tokens.Count)
+        {
+            functions.Add(ParseFunction());
+        }
+        return new ProgramNode(functions);
     }
 
     private FunctionDeclarationNode ParseFunction()
     {
         Eat(TokenType.Keyword); // "int"
-        var identifier = Eat(TokenType.Identifier); // "main"
+        var identifier = Eat(TokenType.Identifier); // function name
         Eat(TokenType.LeftParen);
-        Eat(TokenType.RightParen);
+        Eat(TokenType.RightParen); // No parameters yet
 
         var body = ParseBlockStatement();
 
@@ -63,20 +67,14 @@ public class Parser
     {
         if (Current.Type == TokenType.Keyword)
         {
-            switch (Current.Value)
+            return Current.Value switch
             {
-                case "return":
-                    return ParseReturnStatement();
-                case "if":
-                    return ParseIfStatement();
-                case "while":
-                    return ParseWhileStatement();
-                case "int":
-                    return ParseDeclarationStatement();
-                default:
-                    // An 'else' on its own, or other future keywords, are syntax errors here.
-                    throw new InvalidOperationException($"Unexpected keyword '{Current.Value}' at the beginning of a statement.");
-            }
+                "return" => ParseReturnStatement(),
+                "if" => ParseIfStatement(),
+                "while" => ParseWhileStatement(),
+                "int" => ParseDeclarationStatement(),
+                _ => throw new InvalidOperationException($"Unexpected keyword '{Current.Value}' at the beginning of a statement."),// An 'else' on its own, or other future keywords, are syntax errors here.
+            };
         }
 
         if (Current.Type == TokenType.LeftBrace)
@@ -222,21 +220,24 @@ public class Parser
 
     private ExpressionNode ParseCallExpression()
     {
-        // A call expression is a primary expression (like an identifier)
-        // possibly followed by parentheses.
         var expr = ParsePrimaryExpression();
 
         if (Current.Type == TokenType.LeftParen)
         {
-            // If we see a '(', it must be a function call.
-            // The thing being called must have been a variable.
             if (expr is VariableExpressionNode varNode)
             {
                 Eat(TokenType.LeftParen);
-                // For now, only one argument is supported.
-                var argument = ParseExpression();
+
+                var arguments = new List<ExpressionNode>();
+                if (Current.Type != TokenType.RightParen)
+                {
+                    // For now, only one argument is supported.
+                    // A proper implementation would loop on comma.
+                    arguments.Add(ParseExpression());
+                }
+
                 Eat(TokenType.RightParen);
-                return new CallExpressionNode(varNode.Identifier, argument);
+                return new CallExpressionNode(varNode.Identifier, arguments);
             }
             throw new InvalidOperationException("Expression is not callable.");
         }

@@ -1,6 +1,4 @@
-﻿using System.Collections.Generic;
-
-namespace CTilde;
+﻿namespace CTilde;
 
 // Base classes
 public abstract record AstNode;
@@ -8,7 +6,7 @@ public abstract record StatementNode : AstNode;
 public abstract record ExpressionNode : AstNode;
 
 // Program structure
-public record ProgramNode(FunctionDeclarationNode Function) : AstNode;
+public record ProgramNode(List<FunctionDeclarationNode> Functions) : AstNode;
 public record FunctionDeclarationNode(string Name, StatementNode Body) : AstNode;
 
 // Statements
@@ -24,5 +22,5 @@ public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode
 public record IntegerLiteralNode(int Value) : ExpressionNode;
 public record AssignmentExpressionNode(Token Identifier, ExpressionNode Value) : ExpressionNode;
 public record VariableExpressionNode(Token Identifier) : ExpressionNode;
-public record CallExpressionNode(Token Callee, ExpressionNode Argument) : ExpressionNode;
+public record CallExpressionNode(Token Callee, List<ExpressionNode> Arguments) : ExpressionNode;
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;

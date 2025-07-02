@@ -16,6 +16,7 @@ public record FunctionDeclarationNode(string Name, StatementNode Body) : AstNode
 public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;
 public record ReturnStatementNode(ExpressionNode Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
+public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBody, StatementNode? ElseBody) : StatementNode;
 public record DeclarationStatementNode(Token Identifier, ExpressionNode? Initializer) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
 
@@ -126,6 +127,9 @@ public class Generator
             case WhileStatementNode whileStmt:
                 GenerateWhile(whileStmt);
                 break;
+            case IfStatementNode ifStmt:
+                GenerateIf(ifStmt);
+                break;
             case DeclarationStatementNode decl:
                 GenerateDeclaration(decl);
                 break;
@@ -171,6 +175,36 @@ public class Generator
         GenerateStatement(whileStmt.Body);
 
         AppendAsm($"jmp {startLabel}");
+
+        _sb.AppendLine($"{endLabel}:");
+    }
+
+    private void GenerateIf(IfStatementNode ifStmt)
+    {
+        int labelIndex = _labelCounter++;
+        string elseLabel = $"_if_else_{labelIndex}";
+        string endLabel = $"_if_end_{labelIndex}";
+
+        GenerateExpression(ifStmt.Condition);
+        AppendAsm("cmp eax, 0");
+
+        if (ifStmt.ElseBody != null)
+        {
+            AppendAsm($"je {elseLabel}");
+        }
+        else
+        {
+            AppendAsm($"je {endLabel}");
+        }
+
+        GenerateStatement(ifStmt.ThenBody);
+
+        if (ifStmt.ElseBody != null)
+        {
+            AppendAsm($"jmp {endLabel}");
+            _sb.AppendLine($"{elseLabel}:");
+            GenerateStatement(ifStmt.ElseBody);
+        }
 
         _sb.AppendLine($"{endLabel}:");
     }
@@ -344,19 +378,22 @@ public class Parser
 
     private StatementNode ParseStatement()
     {
-        if (Current.Type == TokenType.Keyword && Current.Value == "return")
+        if (Current.Type == TokenType.Keyword)
         {
-            return ParseReturnStatement();
-        }
-
-        if (Current.Type == TokenType.Keyword && Current.Value == "while")
-        {
-            return ParseWhileStatement();
-        }
-
-        if (Current.Type == TokenType.Keyword && Current.Value == "int")
-        {
-            return ParseDeclarationStatement();
+            switch (Current.Value)
+            {
+                case "return":
+                    return ParseReturnStatement();
+                case "if":
+                    return ParseIfStatement();
+                case "while":
+                    return ParseWhileStatement();
+                case "int":
+                    return ParseDeclarationStatement();
+                default:
+                    // An 'else' on its own, or other future keywords, are syntax errors here.
+                    throw new InvalidOperationException($"Unexpected keyword '{Current.Value}' at the beginning of a statement.");
+            }
         }
 
         if (Current.Type == TokenType.LeftBrace)
@@ -368,6 +405,25 @@ public class Parser
         var expression = ParseExpression();
         Eat(TokenType.Semicolon);
         return new ExpressionStatementNode(expression);
+    }
+
+    private IfStatementNode ParseIfStatement()
+    {
+        Eat(TokenType.Keyword); // "if"
+        Eat(TokenType.LeftParen);
+        var condition = ParseExpression();
+        Eat(TokenType.RightParen);
+
+        var thenBody = ParseStatement();
+        StatementNode? elseBody = null;
+
+        if (Current.Type == TokenType.Keyword && Current.Value == "else")
+        {
+            Eat(TokenType.Keyword); // "else"
+            elseBody = ParseStatement();
+        }
+
+        return new IfStatementNode(condition, thenBody, elseBody);
     }
 
     private StatementNode ParseDeclarationStatement()
@@ -601,7 +657,9 @@ public class Tokenizer
     [
         "int",
         "return",
-        "while"
+        "while",
+        "if",
+        "else"
     ];
 
     public static List<Token> Tokenize(string input)
@@ -740,6 +798,46 @@ public class Tokenizer
 
         return tokens;
     }
+}
+</file>
+
+<file path="main.c">
+int main() {
+    // A simple test for if-else statements
+    int a = 5;
+    int b = 10;
+    int result = 0;
+
+    // Test 1: Simple if
+    if (a < b) {
+        print(1); // Should print 1
+    }
+
+    // Test 2: if-else
+    if (a > b) {
+        print(999); // Should not print
+    } else {
+        print(2); // Should print 2
+    }
+
+    // Test 3: Chained conditions modifying a variable
+    if (a == 5) {
+        result = 100;
+    } else {
+        result = 200;
+    }
+
+    if (b != 10) {
+        result = result + 1;
+    } else {
+        result = result + 5;
+    }
+
+    print(result); // Should print 105
+
+    while (1) { }
+
+    return result; // Should return 105
 }
 </file>
 

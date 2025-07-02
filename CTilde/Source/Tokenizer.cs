@@ -134,11 +134,11 @@ public class Tokenizer
                     continue;
             }
 
-            if (char.IsLetter(c))
+            if (char.IsLetter(c) || c == '_')
             {
                 int start = i;
 
-                while (i < input.Length && char.IsLetterOrDigit(input[i]))
+                while (i < input.Length && (char.IsLetterOrDigit(input[i]) || input[i] == '_'))
                 {
                     i++;
                 }

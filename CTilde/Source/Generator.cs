@@ -188,7 +188,7 @@ public class Generator
         {
             _variables[param.Name.Value] = paramOffset;
             _variableTypes[param.Name.Value] = param.Type.Value;
-            paramOffset += 4; // Assume all params passed by value/pointer are 4 bytes
+            paramOffset += GetSizeOfType(param.Type.Value);
         }
 
         GenerateStatement(function.Body!);
@@ -208,14 +208,7 @@ public class Generator
             case WhileStatementNode w: GenerateWhile(w); break;
             case IfStatementNode i: GenerateIf(i); break;
             case DeclarationStatementNode decl: GenerateDeclaration(decl); break;
-            case ExpressionStatementNode exprStmt:
-                GenerateExpression(exprStmt.Expression);
-                if (exprStmt.Expression is CallExpressionNode call)
-                {
-                    int bytesToClean = call.Arguments.Count * 4;
-                    if (bytesToClean > 0) AppendAsm($"add esp, {bytesToClean}", "Clean up stack for call in expr stmt");
-                }
-                break;
+            case ExpressionStatementNode exprStmt: GenerateExpression(exprStmt.Expression); break;
             default: throw new NotImplementedException($"Stmt: {statement.GetType().Name}");
         }
     }
@@ -275,7 +268,6 @@ public class Generator
         AppendAsm("ret");
     }
 
-    // Puts the address of the l-value into EAX
     private void GenerateLValueAddress(ExpressionNode expression)
     {
         switch (expression)
@@ -304,7 +296,7 @@ public class Generator
                 var leftType = GetExpressionType(m.Left);
                 var (_, memberType) = GetMemberInfo(leftType, m.Member.Value);
                 return memberType;
-            default: return "int"; // Simplification
+            default: return "int"; // Simplification for literals etc.
         }
     }
 
@@ -337,10 +329,27 @@ public class Generator
 
     private void GenerateCallExpression(CallExpressionNode callExpr)
     {
+        int totalArgSize = 0;
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
-            GenerateExpression(arg);
-            AppendAsm("push eax");
+            string argType = GetExpressionType(arg);
+            int argSize = GetSizeOfType(argType);
+            totalArgSize += argSize;
+
+            if (argSize <= 4) // Pass by value for int/pointer
+            {
+                GenerateExpression(arg);
+                AppendAsm("push eax");
+            }
+            else // Pass struct by value
+            {
+                GenerateLValueAddress(arg);
+                AppendAsm("mov esi, eax", $"Copy struct for call");
+                for (int offset = argSize - 4; offset >= 0; offset -= 4)
+                {
+                    AppendAsm($"push dword [esi + {offset}]");
+                }
+            }
         }
 
         string calleeName = callExpr.Callee.Value;
@@ -348,9 +357,9 @@ public class Generator
 
         AppendAsm($"call {callTarget}");
 
-        if (callExpr.Parent is not ExpressionStatementNode && callExpr.Arguments.Count > 0)
+        if (totalArgSize > 0)
         {
-            AppendAsm($"add esp, {callExpr.Arguments.Count * 4}", $"Clean up {callExpr.Arguments.Count} args");
+            AppendAsm($"add esp, {totalArgSize}", $"Clean up {callExpr.Arguments.Count} args");
         }
     }
 

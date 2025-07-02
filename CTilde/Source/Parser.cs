@@ -40,7 +40,7 @@ public class Parser
         while (Current.Type != TokenType.Unknown)
         {
             if (Current.Type == TokenType.Hash) imports.Add(ParseImportDirective());
-            else if (Current.Value == "struct") structs.Add(ParseStructDefinition());
+            else if (Current.Value == "struct" && Peek(2).Type == TokenType.LeftBrace) structs.Add(ParseStructDefinition());
             else functions.Add(ParseFunction());
         }
 
@@ -103,7 +103,17 @@ public class Parser
 
     private FunctionDeclarationNode ParseFunction()
     {
-        var returnType = Eat(TokenType.Keyword);
+        Token returnType;
+        if (Current.Value == "struct")
+        {
+            Eat(TokenType.Keyword);
+            returnType = Eat(TokenType.Identifier);
+        }
+        else
+        {
+            returnType = Eat(TokenType.Keyword);
+        }
+
         var identifier = Eat(TokenType.Identifier);
         Eat(TokenType.LeftParen);
 
@@ -112,7 +122,16 @@ public class Parser
         {
             do
             {
-                var paramType = Eat(TokenType.Keyword);
+                Token paramType;
+                if (Current.Value == "struct")
+                {
+                    Eat(TokenType.Keyword);
+                    paramType = Eat(TokenType.Identifier);
+                }
+                else
+                {
+                    paramType = Eat(TokenType.Keyword);
+                }
                 var paramName = Eat(TokenType.Identifier);
                 parameters.Add(new ParameterNode(paramType, paramName));
             } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
@@ -175,8 +194,16 @@ public class Parser
 
     private StatementNode ParseDeclarationStatement()
     {
-        var typeToken = Eat(TokenType.Keyword);
-        if (typeToken.Value == "struct") typeToken = Eat(TokenType.Identifier);
+        Token typeToken;
+        if (Current.Value == "struct")
+        {
+            Eat(TokenType.Keyword);
+            typeToken = Eat(TokenType.Identifier);
+        }
+        else
+        {
+            typeToken = Eat(TokenType.Keyword);
+        }
 
         var identifier = Eat(TokenType.Identifier);
         ExpressionNode? initializer = null;

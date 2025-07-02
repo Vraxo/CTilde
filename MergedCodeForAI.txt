@@ -3,6 +3,8 @@ using System.Collections.Generic;
 
 namespace CTilde;
 
+public enum AccessSpecifier { Public, Private }
+
 // Base classes
 public abstract record AstNode
 {
@@ -13,17 +15,18 @@ public abstract record ExpressionNode : AstNode;
 
 // Program structure
 public record ImportDirectiveNode(string LibraryName) : AstNode;
-public record StructDefinitionNode(string Name, List<ParameterNode> Members) : AstNode;
+public record MemberVariableNode(Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode;
+public record StructDefinitionNode(string Name, List<MemberVariableNode> Members) : AstNode;
 public record ProgramNode(List<ImportDirectiveNode> Imports, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
-public record ParameterNode(Token Type, Token Name) : AstNode;
-public record FunctionDeclarationNode(Token ReturnType, string Name, List<ParameterNode> Parameters, StatementNode? Body) : AstNode;
+public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
+public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel) : AstNode;
 
 // Statements
 public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;
 public record ReturnStatementNode(ExpressionNode? Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBody, StatementNode? ElseBody) : StatementNode;
-public record DeclarationStatementNode(Token Type, Token Identifier, ExpressionNode? Initializer) : StatementNode;
+public record DeclarationStatementNode(Token Type, int PointerLevel, Token Identifier, ExpressionNode? Initializer) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
 
 
@@ -34,9 +37,9 @@ public record StringLiteralNode(string Value, string Label) : ExpressionNode;
 public record UnaryExpressionNode(Token Operator, ExpressionNode Right) : ExpressionNode;
 public record AssignmentExpressionNode(ExpressionNode Left, ExpressionNode Right) : ExpressionNode;
 public record VariableExpressionNode(Token Identifier) : ExpressionNode;
-public record CallExpressionNode(Token Callee, List<ExpressionNode> Arguments) : ExpressionNode;
+public record CallExpressionNode(ExpressionNode Callee, List<ExpressionNode> Arguments) : ExpressionNode;
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;
-public record MemberAccessExpressionNode(ExpressionNode Left, Token Member) : ExpressionNode;
+public record MemberAccessExpressionNode(ExpressionNode Left, Token Operator, Token Member) : ExpressionNode;
 </file>
 
 <file path="Generator.cs">
@@ -58,8 +61,9 @@ public class Generator
     private readonly Dictionary<string, StructDefinitionNode> _structDefinitions = new();
 
     private Dictionary<string, int> _variables = new(); // name -> stack offset
-    private Dictionary<string, string> _variableTypes = new(); // name -> type name
+    private Dictionary<string, string> _variableTypes = new(); // name -> type name (e.g. "int", "Color*")
     private int _stackOffset;
+    private string? _currentMethodOwnerStruct;
 
     public Generator(ProgramNode program)
     {
@@ -72,7 +76,7 @@ public class Generator
         foreach (var s in _program.Structs) _structDefinitions[s.Name] = s;
         foreach (var f in _program.Functions.Where(f => f.Body == null)) _externalFunctions.Add(f.Name);
 
-        _sb.AppendLine("format PE console");
+        _sb.AppendLine("format PE GUI 4.0");
         _sb.AppendLine("entry start");
         _sb.AppendLine();
         _sb.AppendLine("include 'win32a.inc'");
@@ -186,11 +190,17 @@ public class Generator
 
     private int GetSizeOfType(string typeName)
     {
+        if (typeName.EndsWith("*")) return 4;
         if (typeName == "int") return 4;
         if (typeName == "char") return 1;
         if (_structDefinitions.TryGetValue(typeName, out var structDef))
         {
-            return structDef.Members.Sum(m => GetSizeOfType(m.Type.Value));
+            return structDef.Members.Sum(m =>
+            {
+                var memberType = new StringBuilder(m.Type.Value);
+                for (int i = 0; i < m.PointerLevel; i++) memberType.Append('*');
+                return GetSizeOfType(memberType.ToString());
+            });
         }
         throw new InvalidOperationException($"Unknown type '{typeName}'");
     }
@@ -204,15 +214,34 @@ public class Generator
         foreach (var member in structDef.Members)
         {
             if (member.Name.Value == memberName)
-                return (offset, member.Type.Value);
-            offset += GetSizeOfType(member.Type.Value);
+            {
+                var sb = new StringBuilder(member.Type.Value);
+                for (int i = 0; i < member.PointerLevel; i++) sb.Append('*');
+                return (offset, sb.ToString());
+            }
+
+            var memberType = new StringBuilder(member.Type.Value);
+            for (int i = 0; i < member.PointerLevel; i++) memberType.Append('*');
+
+            offset += GetSizeOfType(memberType.ToString());
         }
         throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
     }
 
-    private void AppendAsm(string instruction, string? comment = null)
+    private void AppendAsm(string? instruction, string? comment = null)
     {
-        _sb.AppendLine($"    {instruction}".PadRight(35) + (comment == null ? "" : $"; {comment}"));
+        var line = instruction == null ? "" : $"    {instruction}";
+        _sb.AppendLine(line.PadRight(35) + (comment == null ? "" : $"; {comment}"));
+    }
+
+    private void GenerateFunctionEpilogue()
+    {
+        AppendAsm("pop edi");
+        AppendAsm("pop esi");
+        AppendAsm("pop ebx");
+        AppendAsm("mov esp, ebp");
+        AppendAsm("pop ebp");
+        AppendAsm("ret");
     }
 
     private void GenerateFunction(FunctionDeclarationNode function)
@@ -220,90 +249,79 @@ public class Generator
         _variables.Clear();
         _variableTypes.Clear();
         _stackOffset = 0;
+        _currentMethodOwnerStruct = function.OwnerStructName;
 
-        _sb.AppendLine($"_{function.Name}:");
+        string mangledName = function.OwnerStructName != null
+            ? $"_{function.OwnerStructName}_{function.Name}"
+            : $"_{function.Name}";
+
+        _sb.AppendLine($"{mangledName}:");
         AppendAsm("push ebp");
         AppendAsm("mov ebp, esp");
+        AppendAsm("push ebx", "Preserve non-volatile registers");
+        AppendAsm("push esi");
+        AppendAsm("push edi");
         _sb.AppendLine();
 
-        int paramOffset = 8;
+        // Pre-allocate space for all local variables at once
+        int totalLocalSize = 0;
+        if (function.Body is BlockStatementNode bodyBlock)
+        {
+            totalLocalSize = bodyBlock.Statements
+                .OfType<DeclarationStatementNode>()
+                .Sum(d => GetSizeOfType(GetTypeName(d.Type, d.PointerLevel)));
+        }
+
+        if (totalLocalSize > 0)
+        {
+            AppendAsm($"sub esp, {totalLocalSize}", $"Allocate space for all local variables");
+        }
+
+        // Map parameter offsets
+        int currentParamOffset = 8;
         foreach (var param in function.Parameters)
         {
-            _variables[param.Name.Value] = paramOffset;
-            _variableTypes[param.Name.Value] = param.Type.Value;
-            paramOffset += GetSizeOfType(param.Type.Value);
+            _variables[param.Name.Value] = currentParamOffset;
+            var typeName = GetTypeName(param.Type, param.PointerLevel);
+            _variableTypes[param.Name.Value] = typeName;
+            currentParamOffset += Math.Max(4, GetSizeOfType(typeName));
         }
 
-        GenerateStatement(function.Body!);
+        // Map local variable offsets
+        int currentLocalOffset = 0;
+        if (function.Body is BlockStatementNode block)
+        {
+            foreach (var stmt in block.Statements.OfType<DeclarationStatementNode>())
+            {
+                var typeName = GetTypeName(stmt.Type, stmt.PointerLevel);
+                int size = GetSizeOfType(typeName);
+                currentLocalOffset -= size;
+                _variables[stmt.Identifier.Value] = currentLocalOffset;
+                _variableTypes[stmt.Identifier.Value] = typeName;
+            }
+        }
+
+        if (function.Body != null)
+        {
+            GenerateStatement(function.Body);
+        }
 
         _sb.AppendLine();
-        AppendAsm("mov esp, ebp", "Implicit return cleanup");
-        AppendAsm("pop ebp");
-        AppendAsm("ret");
+        AppendAsm(null, "Implicit return cleanup");
+        GenerateFunctionEpilogue();
     }
 
-    private void GenerateStatement(StatementNode statement)
+    private string GetTypeName(Token type, int pointerLevel)
     {
-        switch (statement)
-        {
-            case ReturnStatementNode ret: GenerateReturn(ret); break;
-            case BlockStatementNode block: foreach (var s in block.Statements) GenerateStatement(s); break;
-            case WhileStatementNode w: GenerateWhile(w); break;
-            case IfStatementNode i: GenerateIf(i); break;
-            case DeclarationStatementNode decl: GenerateDeclaration(decl); break;
-            case ExpressionStatementNode exprStmt: GenerateExpression(exprStmt.Expression); break;
-            default: throw new NotImplementedException($"Stmt: {statement.GetType().Name}");
-        }
+        var sb = new StringBuilder(type.Value);
+        for (int i = 0; i < pointerLevel; i++) sb.Append('*');
+        return sb.ToString();
     }
 
-    private void GenerateDeclaration(DeclarationStatementNode decl)
+    private void GenerateReturn(ReturnStatementNode ret)
     {
-        if (_variables.ContainsKey(decl.Identifier.Value)) throw new InvalidOperationException($"Var '{decl.Identifier.Value}' already defined.");
-
-        int size = GetSizeOfType(decl.Type.Value);
-        _stackOffset -= size;
-        _variables[decl.Identifier.Value] = _stackOffset;
-        _variableTypes[decl.Identifier.Value] = decl.Type.Value;
-
-        AppendAsm($"sub esp, {size}", $"Allocate {size} bytes for var {decl.Identifier.Value}");
-
-        if (decl.Initializer != null)
-        {
-            if (decl.Initializer is InitializerListExpressionNode initList)
-            {
-                if (!_structDefinitions.TryGetValue(decl.Type.Value, out var structDef))
-                    throw new InvalidOperationException($"Cannot use initializer list for non-struct type '{decl.Type.Value}'");
-
-                if (initList.Values.Count != structDef.Members.Count)
-                    throw new InvalidOperationException($"Initializer list has {initList.Values.Count} values, but struct '{structDef.Name}' has {structDef.Members.Count} members.");
-
-                int currentMemberOffset = 0;
-                for (var i = 0; i < initList.Values.Count; i++)
-                {
-                    var valueExpr = initList.Values[i];
-                    var member = structDef.Members[i];
-                    var memberSize = GetSizeOfType(member.Type.Value);
-
-                    GenerateExpression(valueExpr); // Result is in EAX
-
-                    var totalOffset = _stackOffset + currentMemberOffset;
-                    if (memberSize == 1)
-                        AppendAsm($"mov [ebp + {totalOffset}], al", $"Initialize member {member.Name.Value}");
-                    else if (memberSize == 4)
-                        AppendAsm($"mov [ebp + {totalOffset}], eax", $"Initialize member {member.Name.Value}");
-                    else
-                        throw new NotSupportedException($"Struct member initialization for size {memberSize} not supported.");
-
-                    currentMemberOffset += memberSize;
-                }
-            }
-            else
-            {
-                if (size > 4) throw new NotSupportedException("Struct initialization must use an initializer list. Struct copy initialization is not supported.");
-                GenerateExpression(decl.Initializer);
-                AppendAsm($"mov [ebp + {_stackOffset}], eax");
-            }
-        }
+        if (ret.Expression != null) GenerateExpression(ret.Expression);
+        GenerateFunctionEpilogue();
     }
 
     private void GenerateWhile(WhileStatementNode w)
@@ -334,12 +352,56 @@ public class Generator
         _sb.AppendLine($"_if_end_{idx}:");
     }
 
-    private void GenerateReturn(ReturnStatementNode ret)
+    private void GenerateStatement(StatementNode statement)
     {
-        if (ret.Expression != null) GenerateExpression(ret.Expression);
-        AppendAsm("mov esp, ebp");
-        AppendAsm("pop ebp");
-        AppendAsm("ret");
+        switch (statement)
+        {
+            case ReturnStatementNode ret: GenerateReturn(ret); break;
+            case BlockStatementNode block: foreach (var s in block.Statements) GenerateStatement(s); break;
+            case WhileStatementNode w: GenerateWhile(w); break;
+            case IfStatementNode i: GenerateIf(i); break;
+            case DeclarationStatementNode decl:
+                if (decl.Initializer != null)
+                {
+                    if (decl.Initializer is InitializerListExpressionNode initList)
+                    {
+                        string typeName = GetTypeName(decl.Type, decl.PointerLevel);
+                        if (!_structDefinitions.TryGetValue(typeName, out var structDef))
+                            throw new InvalidOperationException($"Initializer list can only be used for struct types, not '{typeName}'.");
+
+                        if (initList.Values.Count > structDef.Members.Count)
+                            throw new InvalidOperationException($"Too many values in initializer list for struct '{structDef.Name}'.");
+
+                        var structBaseOffset = _variables[decl.Identifier.Value];
+                        int currentMemberOffset = 0;
+
+                        for (int i = 0; i < initList.Values.Count; i++)
+                        {
+                            var member = structDef.Members[i];
+                            var valueExpr = initList.Values[i];
+
+                            var memberTypeName = GetTypeName(member.Type, member.PointerLevel);
+                            var memberSize = GetSizeOfType(memberTypeName);
+                            var totalOffset = structBaseOffset + currentMemberOffset;
+
+                            GenerateExpression(valueExpr);
+                            if (memberSize == 1) AppendAsm($"mov byte [ebp + {totalOffset}], al", $"Init member {member.Name.Value}");
+                            else AppendAsm($"mov dword [ebp + {totalOffset}], eax", $"Init member {member.Name.Value}");
+
+                            currentMemberOffset += memberSize;
+                        }
+                    }
+                    else
+                    {
+                        var left = new VariableExpressionNode(decl.Identifier);
+                        var assignment = new AssignmentExpressionNode(left, decl.Initializer);
+                        GenerateExpression(assignment);
+                    }
+                }
+                break;
+            case ExpressionStatementNode exprStmt: GenerateExpression(exprStmt.Expression); break;
+            default: throw new NotImplementedException($"Stmt: {statement.GetType().Name}");
+        }
     }
 
     private void GenerateLValueAddress(ExpressionNode expression)
@@ -347,17 +409,69 @@ public class Generator
         switch (expression)
         {
             case VariableExpressionNode varExpr:
-                if (!_variables.TryGetValue(varExpr.Identifier.Value, out var offset)) throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
-                string sign = offset > 0 ? "+" : "";
-                AppendAsm($"lea eax, [ebp {sign} {offset}]", $"Get address of var {varExpr.Identifier.Value}");
-                break;
+                {
+                    if (_variables.TryGetValue(varExpr.Identifier.Value, out var offset))
+                    {
+                        string sign = offset > 0 ? "+" : "";
+                        AppendAsm($"lea eax, [ebp {sign} {offset}]", $"Get address of var/param {varExpr.Identifier.Value}");
+                    }
+                    else if (_currentMethodOwnerStruct != null)
+                    {
+                        try
+                        {
+                            var (memberOffset, _) = GetMemberInfo(_currentMethodOwnerStruct, varExpr.Identifier.Value);
+                            var thisOffset = _variables["this"];
+                            AppendAsm($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
+                            if (memberOffset > 0)
+                            {
+                                AppendAsm($"add eax, {memberOffset}", $"Offset for implicit this->{varExpr.Identifier.Value}");
+                            }
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
+                        }
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
+                    }
+                    break;
+                }
             case MemberAccessExpressionNode memberAccess:
-                GenerateLValueAddress(memberAccess.Left); // Puts base address of struct in EAX
-                var leftType = GetExpressionType(memberAccess.Left);
-                var (memberOffset, _) = GetMemberInfo(leftType, memberAccess.Member.Value);
-                AppendAsm($"add eax, {memberOffset}", $"Offset for member .{memberAccess.Member.Value}");
+                {
+                    var leftType = GetExpressionType(memberAccess.Left);
+                    string baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
+
+                    var structDef = _structDefinitions[baseStructType];
+                    var memberVar = structDef.Members.FirstOrDefault(m => m.Name.Value == memberAccess.Member.Value);
+                    if (memberVar == null) throw new InvalidOperationException($"Struct '{baseStructType}' has no member '{memberAccess.Member.Value}'");
+
+                    if (memberVar.AccessLevel == AccessSpecifier.Private && _currentMethodOwnerStruct != baseStructType)
+                    {
+                        throw new InvalidOperationException($"Cannot access private member '{baseStructType}::{memberAccess.Member.Value}' from context '{_currentMethodOwnerStruct ?? "global"}'.");
+                    }
+
+                    if (memberAccess.Operator.Type == TokenType.Dot)
+                    {
+                        GenerateLValueAddress(memberAccess.Left);
+                    }
+                    else
+                    {
+                        GenerateExpression(memberAccess.Left);
+                    }
+
+                    var (memberOffset, _) = GetMemberInfo(baseStructType, memberAccess.Member.Value);
+                    if (memberOffset > 0)
+                    {
+                        AppendAsm($"add eax, {memberOffset}", $"Offset for member {memberAccess.Operator.Value}{memberAccess.Member.Value}");
+                    }
+                    break;
+                }
+            case UnaryExpressionNode u when u.Operator.Type == TokenType.Star:
+                GenerateExpression(u.Right);
                 break;
-            default: throw new InvalidOperationException("Expression is not a valid L-value.");
+            default: throw new InvalidOperationException($"Expression '{expression.GetType().Name}' is not a valid L-value.");
         }
     }
 
@@ -365,12 +479,58 @@ public class Generator
     {
         switch (expr)
         {
-            case VariableExpressionNode v: return _variableTypes[v.Identifier.Value];
+            case IntegerLiteralNode: return "int";
+            case StringLiteralNode: return "char*";
+            case VariableExpressionNode v:
+                if (_variableTypes.TryGetValue(v.Identifier.Value, out var type))
+                {
+                    return type;
+                }
+                if (_currentMethodOwnerStruct != null)
+                {
+                    try
+                    {
+                        var (_, memberType) = GetMemberInfo(_currentMethodOwnerStruct, v.Identifier.Value);
+                        return memberType;
+                    }
+                    catch (InvalidOperationException) { }
+                }
+                throw new InvalidOperationException($"Cannot determine type for undefined variable '{v.Identifier.Value}'.");
+            case AssignmentExpressionNode a: return GetExpressionType(a.Left);
             case MemberAccessExpressionNode m:
-                var leftType = GetExpressionType(m.Left);
-                var (_, memberType) = GetMemberInfo(leftType, m.Member.Value);
-                return memberType;
-            default: return "int"; // Simplification for literals etc.
+                {
+                    var leftType = GetExpressionType(m.Left);
+                    string baseStructType = leftType.TrimEnd('*');
+                    var (_, memberType) = GetMemberInfo(baseStructType, m.Member.Value);
+                    return memberType;
+                }
+            case UnaryExpressionNode u when u.Operator.Type == TokenType.Ampersand: return GetExpressionType(u.Right) + "*";
+            case UnaryExpressionNode u when u.Operator.Type == TokenType.Star:
+                {
+                    var operandType = GetExpressionType(u.Right);
+                    if (!operandType.EndsWith("*")) throw new InvalidOperationException($"Cannot dereference non-pointer type '{operandType}'.");
+                    return operandType.Substring(0, operandType.Length - 1);
+                }
+            case CallExpressionNode call:
+                {
+                    string funcName;
+                    string? ownerName = null;
+                    if (call.Callee is VariableExpressionNode v)
+                    {
+                        funcName = v.Identifier.Value;
+                    }
+                    else if (call.Callee is MemberAccessExpressionNode m)
+                    {
+                        funcName = m.Member.Value;
+                        ownerName = GetExpressionType(m.Left).TrimEnd('*');
+                    }
+                    else throw new InvalidOperationException("Cannot determine return type of complex call expression.");
+
+                    var func = _program.Functions.First(f => f.Name == funcName && f.OwnerStructName == ownerName);
+                    return GetTypeName(func.ReturnType, func.ReturnPointerLevel);
+                }
+            case BinaryExpressionNode: return "int";
+            default: throw new NotImplementedException($"GetExpressionType not implemented for {expr.GetType().Name}");
         }
     }
 
@@ -380,37 +540,83 @@ public class Generator
         {
             case IntegerLiteralNode literal: AppendAsm($"mov eax, {literal.Value}"); break;
             case StringLiteralNode str: AppendAsm($"mov eax, {str.Label}"); break;
-            case UnaryExpressionNode u:
-                GenerateExpression(u.Right);
-                if (u.Operator.Type == TokenType.Minus) AppendAsm("neg eax", "Negate value");
-                break;
-            case VariableExpressionNode or MemberAccessExpressionNode:
-                var exprType = GetExpressionType(expression);
-                GenerateLValueAddress(expression);
-                if (GetSizeOfType(exprType) == 1)
+            case VariableExpressionNode varExpr:
+                // If it's a parameter (positive offset), load value directly.
+                if (_variables.TryGetValue(varExpr.Identifier.Value, out int offset) && offset > 0)
                 {
-                    AppendAsm("movzx eax, byte [eax]", "Dereference byte and zero-extend");
+                    var exprType = GetExpressionType(varExpr);
+                    // For structs passed by value, we need the address on the stack, not the value.
+                    if (_structDefinitions.ContainsKey(exprType))
+                    {
+                        AppendAsm($"lea eax, [ebp + {offset}]");
+                    }
+                    else
+                    {
+                        if (GetSizeOfType(exprType) == 1) AppendAsm($"movzx eax, byte [ebp + {offset}]");
+                        else AppendAsm($"mov eax, [ebp + {offset}]");
+                    }
                 }
+                else // It's a local var, an implicit 'this' member, or an l-value that needs dereferencing.
+                {
+                    GenerateLValueAddress(varExpr);
+                    var type = GetExpressionType(varExpr);
+                    if (GetSizeOfType(type) == 1) AppendAsm("movzx eax, byte [eax]");
+                    else AppendAsm("mov eax, [eax]");
+                }
+                break;
+            case UnaryExpressionNode u:
+                if (u.Operator.Type == TokenType.Ampersand) GenerateLValueAddress(u.Right);
                 else
                 {
-                    AppendAsm("mov eax, [eax]", "Dereference address to get value");
+                    GenerateExpression(u.Right);
+                    if (u.Operator.Type == TokenType.Minus) AppendAsm("neg eax");
+                    else if (u.Operator.Type == TokenType.Star)
+                    {
+                        var type = GetExpressionType(u);
+                        if (GetSizeOfType(type) == 1) AppendAsm("movzx eax, byte [eax]");
+                        else AppendAsm("mov eax, [eax]");
+                    }
                 }
+                break;
+            case MemberAccessExpressionNode m:
+                GenerateLValueAddress(m);
+                var memberType = GetExpressionType(m);
+                if (GetSizeOfType(memberType) == 1) AppendAsm("movzx eax, byte [eax]");
+                else AppendAsm("mov eax, [eax]");
                 break;
             case AssignmentExpressionNode assign:
-                var lvalueType = GetExpressionType(assign.Left);
-                GenerateLValueAddress(assign.Left);
-                AppendAsm("push eax");
-                GenerateExpression(assign.Right);
-                AppendAsm("pop ecx");
-                if (GetSizeOfType(lvalueType) == 1)
                 {
-                    AppendAsm("mov [ecx], al");
+                    var lValueType = GetExpressionType(assign.Left);
+                    var isStructAssign = _structDefinitions.ContainsKey(lValueType.TrimEnd('*'));
+
+                    if (isStructAssign)
+                    {
+                        GenerateLValueAddress(assign.Left);
+                        AppendAsm("push eax");
+                        GenerateExpression(assign.Right);
+                        AppendAsm("pop edi");
+                        AppendAsm("mov esi, eax");
+
+                        int size = GetSizeOfType(lValueType);
+                        AppendAsm($"mov ecx, {size / 4}");
+                        AppendAsm("rep movsd");
+                        if (size % 4 > 0)
+                        {
+                            AppendAsm($"mov ecx, {size % 4}");
+                            AppendAsm("rep movsb");
+                        }
+                    }
+                    else
+                    {
+                        GenerateLValueAddress(assign.Left);
+                        AppendAsm("push eax");
+                        GenerateExpression(assign.Right);
+                        AppendAsm("pop ecx");
+                        if (GetSizeOfType(lValueType) == 1) AppendAsm("mov [ecx], al");
+                        else AppendAsm("mov [ecx], eax");
+                    }
+                    break;
                 }
-                else
-                {
-                    AppendAsm("mov [ecx], eax");
-                }
-                break;
             case BinaryExpressionNode binExpr: GenerateBinaryExpression(binExpr); break;
             case CallExpressionNode callExpr: GenerateCallExpression(callExpr); break;
             default: throw new NotImplementedException($"Expr: {expression.GetType().Name}");
@@ -420,37 +626,55 @@ public class Generator
     private void GenerateCallExpression(CallExpressionNode callExpr)
     {
         int totalArgSize = 0;
+        string calleeTarget;
+
+        if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
+        {
+            var leftType = GetExpressionType(memberAccess.Left);
+            var baseStructType = leftType.TrimEnd('*');
+            var method = _program.Functions.First(f => f.OwnerStructName == baseStructType && f.Name == memberAccess.Member.Value);
+
+            if (method.AccessLevel == AccessSpecifier.Private && _currentMethodOwnerStruct != baseStructType)
+                throw new InvalidOperationException($"Cannot access private method '{baseStructType}::{memberAccess.Member.Value}'.");
+
+            GenerateLValueAddress(memberAccess.Left);
+            AppendAsm("push eax", "Push 'this' pointer");
+            totalArgSize += 4;
+            calleeTarget = $"_{baseStructType}_{memberAccess.Member.Value}";
+        }
+        else if (callExpr.Callee is VariableExpressionNode varNode)
+        {
+            string calleeName = varNode.Identifier.Value;
+            calleeTarget = _externalFunctions.Contains(calleeName) ? $"[{calleeName}]" : $"_{calleeName}";
+        }
+        else throw new NotSupportedException($"Unsupported callee type for call: {callExpr.Callee.GetType().Name}");
+
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
-            string argType = GetExpressionType(arg);
-            int argSize = GetSizeOfType(argType);
-            totalArgSize += argSize;
+            var argType = GetExpressionType(arg);
+            var isStruct = _structDefinitions.ContainsKey(argType);
 
-            if (argSize <= 4) // Pass by value for int/pointer
+            if (isStruct)
+            {
+                int argSize = GetSizeOfType(argType);
+                GenerateLValueAddress(arg);
+                for (int offset = argSize - 4; offset >= 0; offset -= 4)
+                {
+                    AppendAsm($"push dword [eax + {offset}]");
+                }
+                totalArgSize += argSize;
+            }
+            else
             {
                 GenerateExpression(arg);
                 AppendAsm("push eax");
-            }
-            else // Pass struct by value
-            {
-                GenerateLValueAddress(arg);
-                AppendAsm("mov esi, eax", $"Copy struct for call");
-                for (int offset = argSize - 4; offset >= 0; offset -= 4)
-                {
-                    AppendAsm($"push dword [esi + {offset}]");
-                }
+                totalArgSize += 4;
             }
         }
 
-        string calleeName = callExpr.Callee.Value;
-        string callTarget = _externalFunctions.Contains(calleeName) ? $"[{calleeName}]" : $"_{calleeName}";
+        AppendAsm($"call {calleeTarget}");
 
-        AppendAsm($"call {callTarget}");
-
-        if (totalArgSize > 0)
-        {
-            AppendAsm($"add esp, {totalArgSize}", $"Clean up {callExpr.Arguments.Count} args");
-        }
+        if (totalArgSize > 0) AppendAsm($"add esp, {totalArgSize}", "Clean up args");
     }
 
     private void GenerateBinaryExpression(BinaryExpressionNode binExpr)
@@ -522,15 +746,13 @@ public class Parser
             {
                 imports.Add(ParseImportDirective());
             }
-            // `struct Identifier {` is a struct definition
             else if (Current.Type == TokenType.Keyword && Current.Value == "struct")
             {
-                structs.Add(ParseStructDefinition());
+                structs.Add(ParseStructDefinition(functions));
             }
-            // Otherwise, assume it's a function declaration
             else
             {
-                functions.Add(ParseFunction());
+                functions.Add(ParseGlobalFunction());
             }
         }
 
@@ -548,26 +770,45 @@ public class Parser
         return new ImportDirectiveNode(libNameToken.Value);
     }
 
-    private StructDefinitionNode ParseStructDefinition()
+    private StructDefinitionNode ParseStructDefinition(List<FunctionDeclarationNode> programFunctions)
     {
         Eat(TokenType.Keyword); // struct
-        var name = Eat(TokenType.Identifier);
+        var structName = Eat(TokenType.Identifier);
         Eat(TokenType.LeftBrace);
 
-        var members = new List<ParameterNode>();
+        var members = new List<MemberVariableNode>();
+        var currentAccess = AccessSpecifier.Private; // Default for struct is private
+
         while (Current.Type != TokenType.RightBrace)
         {
-            // A member type is a keyword (int, char) or an identifier (another struct)
-            var memberType = Current;
-            _position++;
-            var memberName = Eat(TokenType.Identifier);
-            members.Add(new ParameterNode(memberType, memberName));
-            Eat(TokenType.Semicolon);
+            if (Current.Type == TokenType.Keyword && (Current.Value == "public" || Current.Value == "private"))
+            {
+                currentAccess = (Current.Value == "public") ? AccessSpecifier.Public : AccessSpecifier.Private;
+                Eat(TokenType.Keyword);
+                Eat(TokenType.Colon);
+                continue;
+            }
+
+            var (type, pointerLevel) = ParseType();
+            var name = Eat(TokenType.Identifier);
+
+            if (Current.Type == TokenType.LeftParen)
+            {
+                // This is a method definition.
+                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value, currentAccess);
+                programFunctions.Add(methodNode);
+            }
+            else
+            {
+                // This is a member variable.
+                members.Add(new MemberVariableNode(type, pointerLevel, name, currentAccess));
+                Eat(TokenType.Semicolon);
+            }
         }
 
         Eat(TokenType.RightBrace);
         Eat(TokenType.Semicolon);
-        return new StructDefinitionNode(name.Value, members);
+        return new StructDefinitionNode(structName.Value, members);
     }
 
     private void SetParents(AstNode node)
@@ -593,13 +834,40 @@ public class Parser
         }
     }
 
-    private FunctionDeclarationNode ParseFunction()
+    private (Token type, int pointerLevel) ParseType()
     {
-        // A type is a keyword (int, void, char) or an identifier (struct name)
-        var returnType = Current;
-        _position++;
+        Token typeToken;
+        if (Current.Type == TokenType.Keyword && Current.Value == "struct")
+        {
+            Eat(TokenType.Keyword); // struct
+            typeToken = Eat(TokenType.Identifier);
+        }
+        else
+        {
+            // A type is a keyword (int, void, char) or an identifier (another struct name)
+            typeToken = Current;
+            _position++;
+        }
 
+        int pointerLevel = 0;
+        while (Current.Type == TokenType.Star)
+        {
+            Eat(TokenType.Star);
+            pointerLevel++;
+        }
+        return (typeToken, pointerLevel);
+    }
+
+    private FunctionDeclarationNode ParseGlobalFunction()
+    {
+        var (returnType, returnPointerLevel) = ParseType();
         var identifier = Eat(TokenType.Identifier);
+        // Global functions are implicitly public
+        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null, AccessSpecifier.Public);
+    }
+
+    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName, AccessSpecifier accessLevel)
+    {
         Eat(TokenType.LeftParen);
 
         var parameters = new List<ParameterNode>();
@@ -607,20 +875,32 @@ public class Parser
         {
             do
             {
-                var paramType = Current;
-                _position++;
+                var (paramType, paramPointerLevel) = ParseType();
                 var paramName = Eat(TokenType.Identifier);
-                parameters.Add(new ParameterNode(paramType, paramName));
+                parameters.Add(new ParameterNode(paramType, paramPointerLevel, paramName));
             } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
         }
 
         Eat(TokenType.RightParen);
 
-        StatementNode? body = null;
-        if (Current.Type == TokenType.LeftBrace) body = ParseBlockStatement();
-        else Eat(TokenType.Semicolon);
+        // If this is a method, prepend the implicit 'this' pointer to the parameter list.
+        if (ownerStructName != null)
+        {
+            var thisParam = new ParameterNode(new Token(TokenType.Identifier, ownerStructName), 1, new Token(TokenType.Identifier, "this"));
+            parameters.Insert(0, thisParam);
+        }
 
-        return new FunctionDeclarationNode(returnType, identifier.Value, parameters, body);
+        StatementNode? body = null;
+        if (Current.Type == TokenType.LeftBrace)
+        {
+            body = ParseBlockStatement();
+        }
+        else
+        {
+            Eat(TokenType.Semicolon); // For function prototypes
+        }
+
+        return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName, accessLevel);
     }
 
     private BlockStatementNode ParseBlockStatement()
@@ -643,12 +923,13 @@ public class Parser
                 case "while": return ParseWhileStatement();
                 case "int":
                 case "char":
+                case "struct":
                     return ParseDeclarationStatement();
             }
         }
 
         // `TypeName varName;` is a declaration.
-        if (Current.Type == TokenType.Identifier && Peek(1).Type == TokenType.Identifier)
+        if (Current.Type == TokenType.Identifier && (Peek(1).Type == TokenType.Identifier || Peek(1).Type == TokenType.Star))
         {
             return ParseDeclarationStatement();
         }
@@ -678,10 +959,7 @@ public class Parser
 
     private StatementNode ParseDeclarationStatement()
     {
-        // A type is a keyword (int, char) or an identifier (struct name).
-        var typeToken = Current;
-        _position++;
-
+        var (typeToken, pointerLevel) = ParseType();
         var identifier = Eat(TokenType.Identifier);
         ExpressionNode? initializer = null;
         if (Current.Type == TokenType.Assignment)
@@ -697,7 +975,7 @@ public class Parser
             }
         }
         Eat(TokenType.Semicolon);
-        return new DeclarationStatementNode(typeToken, identifier, initializer);
+        return new DeclarationStatementNode(typeToken, pointerLevel, identifier, initializer);
     }
 
     private ExpressionNode ParseInitializerListExpression()
@@ -743,8 +1021,8 @@ public class Parser
         {
             Eat(TokenType.Assignment);
             var right = ParseAssignmentExpression();
-            if (left is VariableExpressionNode or MemberAccessExpressionNode) return new AssignmentExpressionNode(left, right);
-            throw new InvalidOperationException("Invalid assignment target.");
+            if (left is VariableExpressionNode or MemberAccessExpressionNode or UnaryExpressionNode) return new AssignmentExpressionNode(left, right);
+            throw new InvalidOperationException($"Invalid assignment target: {left.GetType().Name}");
         }
         return left;
     }
@@ -799,32 +1077,21 @@ public class Parser
 
     private ExpressionNode ParseUnaryExpression()
     {
-        if (Current.Type is TokenType.Minus or TokenType.Plus)
+        if (Current.Type is TokenType.Minus or TokenType.Plus or TokenType.Star or TokenType.Ampersand)
         {
             var op = Current; _position++;
             return new UnaryExpressionNode(op, ParseUnaryExpression());
         }
-        return ParseMemberAccessExpression();
+        return ParsePostfixExpression();
     }
 
-    private ExpressionNode ParseMemberAccessExpression()
-    {
-        var left = ParseCallExpression();
-        while (Current.Type == TokenType.Dot)
-        {
-            Eat(TokenType.Dot);
-            var member = Eat(TokenType.Identifier);
-            left = new MemberAccessExpressionNode(left, member);
-        }
-        return left;
-    }
-
-    private ExpressionNode ParseCallExpression()
+    private ExpressionNode ParsePostfixExpression()
     {
         var expr = ParsePrimaryExpression();
-        if (Current.Type == TokenType.LeftParen)
+
+        while (true)
         {
-            if (expr is VariableExpressionNode varNode)
+            if (Current.Type == TokenType.LeftParen) // Call
             {
                 Eat(TokenType.LeftParen);
                 var arguments = new List<ExpressionNode>();
@@ -834,10 +1101,21 @@ public class Parser
                     while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
                 }
                 Eat(TokenType.RightParen);
-                return new CallExpressionNode(varNode.Identifier, arguments);
+                expr = new CallExpressionNode(expr, arguments);
             }
-            throw new InvalidOperationException("Expression is not callable.");
+            else if (Current.Type is TokenType.Dot or TokenType.Arrow) // Member access
+            {
+                var op = Current;
+                _position++;
+                var member = Eat(TokenType.Identifier);
+                expr = new MemberAccessExpressionNode(expr, op, member);
+            }
+            else
+            {
+                break;
+            }
         }
+
         return expr;
     }
 
@@ -934,7 +1212,10 @@ public enum TokenType
     DoubleEquals,
     NotEquals,
     LessThan,
-    GreaterThan
+    GreaterThan,
+    Ampersand,
+    Arrow,
+    Colon
 }
 
 public record Token(TokenType Type, string Value);
@@ -950,7 +1231,9 @@ public class Tokenizer
         "if",
         "else",
         "struct",
-        "char"
+        "char",
+        "public",
+        "private"
     ];
 
     public static List<Token> Tokenize(string input)
@@ -995,6 +1278,7 @@ public class Tokenizer
             {
                 case '#': tokens.Add(new(TokenType.Hash, "#")); i++; continue;
                 case '.': tokens.Add(new(TokenType.Dot, ".")); i++; continue;
+                case ':': tokens.Add(new(TokenType.Colon, ":")); i++; continue;
                 case '(': tokens.Add(new(TokenType.LeftParen, "(")); i++; continue;
                 case ')': tokens.Add(new(TokenType.RightParen, ")")); i++; continue;
                 case '{': tokens.Add(new(TokenType.LeftBrace, "{")); i++; continue;
@@ -1002,9 +1286,13 @@ public class Tokenizer
                 case ';': tokens.Add(new(TokenType.Semicolon, ";")); i++; continue;
                 case ',': tokens.Add(new(TokenType.Comma, ",")); i++; continue;
                 case '+': tokens.Add(new(TokenType.Plus, "+")); i++; continue;
-                case '-': tokens.Add(new(TokenType.Minus, "-")); i++; continue;
+                case '-':
+                    if (i + 1 < input.Length && input[i + 1] == '>') { tokens.Add(new(TokenType.Arrow, "->")); i += 2; }
+                    else { tokens.Add(new(TokenType.Minus, "-")); i++; }
+                    continue;
                 case '*': tokens.Add(new(TokenType.Star, "*")); i++; continue;
                 case '/': tokens.Add(new(TokenType.Slash, "/")); i++; continue;
+                case '&': tokens.Add(new(TokenType.Ampersand, "&")); i++; continue;
                 case '<': tokens.Add(new(TokenType.LessThan, "<")); i++; continue;
                 case '>': tokens.Add(new(TokenType.GreaterThan, ">")); i++; continue;
                 case '=':
@@ -1059,7 +1347,34 @@ struct Color {
     char a;
 };
 
-// --- Raylib Function Prototypes with Structs ---
+struct TextObject {
+private:
+    int x;
+
+public:
+    int y;
+    int text;
+    int fontSize;
+    Color color;
+
+    void init(int startX, int startY, int newText, int fSize, Color newColor) {
+        x = startX;
+        y = startY;
+        text = newText;
+        fontSize = fSize;
+        color = newColor;
+    }
+
+    void draw() {
+        DrawText(text, x, y, fontSize, color);
+    }
+    
+    void move_right() {
+        x = x + 1;
+    }
+};
+
+// --- Raylib Function Prototypes ---
 void InitWindow(int width, int height, int title);
 int WindowShouldClose();
 void BeginDrawing();
@@ -1075,12 +1390,20 @@ int main() {
     Color rayWhite = {245, 245, 245, 255};
     Color maroon = {190, 33, 55, 255};
 
-    InitWindow(screenWidth, screenHeight, "CTilde with Structs by Value!");
+    struct TextObject myText;
+    // Initialize the object using its public method.
+    // Direct access like `myText.x = 140;` would fail because x is private.
+    //myText.init(140, 275, "Encapsulation!", 20, maroon);
+
+    InitWindow(screenWidth, screenHeight, "CTilde with Access Specifiers!");
 
     while (WindowShouldClose() == 0) {
         BeginDrawing();
         ClearBackground(rayWhite);
-        DrawText("Structs are being passed by value!", 140, 275, 20, maroon);
+        
+        myText.move_right();
+        myText.draw();
+        
         EndDrawing();
     }
 

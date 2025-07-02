@@ -18,9 +18,7 @@ public class CodeGenerator
     internal ExpressionGenerator ExpressionGenerator { get; }
 
     internal SymbolTable CurrentSymbols { get; set; } = null!;
-    internal string? CurrentMethodOwnerStruct { get; set; }
-    internal string? CurrentNamespace { get; private set; }
-    internal List<string> ActiveUsings { get; private set; } = new();
+    internal CompilationUnitNode CurrentCompilationUnit { get; set; } = null!;
 
     public CodeGenerator(ProgramNode program)
     {
@@ -33,13 +31,13 @@ public class CodeGenerator
 
     public string Generate()
     {
-        ActiveUsings = Program.Usings.Select(u => u.Namespace).Distinct().ToList();
-
         FindAllStringLiterals(Program);
-        foreach (var f in Program.Functions.Where(f => f.Body == null))
-        {
-            ExternalFunctions.Add(f.Name);
-        }
+
+        foreach (var unit in Program.CompilationUnits)
+            foreach (var f in unit.Functions.Where(f => f.Body == null))
+            {
+                ExternalFunctions.Add(f.Name);
+            }
 
         var fasmWriter = new FasmWriter();
         fasmWriter.WritePreamble(Builder);
@@ -47,10 +45,14 @@ public class CodeGenerator
         fasmWriter.WriteTextSectionHeader(Builder);
         fasmWriter.WriteEntryPoint(Builder);
 
-        foreach (var function in Program.Functions.Where(f => f.Body != null))
+        foreach (var unit in Program.CompilationUnits)
         {
-            GenerateFunction(function);
-            Builder.AppendBlankLine();
+            CurrentCompilationUnit = unit;
+            foreach (var function in unit.Functions.Where(f => f.Body != null))
+            {
+                GenerateFunction(function);
+                Builder.AppendBlankLine();
+            }
         }
 
         fasmWriter.WriteImportDataSection(Builder, Program, ExternalFunctions);
@@ -87,12 +89,9 @@ public class CodeGenerator
 
     private void GenerateFunction(FunctionDeclarationNode function)
     {
-        CurrentMethodOwnerStruct = function.OwnerStructName;
-        CurrentNamespace = function.Namespace;
-        CurrentSymbols = new SymbolTable(function, TypeManager, ActiveUsings);
+        CurrentSymbols = new SymbolTable(function, TypeManager, CurrentCompilationUnit);
 
         string mangledName;
-        // The 'main' function is special and must not be namespace-mangled.
         if (function.Name == "main")
         {
             mangledName = "_main";

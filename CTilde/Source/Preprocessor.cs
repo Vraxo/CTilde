@@ -1,48 +1,51 @@
 ﻿using System.Collections.Generic;
 using System.IO;
-using System.Text;
 
 namespace CTilde;
 
 public class Preprocessor
 {
-    public string Process(string entryFilePath)
+    public List<string> DiscoverDependencies(string entryFilePath)
     {
-        return PreprocessFile(entryFilePath, new HashSet<string>());
-    }
+        var allFiles = new List<string>();
+        var processedFiles = new HashSet<string>();
+        var filesToProcess = new Queue<string>();
 
-    private string PreprocessFile(string filePath, HashSet<string> processedFiles)
-    {
-        var fullPath = Path.GetFullPath(filePath);
-        if (!File.Exists(fullPath) || processedFiles.Contains(fullPath))
+        filesToProcess.Enqueue(Path.GetFullPath(entryFilePath));
+
+        while (filesToProcess.Count > 0)
         {
-            return string.Empty;
-        }
-        processedFiles.Add(fullPath);
-
-        var codeBuilder = new StringBuilder();
-        string directory = Path.GetDirectoryName(fullPath) ?? "";
-
-        foreach (var line in File.ReadLines(fullPath))
-        {
-            var trimmedLine = line.Trim();
-            if (trimmedLine.StartsWith("#include"))
+            var currentFile = filesToProcess.Dequeue();
+            if (!File.Exists(currentFile) || processedFiles.Contains(currentFile))
             {
-                var startIndex = trimmedLine.IndexOf('"');
-                var endIndex = trimmedLine.LastIndexOf('"');
-                if (startIndex != -1 && endIndex > startIndex)
+                continue;
+            }
+
+            processedFiles.Add(currentFile);
+            allFiles.Add(currentFile);
+
+            string directory = Path.GetDirectoryName(currentFile) ?? "";
+
+            foreach (var line in File.ReadLines(currentFile))
+            {
+                var trimmedLine = line.Trim();
+                if (trimmedLine.StartsWith("#include"))
                 {
-                    var includeFileName = trimmedLine.Substring(startIndex + 1, endIndex - startIndex - 1);
-                    var fullIncludePath = Path.Combine(directory, includeFileName);
-                    codeBuilder.Append(PreprocessFile(fullIncludePath, processedFiles));
-                    codeBuilder.AppendLine(); // Ensure a newline after an included file
+                    var startIndex = trimmedLine.IndexOf('"');
+                    var endIndex = trimmedLine.LastIndexOf('"');
+                    if (startIndex != -1 && endIndex > startIndex)
+                    {
+                        var includeFileName = trimmedLine.Substring(startIndex + 1, endIndex - startIndex - 1);
+                        var fullIncludePath = Path.GetFullPath(Path.Combine(directory, includeFileName));
+                        filesToProcess.Enqueue(fullIncludePath);
+                    }
                 }
             }
-            else
-            {
-                codeBuilder.AppendLine(line);
-            }
         }
-        return codeBuilder.ToString();
+
+        // The order matters for parsing: dependencies should come first.
+        // We reverse because the entry point was added first.
+        allFiles.Reverse();
+        return allFiles;
     }
 }

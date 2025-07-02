@@ -11,6 +11,7 @@ public class Parser
     private int _position;
     private int _stringLabelCounter;
     private string? _currentNamespace;
+    private readonly List<ImportDirectiveNode> _imports = new();
 
     public Parser(List<Token> tokens)
     {
@@ -32,9 +33,10 @@ public class Parser
         throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type} ('{currentToken.Value}') at position {_position}");
     }
 
-    public ProgramNode Parse()
+    public List<ImportDirectiveNode> GetImports() => _imports;
+
+    public CompilationUnitNode Parse(string filePath)
     {
-        var imports = new List<ImportDirectiveNode>();
         var usings = new List<UsingDirectiveNode>();
         var structs = new List<StructDefinitionNode>();
         var functions = new List<FunctionDeclarationNode>();
@@ -43,7 +45,19 @@ public class Parser
         {
             if (Current.Type == TokenType.Hash)
             {
-                imports.Add(ParseImportDirective());
+                var hashKeyword = Peek(1);
+                if (hashKeyword.Type == TokenType.Identifier && hashKeyword.Value == "import")
+                {
+                    _imports.Add(ParseImportDirective());
+                }
+                else if (hashKeyword.Type == TokenType.Identifier && hashKeyword.Value == "include")
+                {
+                    ParseIncludeDirective(); // Handle and skip #include
+                }
+                else
+                {
+                    throw new InvalidOperationException($"Unexpected directive after #: '{hashKeyword.Value}'");
+                }
             }
             else if (Current.Type == TokenType.Keyword && Current.Value == "using")
             {
@@ -63,17 +77,27 @@ public class Parser
             }
         }
 
-        var programNode = new ProgramNode(imports, usings, structs, functions);
-        SetParents(programNode);
-        return programNode;
+        var unitNode = new CompilationUnitNode(filePath, usings, structs, functions);
+        SetParents(unitNode);
+        return unitNode;
     }
 
     private UsingDirectiveNode ParseUsingDirective()
     {
         Eat(TokenType.Keyword); // using
-        var ns = Eat(TokenType.Identifier);
+        var identifier = Eat(TokenType.Identifier);
+        string? alias = null;
+
+        if (Current.Type == TokenType.Assignment)
+        {
+            Eat(TokenType.Assignment);
+            alias = Eat(TokenType.Identifier).Value;
+            Eat(TokenType.Semicolon);
+            return new UsingDirectiveNode(identifier.Value, alias);
+        }
+
         Eat(TokenType.Semicolon);
-        return new UsingDirectiveNode(ns.Value);
+        return new UsingDirectiveNode(identifier.Value, null);
     }
 
     private void ParseNamespaceDirective()
@@ -87,10 +111,17 @@ public class Parser
     private ImportDirectiveNode ParseImportDirective()
     {
         Eat(TokenType.Hash);
-        var keyword = Eat(TokenType.Identifier);
-        if (keyword.Value != "import") throw new InvalidOperationException($"Expected 'import' after '#' but got '{keyword.Value}'");
+        Eat(TokenType.Identifier); // import
         var libNameToken = Eat(TokenType.StringLiteral);
         return new ImportDirectiveNode(libNameToken.Value);
+    }
+
+    private void ParseIncludeDirective()
+    {
+        Eat(TokenType.Hash);
+        Eat(TokenType.Identifier); // include
+        Eat(TokenType.StringLiteral); // "filename"
+        // No AST node for include, as it's handled by the preprocessor
     }
 
     private StructDefinitionNode ParseStructDefinition(List<FunctionDeclarationNode> programFunctions)
@@ -275,16 +306,13 @@ public class Parser
             var lookahead1 = Peek(1).Type;
             if (lookahead1 == TokenType.Identifier || lookahead1 == TokenType.Star)
             {
-                // Case: `TypeName varName;` or `TypeName* pVar;`
                 isDeclaration = true;
             }
             else if (lookahead1 == TokenType.DoubleColon && Peek(2).Type == TokenType.Identifier)
             {
-                // Case: `ns::TypeName ...`
                 var lookahead3 = Peek(3).Type;
                 if (lookahead3 == TokenType.Identifier || lookahead3 == TokenType.Star)
                 {
-                    // `ns::TypeName varName;` or `ns::TypeName* pVar;`
                     isDeclaration = true;
                 }
             }

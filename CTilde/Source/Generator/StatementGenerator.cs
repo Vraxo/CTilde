@@ -8,11 +8,8 @@ public class StatementGenerator
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
     private TypeManager TypeManager => _context.TypeManager;
-    private ProgramNode Program => _context.Program;
-    private SymbolTable CurrentSymbols => _context.CurrentSymbols;
+    private CompilationUnitNode CurrentCompilationUnit => _context.CurrentCompilationUnit;
     private ExpressionGenerator ExpressionGenerator => _context.ExpressionGenerator;
-    private string? CurrentNamespace => _context.CurrentNamespace;
-    private List<string> ActiveUsings => _context.ActiveUsings;
 
     public StatementGenerator(CodeGenerator context)
     {
@@ -32,21 +29,20 @@ public class StatementGenerator
                 {
                     if (decl.Initializer is InitializerListExpressionNode initList)
                     {
+                        var function = (FunctionDeclarationNode)decl.Ancestors().First(a => a is FunctionDeclarationNode);
                         string rawTypeName = TypeManager.GetTypeName(decl.Type, decl.PointerLevel);
-                        string resolvedTypeName = TypeManager.ResolveTypeName(rawTypeName, CurrentNamespace, ActiveUsings);
+                        string resolvedTypeName = TypeManager.ResolveTypeName(rawTypeName, function.Namespace, CurrentCompilationUnit);
 
                         if (!TypeManager.IsStruct(resolvedTypeName))
                             throw new InvalidOperationException($"Initializer list can only be used for struct types, not '{rawTypeName}'.");
 
-                        var structDef = TypeManager.FindStruct(resolvedTypeName);
-                        if (structDef == null)
-                            throw new InvalidOperationException($"Could not find struct definition for initializer list type '{resolvedTypeName}'.");
-
+                        var structDef = TypeManager.FindStruct(resolvedTypeName)
+                            ?? throw new InvalidOperationException($"Could not find struct definition for initializer list type '{resolvedTypeName}'.");
 
                         if (initList.Values.Count > structDef.Members.Count)
                             throw new InvalidOperationException($"Too many values in initializer list for struct '{structDef.Name}'.");
 
-                        CurrentSymbols.TryGetSymbol(decl.Identifier.Value, out var structBaseOffset, out _);
+                        _context.CurrentSymbols.TryGetSymbol(decl.Identifier.Value, out var structBaseOffset, out _);
                         int currentMemberOffset = 0;
 
                         for (int j = 0; j < initList.Values.Count; j++)
@@ -55,7 +51,7 @@ public class StatementGenerator
                             var valueExpr = initList.Values[j];
 
                             var memberTypeName = TypeManager.GetTypeName(member.Type, member.PointerLevel);
-                            var memberSize = TypeManager.GetSizeOfType(memberTypeName);
+                            var memberSize = TypeManager.GetSizeOfType(memberTypeName, CurrentCompilationUnit);
                             var totalOffset = structBaseOffset + currentMemberOffset;
 
                             ExpressionGenerator.GenerateExpression(valueExpr);

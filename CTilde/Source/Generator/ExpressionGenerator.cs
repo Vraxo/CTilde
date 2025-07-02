@@ -11,9 +11,7 @@ public class ExpressionGenerator
     private TypeManager TypeManager => _context.TypeManager;
     private ProgramNode Program => _context.Program;
     private SymbolTable CurrentSymbols => _context.CurrentSymbols;
-    private string? CurrentMethodOwnerStruct => _context.CurrentMethodOwnerStruct;
-    private string? CurrentNamespace => _context.CurrentNamespace;
-    private List<string> ActiveUsings => _context.ActiveUsings;
+    private CompilationUnitNode CurrentCompilationUnit => _context.CurrentCompilationUnit;
     private HashSet<string> ExternalFunctions => _context.ExternalFunctions;
 
     public ExpressionGenerator(CodeGenerator context)
@@ -27,17 +25,18 @@ public class ExpressionGenerator
         {
             case VariableExpressionNode varExpr:
                 {
+                    var function = (FunctionDeclarationNode)varExpr.Ancestors().First(a => a is FunctionDeclarationNode);
                     if (CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out var offset, out _))
                     {
                         string sign = offset > 0 ? "+" : "";
                         Builder.AppendInstruction($"lea eax, [ebp {sign} {offset}]", $"Get address of var/param {varExpr.Identifier.Value}");
                     }
-                    else if (CurrentMethodOwnerStruct != null)
+                    else if (function.OwnerStructName != null)
                     {
                         try
                         {
-                            var type = TypeManager.GetStructTypeFromUnqualifiedName(CurrentMethodOwnerStruct, CurrentNamespace);
-                            var (memberOffset, _) = TypeManager.GetMemberInfo(type.FullName, varExpr.Identifier.Value, ActiveUsings);
+                            var type = TypeManager.GetStructTypeFromUnqualifiedName(function.OwnerStructName, function.Namespace);
+                            var (memberOffset, _) = TypeManager.GetMemberInfo(type.FullName, varExpr.Identifier.Value, CurrentCompilationUnit);
                             CurrentSymbols.TryGetSymbol("this", out var thisOffset, out _);
                             Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
                             if (memberOffset > 0)
@@ -58,7 +57,7 @@ public class ExpressionGenerator
                 }
             case MemberAccessExpressionNode memberAccess:
                 {
-                    var leftType = TypeManager.GetExpressionType(memberAccess.Left, CurrentSymbols, CurrentMethodOwnerStruct, CurrentNamespace, ActiveUsings);
+                    var leftType = TypeManager.GetExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit);
                     string baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
 
                     var structDef = TypeManager.FindStruct(baseStructType) ?? throw new InvalidOperationException($"Could not find struct definition for '{baseStructType}'");
@@ -66,11 +65,12 @@ public class ExpressionGenerator
                     var memberVar = structDef.Members.FirstOrDefault(m => m.Name.Value == memberAccess.Member.Value);
                     if (memberVar == null) throw new InvalidOperationException($"Struct '{baseStructType}' has no member '{memberAccess.Member.Value}'");
 
-                    var callerStructType = CurrentMethodOwnerStruct != null ? TypeManager.GetStructTypeFromUnqualifiedName(CurrentMethodOwnerStruct, CurrentNamespace).FullName : null;
+                    var function = (FunctionDeclarationNode)memberAccess.Ancestors().First(a => a is FunctionDeclarationNode);
+                    var callerStructName = function.OwnerStructName != null ? TypeManager.GetStructTypeFromUnqualifiedName(function.OwnerStructName, function.Namespace).FullName : null;
 
-                    if (memberVar.AccessLevel == AccessSpecifier.Private && callerStructType != baseStructType)
+                    if (memberVar.AccessLevel == AccessSpecifier.Private && callerStructName != baseStructType)
                     {
-                        throw new InvalidOperationException($"Cannot access private member '{baseStructType}::{memberAccess.Member.Value}' from context '{CurrentMethodOwnerStruct ?? "global"}'.");
+                        throw new InvalidOperationException($"Cannot access private member '{baseStructType}::{memberAccess.Member.Value}' from context '{callerStructName ?? "global"}'.");
                     }
 
                     if (memberAccess.Operator.Type == TokenType.Dot)
@@ -82,7 +82,7 @@ public class ExpressionGenerator
                         GenerateExpression(memberAccess.Left);
                     }
 
-                    var (memberOffset, _) = TypeManager.GetMemberInfo(baseStructType, memberAccess.Member.Value, ActiveUsings);
+                    var (memberOffset, _) = TypeManager.GetMemberInfo(baseStructType, memberAccess.Member.Value, CurrentCompilationUnit);
                     if (memberOffset > 0)
                     {
                         Builder.AppendInstruction($"add eax, {memberOffset}", $"Offset for member {memberAccess.Operator.Value}{memberAccess.Member.Value}");
@@ -104,24 +104,24 @@ public class ExpressionGenerator
             case StringLiteralNode str: Builder.AppendInstruction($"mov eax, {str.Label}"); break;
             case VariableExpressionNode varExpr:
                 CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out _);
-                if (offset > 0)
+                if (offset > 0) // It's a parameter or local variable
                 {
-                    var exprType = TypeManager.GetExpressionType(varExpr, CurrentSymbols, CurrentMethodOwnerStruct, CurrentNamespace, ActiveUsings);
+                    var exprType = TypeManager.GetExpressionType(varExpr, CurrentSymbols, CurrentCompilationUnit);
                     if (TypeManager.IsStruct(exprType))
                     {
                         Builder.AppendInstruction($"lea eax, [ebp + {offset}]");
                     }
                     else
                     {
-                        if (TypeManager.GetSizeOfType(exprType) == 1) Builder.AppendInstruction($"movzx eax, byte [ebp + {offset}]");
+                        if (TypeManager.GetSizeOfType(exprType, CurrentCompilationUnit) == 1) Builder.AppendInstruction($"movzx eax, byte [ebp + {offset}]");
                         else Builder.AppendInstruction($"mov eax, [ebp + {offset}]");
                     }
                 }
-                else
+                else // It's a struct member (implicit 'this')
                 {
                     GenerateLValueAddress(varExpr);
-                    var type = TypeManager.GetExpressionType(varExpr, CurrentSymbols, CurrentMethodOwnerStruct, CurrentNamespace, ActiveUsings);
-                    if (TypeManager.GetSizeOfType(type) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
+                    var type = TypeManager.GetExpressionType(varExpr, CurrentSymbols, CurrentCompilationUnit);
+                    if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
                     else Builder.AppendInstruction("mov eax, [eax]");
                 }
                 break;
@@ -133,21 +133,21 @@ public class ExpressionGenerator
                     if (u.Operator.Type == TokenType.Minus) Builder.AppendInstruction("neg eax");
                     else if (u.Operator.Type == TokenType.Star)
                     {
-                        var type = TypeManager.GetExpressionType(u, CurrentSymbols, CurrentMethodOwnerStruct, CurrentNamespace, ActiveUsings);
-                        if (TypeManager.GetSizeOfType(type) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
+                        var type = TypeManager.GetExpressionType(u, CurrentSymbols, CurrentCompilationUnit);
+                        if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
                         else Builder.AppendInstruction("mov eax, [eax]");
                     }
                 }
                 break;
             case MemberAccessExpressionNode m:
                 GenerateLValueAddress(m);
-                var memberType = TypeManager.GetExpressionType(m, CurrentSymbols, CurrentMethodOwnerStruct, CurrentNamespace, ActiveUsings);
-                if (TypeManager.GetSizeOfType(memberType) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
+                var memberType = TypeManager.GetExpressionType(m, CurrentSymbols, CurrentCompilationUnit);
+                if (TypeManager.GetSizeOfType(memberType, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
                 else Builder.AppendInstruction("mov eax, [eax]");
                 break;
             case AssignmentExpressionNode assign:
                 {
-                    var lValueType = TypeManager.GetExpressionType(assign.Left, CurrentSymbols, CurrentMethodOwnerStruct, CurrentNamespace, ActiveUsings);
+                    var lValueType = TypeManager.GetExpressionType(assign.Left, CurrentSymbols, CurrentCompilationUnit);
                     var isStructAssign = TypeManager.IsStruct(lValueType);
 
                     if (isStructAssign)
@@ -158,7 +158,7 @@ public class ExpressionGenerator
                         Builder.AppendInstruction("pop edi");
                         Builder.AppendInstruction("mov esi, eax");
 
-                        int size = TypeManager.GetSizeOfType(lValueType);
+                        int size = TypeManager.GetSizeOfType(lValueType, CurrentCompilationUnit);
                         Builder.AppendInstruction($"mov ecx, {size / 4}");
                         Builder.AppendInstruction("rep movsd");
                         if (size % 4 > 0)
@@ -173,7 +173,7 @@ public class ExpressionGenerator
                         Builder.AppendInstruction("push eax");
                         GenerateExpression(assign.Right);
                         Builder.AppendInstruction("pop ecx");
-                        if (TypeManager.GetSizeOfType(lValueType) == 1) Builder.AppendInstruction("mov [ecx], al");
+                        if (TypeManager.GetSizeOfType(lValueType, CurrentCompilationUnit) == 1) Builder.AppendInstruction("mov [ecx], al");
                         else Builder.AppendInstruction("mov [ecx], eax");
                     }
                     break;
@@ -192,12 +192,12 @@ public class ExpressionGenerator
 
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
-            var argType = TypeManager.GetExpressionType(arg, CurrentSymbols, CurrentMethodOwnerStruct, CurrentNamespace, ActiveUsings);
+            var argType = TypeManager.GetExpressionType(arg, CurrentSymbols, CurrentCompilationUnit);
             var isStruct = TypeManager.IsStruct(argType);
 
             if (isStruct)
             {
-                int argSize = TypeManager.GetSizeOfType(argType);
+                int argSize = TypeManager.GetSizeOfType(argType, CurrentCompilationUnit);
                 GenerateLValueAddress(arg);
                 for (int offset = argSize - 4; offset >= 0; offset -= 4)
                 {
@@ -215,16 +215,18 @@ public class ExpressionGenerator
 
         if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
         {
-            var leftType = TypeManager.GetExpressionType(memberAccess.Left, CurrentSymbols, CurrentMethodOwnerStruct, CurrentNamespace, ActiveUsings);
+            var leftType = TypeManager.GetExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit);
             var (structDef, qualifiedStructName) = TypeManager.GetStructTypeFromFullName(leftType.TrimEnd('*'));
 
-            var method = Program.Functions.First(f => f.OwnerStructName == structDef.Name && f.Namespace == structDef.Namespace && f.Name == memberAccess.Member.Value);
+            var method = TypeManager.ResolveMethod(structDef, memberAccess.Member.Value);
 
-            var callerStructType = CurrentMethodOwnerStruct != null ? TypeManager.GetStructTypeFromUnqualifiedName(CurrentMethodOwnerStruct, CurrentNamespace).FullName : null;
-            if (method.AccessLevel == AccessSpecifier.Private && callerStructType != qualifiedStructName)
+            var function = (FunctionDeclarationNode)memberAccess.Ancestors().First(a => a is FunctionDeclarationNode);
+            var callerStructName = function.OwnerStructName != null ? TypeManager.GetStructTypeFromUnqualifiedName(function.OwnerStructName, function.Namespace).FullName : null;
+
+            if (method.AccessLevel == AccessSpecifier.Private && callerStructName != qualifiedStructName)
                 throw new InvalidOperationException($"Cannot access private method '{qualifiedStructName}::{memberAccess.Member.Value}'.");
 
-            GenerateLValueAddress(memberAccess.Left); // Pushes address of struct instance
+            GenerateLValueAddress(memberAccess.Left);
             Builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
 
@@ -233,19 +235,7 @@ public class ExpressionGenerator
         }
         else
         {
-            FunctionDeclarationNode? func = null;
-            if (callExpr.Callee is VariableExpressionNode varNode)
-            {
-                func = TypeManager.ResolveFunction(varNode.Identifier.Value, CurrentNamespace, ActiveUsings);
-            }
-            else if (callExpr.Callee is QualifiedAccessExpressionNode qualAccess)
-            {
-                string calleeName = qualAccess.Member.Value;
-                string nsName = qualAccess.Namespace.Value;
-                func = Program.Functions.FirstOrDefault(f => f.Name == calleeName && f.OwnerStructName == null && f.Namespace == nsName);
-            }
-
-            if (func == null) throw new NotSupportedException($"Unsupported or unresolved callee type for unresolved call: {callExpr.Callee.GetType().Name}");
+            var func = TypeManager.ResolveFunctionCall(callExpr.Callee, CurrentCompilationUnit);
 
             if (func.Body == null)
             {

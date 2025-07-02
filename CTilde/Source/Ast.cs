@@ -8,18 +8,32 @@ public enum AccessSpecifier { Public, Private }
 public abstract record AstNode
 {
     public AstNode? Parent { get; set; }
+
+    public IEnumerable<AstNode> Ancestors()
+    {
+        var current = Parent;
+        while (current != null)
+        {
+            yield return current;
+            current = current.Parent;
+        }
+    }
 }
 public abstract record StatementNode : AstNode;
 public abstract record ExpressionNode : AstNode;
 
 // Program structure
 public record ImportDirectiveNode(string LibraryName) : AstNode;
-public record UsingDirectiveNode(string Namespace) : AstNode;
+public record UsingDirectiveNode(string Namespace, string? Alias) : AstNode;
 public record MemberVariableNode(Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode;
 public record StructDefinitionNode(string Name, string? Namespace, List<MemberVariableNode> Members) : AstNode;
-public record ProgramNode(List<ImportDirectiveNode> Imports, List<UsingDirectiveNode> Usings, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
 public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
 public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, string? Namespace) : AstNode;
+
+// New top-level structure for compilation units
+public record CompilationUnitNode(string FilePath, List<UsingDirectiveNode> Usings, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
+public record ProgramNode(List<ImportDirectiveNode> Imports, List<CompilationUnitNode> CompilationUnits) : AstNode;
+
 
 // Statements
 public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;

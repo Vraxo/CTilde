@@ -14,15 +14,15 @@ public abstract record ExpressionNode : AstNode;
 public record ImportDirectiveNode(string LibraryName) : AstNode;
 public record StructDefinitionNode(string Name, List<ParameterNode> Members) : AstNode;
 public record ProgramNode(List<ImportDirectiveNode> Imports, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
-public record ParameterNode(Token Type, Token Name) : AstNode;
-public record FunctionDeclarationNode(Token ReturnType, string Name, List<ParameterNode> Parameters, StatementNode? Body) : AstNode;
+public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
+public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body) : AstNode;
 
 // Statements
 public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;
 public record ReturnStatementNode(ExpressionNode? Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBody, StatementNode? ElseBody) : StatementNode;
-public record DeclarationStatementNode(Token Type, Token Identifier, ExpressionNode? Initializer) : StatementNode;
+public record DeclarationStatementNode(Token Type, int PointerLevel, Token Identifier, ExpressionNode? Initializer) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
 
 

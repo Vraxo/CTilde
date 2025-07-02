@@ -28,6 +28,7 @@ public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode
 
 
 // Expressions
+public record InitializerListExpressionNode(List<ExpressionNode> Values) : ExpressionNode;
 public record IntegerLiteralNode(int Value) : ExpressionNode;
 public record StringLiteralNode(string Value, string Label) : ExpressionNode;
 public record UnaryExpressionNode(Token Operator, ExpressionNode Right) : ExpressionNode;
@@ -268,9 +269,40 @@ public class Generator
 
         if (decl.Initializer != null)
         {
-            if (size > 4) throw new NotSupportedException("Struct initialization is not supported yet.");
-            GenerateExpression(decl.Initializer);
-            AppendAsm($"mov [ebp + {_stackOffset}], eax");
+            if (decl.Initializer is InitializerListExpressionNode initList)
+            {
+                if (!_structDefinitions.TryGetValue(decl.Type.Value, out var structDef))
+                    throw new InvalidOperationException($"Cannot use initializer list for non-struct type '{decl.Type.Value}'");
+
+                if (initList.Values.Count != structDef.Members.Count)
+                    throw new InvalidOperationException($"Initializer list has {initList.Values.Count} values, but struct '{structDef.Name}' has {structDef.Members.Count} members.");
+
+                int currentMemberOffset = 0;
+                for (var i = 0; i < initList.Values.Count; i++)
+                {
+                    var valueExpr = initList.Values[i];
+                    var member = structDef.Members[i];
+                    var memberSize = GetSizeOfType(member.Type.Value);
+
+                    GenerateExpression(valueExpr); // Result is in EAX
+
+                    var totalOffset = _stackOffset + currentMemberOffset;
+                    if (memberSize == 1)
+                        AppendAsm($"mov [ebp + {totalOffset}], al", $"Initialize member {member.Name.Value}");
+                    else if (memberSize == 4)
+                        AppendAsm($"mov [ebp + {totalOffset}], eax", $"Initialize member {member.Name.Value}");
+                    else
+                        throw new NotSupportedException($"Struct member initialization for size {memberSize} not supported.");
+
+                    currentMemberOffset += memberSize;
+                }
+            }
+            else
+            {
+                if (size > 4) throw new NotSupportedException("Struct initialization must use an initializer list. Struct copy initialization is not supported.");
+                GenerateExpression(decl.Initializer);
+                AppendAsm($"mov [ebp + {_stackOffset}], eax");
+            }
         }
     }
 
@@ -655,10 +687,32 @@ public class Parser
         if (Current.Type == TokenType.Assignment)
         {
             Eat(TokenType.Assignment);
-            initializer = ParseExpression();
+            if (Current.Type == TokenType.LeftBrace)
+            {
+                initializer = ParseInitializerListExpression();
+            }
+            else
+            {
+                initializer = ParseExpression();
+            }
         }
         Eat(TokenType.Semicolon);
         return new DeclarationStatementNode(typeToken, identifier, initializer);
+    }
+
+    private ExpressionNode ParseInitializerListExpression()
+    {
+        Eat(TokenType.LeftBrace);
+        var values = new List<ExpressionNode>();
+        if (Current.Type != TokenType.RightBrace)
+        {
+            do
+            {
+                values.Add(ParseExpression());
+            } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+        }
+        Eat(TokenType.RightBrace);
+        return new InitializerListExpressionNode(values);
     }
 
     private WhileStatementNode ParseWhileStatement()
@@ -1018,17 +1072,8 @@ int main() {
     int screenWidth = 800;
     int screenHeight = 600;
 
-    Color rayWhite;
-    rayWhite.r = 245;
-    rayWhite.g = 245;
-    rayWhite.b = 245;
-    rayWhite.a = 255;
-
-    Color maroon;
-    maroon.r = 190;
-    maroon.g = 33;
-    maroon.b = 55;
-    maroon.a = 255;
+    Color rayWhite = {245, 245, 245, 255};
+    Color maroon = {190, 33, 55, 255};
 
     InitWindow(screenWidth, screenHeight, "CTilde with Structs by Value!");
 

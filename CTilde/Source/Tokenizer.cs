@@ -27,7 +27,8 @@ public enum TokenType
     DoubleEquals,
     NotEquals,
     LessThan,
-    GreaterThan
+    GreaterThan,
+    Ampersand
 }
 
 public record Token(TokenType Type, string Value);
@@ -98,6 +99,7 @@ public class Tokenizer
                 case '-': tokens.Add(new(TokenType.Minus, "-")); i++; continue;
                 case '*': tokens.Add(new(TokenType.Star, "*")); i++; continue;
                 case '/': tokens.Add(new(TokenType.Slash, "/")); i++; continue;
+                case '&': tokens.Add(new(TokenType.Ampersand, "&")); i++; continue;
                 case '<': tokens.Add(new(TokenType.LessThan, "<")); i++; continue;
                 case '>': tokens.Add(new(TokenType.GreaterThan, ">")); i++; continue;
                 case '=':

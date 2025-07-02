@@ -44,11 +44,11 @@ public class Parser
                 imports.Add(ParseImportDirective());
             }
             // `struct Identifier {` is a struct definition
-            else if (Current.Type == TokenType.Keyword && Current.Value == "struct")
+            else if (Current.Type == TokenType.Keyword && Current.Value == "struct" && Peek(2).Type == TokenType.LeftBrace)
             {
                 structs.Add(ParseStructDefinition());
             }
-            // Otherwise, assume it's a function declaration
+            // Otherwise, assume it's a function declaration or a global variable (not supported)
             else
             {
                 functions.Add(ParseFunction());
@@ -78,11 +78,9 @@ public class Parser
         var members = new List<ParameterNode>();
         while (Current.Type != TokenType.RightBrace)
         {
-            // A member type is a keyword (int, char) or an identifier (another struct)
-            var memberType = Current;
-            _position++;
+            var (memberType, pointerLevel) = ParseType();
             var memberName = Eat(TokenType.Identifier);
-            members.Add(new ParameterNode(memberType, memberName));
+            members.Add(new ParameterNode(memberType, pointerLevel, memberName));
             Eat(TokenType.Semicolon);
         }
 
@@ -114,12 +112,33 @@ public class Parser
         }
     }
 
+    private (Token type, int pointerLevel) ParseType()
+    {
+        Token typeToken;
+        if (Current.Type == TokenType.Keyword && Current.Value == "struct")
+        {
+            Eat(TokenType.Keyword); // struct
+            typeToken = Eat(TokenType.Identifier);
+        }
+        else
+        {
+            // A type is a keyword (int, char) or an identifier (struct name)
+            typeToken = Current;
+            _position++;
+        }
+
+        int pointerLevel = 0;
+        while (Current.Type == TokenType.Star)
+        {
+            Eat(TokenType.Star);
+            pointerLevel++;
+        }
+        return (typeToken, pointerLevel);
+    }
+
     private FunctionDeclarationNode ParseFunction()
     {
-        // A type is a keyword (int, void, char) or an identifier (struct name)
-        var returnType = Current;
-        _position++;
-
+        var (returnType, returnPointerLevel) = ParseType();
         var identifier = Eat(TokenType.Identifier);
         Eat(TokenType.LeftParen);
 
@@ -128,10 +147,9 @@ public class Parser
         {
             do
             {
-                var paramType = Current;
-                _position++;
+                var (paramType, paramPointerLevel) = ParseType();
                 var paramName = Eat(TokenType.Identifier);
-                parameters.Add(new ParameterNode(paramType, paramName));
+                parameters.Add(new ParameterNode(paramType, paramPointerLevel, paramName));
             } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
         }
 
@@ -141,7 +159,7 @@ public class Parser
         if (Current.Type == TokenType.LeftBrace) body = ParseBlockStatement();
         else Eat(TokenType.Semicolon);
 
-        return new FunctionDeclarationNode(returnType, identifier.Value, parameters, body);
+        return new FunctionDeclarationNode(returnType, returnPointerLevel, identifier.Value, parameters, body);
     }
 
     private BlockStatementNode ParseBlockStatement()
@@ -164,12 +182,13 @@ public class Parser
                 case "while": return ParseWhileStatement();
                 case "int":
                 case "char":
+                case "struct":
                     return ParseDeclarationStatement();
             }
         }
 
         // `TypeName varName;` is a declaration.
-        if (Current.Type == TokenType.Identifier && Peek(1).Type == TokenType.Identifier)
+        if (Current.Type == TokenType.Identifier && (Peek(1).Type == TokenType.Identifier || Peek(1).Type == TokenType.Star))
         {
             return ParseDeclarationStatement();
         }
@@ -199,10 +218,7 @@ public class Parser
 
     private StatementNode ParseDeclarationStatement()
     {
-        // A type is a keyword (int, char) or an identifier (struct name).
-        var typeToken = Current;
-        _position++;
-
+        var (typeToken, pointerLevel) = ParseType();
         var identifier = Eat(TokenType.Identifier);
         ExpressionNode? initializer = null;
         if (Current.Type == TokenType.Assignment)
@@ -218,7 +234,7 @@ public class Parser
             }
         }
         Eat(TokenType.Semicolon);
-        return new DeclarationStatementNode(typeToken, identifier, initializer);
+        return new DeclarationStatementNode(typeToken, pointerLevel, identifier, initializer);
     }
 
     private ExpressionNode ParseInitializerListExpression()
@@ -264,8 +280,8 @@ public class Parser
         {
             Eat(TokenType.Assignment);
             var right = ParseAssignmentExpression();
-            if (left is VariableExpressionNode or MemberAccessExpressionNode) return new AssignmentExpressionNode(left, right);
-            throw new InvalidOperationException("Invalid assignment target.");
+            if (left is VariableExpressionNode or MemberAccessExpressionNode or UnaryExpressionNode) return new AssignmentExpressionNode(left, right);
+            throw new InvalidOperationException($"Invalid assignment target: {left.GetType().Name}");
         }
         return left;
     }
@@ -320,7 +336,7 @@ public class Parser
 
     private ExpressionNode ParseUnaryExpression()
     {
-        if (Current.Type is TokenType.Minus or TokenType.Plus)
+        if (Current.Type is TokenType.Minus or TokenType.Plus or TokenType.Star or TokenType.Ampersand)
         {
             var op = Current; _position++;
             return new UnaryExpressionNode(op, ParseUnaryExpression());

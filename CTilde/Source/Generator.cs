@@ -16,7 +16,7 @@ public class Generator
     private readonly Dictionary<string, StructDefinitionNode> _structDefinitions = new();
 
     private Dictionary<string, int> _variables = new(); // name -> stack offset
-    private Dictionary<string, string> _variableTypes = new(); // name -> type name
+    private Dictionary<string, string> _variableTypes = new(); // name -> type name (e.g. "int", "Color*")
     private int _stackOffset;
 
     public Generator(ProgramNode program)
@@ -144,11 +144,12 @@ public class Generator
 
     private int GetSizeOfType(string typeName)
     {
+        if (typeName.EndsWith("*")) return 4;
         if (typeName == "int") return 4;
         if (typeName == "char") return 1;
         if (_structDefinitions.TryGetValue(typeName, out var structDef))
         {
-            return structDef.Members.Sum(m => GetSizeOfType(m.Type.Value));
+            return structDef.Members.Sum(m => GetSizeOfType(m.Type.Value)); // Pointer level is 0 for struct members
         }
         throw new InvalidOperationException($"Unknown type '{typeName}'");
     }
@@ -162,8 +163,16 @@ public class Generator
         foreach (var member in structDef.Members)
         {
             if (member.Name.Value == memberName)
-                return (offset, member.Type.Value);
-            offset += GetSizeOfType(member.Type.Value);
+            {
+                var sb = new StringBuilder(member.Type.Value);
+                for (int i = 0; i < member.PointerLevel; i++) sb.Append('*');
+                return (offset, sb.ToString());
+            }
+
+            var memberType = new StringBuilder(member.Type.Value);
+            for (int i = 0; i < member.PointerLevel; i++) memberType.Append('*');
+
+            offset += GetSizeOfType(memberType.ToString());
         }
         throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
     }
@@ -188,8 +197,12 @@ public class Generator
         foreach (var param in function.Parameters)
         {
             _variables[param.Name.Value] = paramOffset;
-            _variableTypes[param.Name.Value] = param.Type.Value;
-            paramOffset += GetSizeOfType(param.Type.Value);
+
+            var typeName = new StringBuilder(param.Type.Value);
+            for (int i = 0; i < param.PointerLevel; i++) typeName.Append('*');
+            _variableTypes[param.Name.Value] = typeName.ToString();
+
+            paramOffset += GetSizeOfType(typeName.ToString());
         }
 
         GenerateStatement(function.Body!);
@@ -218,10 +231,13 @@ public class Generator
     {
         if (_variables.ContainsKey(decl.Identifier.Value)) throw new InvalidOperationException($"Var '{decl.Identifier.Value}' already defined.");
 
-        int size = GetSizeOfType(decl.Type.Value);
+        var typeName = new StringBuilder(decl.Type.Value);
+        for (int i = 0; i < decl.PointerLevel; i++) typeName.Append('*');
+        _variableTypes[decl.Identifier.Value] = typeName.ToString();
+
+        int size = GetSizeOfType(typeName.ToString());
         _stackOffset -= size;
         _variables[decl.Identifier.Value] = _stackOffset;
-        _variableTypes[decl.Identifier.Value] = decl.Type.Value;
 
         AppendAsm($"sub esp, {size}", $"Allocate {size} bytes for var {decl.Identifier.Value}");
 
@@ -240,7 +256,10 @@ public class Generator
                 {
                     var valueExpr = initList.Values[i];
                     var member = structDef.Members[i];
-                    var memberSize = GetSizeOfType(member.Type.Value);
+
+                    var memberType = new StringBuilder(member.Type.Value);
+                    for (int j = 0; j < member.PointerLevel; j++) memberType.Append('*');
+                    var memberSize = GetSizeOfType(memberType.ToString());
 
                     GenerateExpression(valueExpr); // Result is in EAX
 
@@ -315,7 +334,11 @@ public class Generator
                 var (memberOffset, _) = GetMemberInfo(leftType, memberAccess.Member.Value);
                 AppendAsm($"add eax, {memberOffset}", $"Offset for member .{memberAccess.Member.Value}");
                 break;
-            default: throw new InvalidOperationException("Expression is not a valid L-value.");
+            case UnaryExpressionNode u when u.Operator.Type == TokenType.Star: // *ptr
+                // The address of *ptr is the value held by ptr.
+                GenerateExpression(u.Right); // puts value of ptr (the address it holds) into EAX.
+                break;
+            default: throw new InvalidOperationException($"Expression '{expression.GetType().Name}' is not a valid L-value.");
         }
     }
 
@@ -323,12 +346,37 @@ public class Generator
     {
         switch (expr)
         {
+            case IntegerLiteralNode: return "int";
+            case StringLiteralNode: return "char*"; // String literals are pointers to char
             case VariableExpressionNode v: return _variableTypes[v.Identifier.Value];
+            case AssignmentExpressionNode a: return GetExpressionType(a.Right); // C-style: type of assignment is type of rhs
             case MemberAccessExpressionNode m:
-                var leftType = GetExpressionType(m.Left);
-                var (_, memberType) = GetMemberInfo(leftType, m.Member.Value);
-                return memberType;
-            default: return "int"; // Simplification for literals etc.
+                {
+                    var leftType = GetExpressionType(m.Left);
+                    if (leftType.EndsWith("*")) throw new InvalidOperationException($"Cannot use . on a pointer type '{leftType}'. Dereference it first.");
+                    var (_, memberType) = GetMemberInfo(leftType, m.Member.Value);
+                    return memberType;
+                }
+            case UnaryExpressionNode u when u.Operator.Type == TokenType.Ampersand:
+                {
+                    var operandType = GetExpressionType(u.Right);
+                    return operandType + "*";
+                }
+            case UnaryExpressionNode u when u.Operator.Type == TokenType.Star:
+                {
+                    var operandType = GetExpressionType(u.Right);
+                    if (!operandType.EndsWith("*")) throw new InvalidOperationException($"Cannot dereference non-pointer type '{operandType}'.");
+                    return operandType.Substring(0, operandType.Length - 1);
+                }
+            case CallExpressionNode call:
+                {
+                    var func = _program.Functions.First(f => f.Name == call.Callee.Value);
+                    var sb = new StringBuilder(func.ReturnType.Value);
+                    for (int i = 0; i < func.ReturnPointerLevel; i++) sb.Append('*');
+                    return sb.ToString();
+                }
+            case BinaryExpressionNode: return "int"; // Assume all binary ops result in int for now
+            default: throw new NotImplementedException($"GetExpressionType not implemented for {expr.GetType().Name}");
         }
     }
 
@@ -339,10 +387,27 @@ public class Generator
             case IntegerLiteralNode literal: AppendAsm($"mov eax, {literal.Value}"); break;
             case StringLiteralNode str: AppendAsm($"mov eax, {str.Label}"); break;
             case UnaryExpressionNode u:
-                GenerateExpression(u.Right);
-                if (u.Operator.Type == TokenType.Minus) AppendAsm("neg eax", "Negate value");
+                if (u.Operator.Type == TokenType.Minus)
+                {
+                    GenerateExpression(u.Right);
+                    AppendAsm("neg eax", "Negate value");
+                }
+                else if (u.Operator.Type == TokenType.Plus)
+                {
+                    GenerateExpression(u.Right); // No-op
+                }
+                else if (u.Operator.Type == TokenType.Ampersand)
+                {
+                    GenerateLValueAddress(u.Right); // Address-of
+                }
+                else // Star must be handled as a read from an L-value
+                {
+                    goto ReadLValue;
+                }
                 break;
-            case VariableExpressionNode or MemberAccessExpressionNode:
+            case VariableExpressionNode:
+            case MemberAccessExpressionNode:
+            ReadLValue:
                 var exprType = GetExpressionType(expression);
                 GenerateLValueAddress(expression);
                 if (GetSizeOfType(exprType) == 1)
@@ -391,7 +456,7 @@ public class Generator
             }
             else // Pass struct by value
             {
-                GenerateLValueAddress(arg);
+                GenerateLValueAddress(arg); // Get address of struct
                 AppendAsm("mov esi, eax", $"Copy struct for call");
                 for (int offset = argSize - 4; offset >= 0; offset -= 4)
                 {

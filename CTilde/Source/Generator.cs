@@ -120,26 +120,20 @@ public class Generator
         GenerateExpression(ifStmt.Condition);
         AppendAsm("cmp eax, 0");
 
-        if (ifStmt.ElseBranch != null)
+        bool hasElse = ifStmt.ElseBranch != null;
+        string jumpTarget = hasElse ? elseLabel : endIfLabel;
+
+        AppendAsm($"je {jumpTarget}", "Condition is false, jump away");
+
+        // Then branch
+        GenerateStatement(ifStmt.ThenBranch);
+
+        // If there's an else branch, handle jump and generation
+        if (hasElse)
         {
-            // If-Else statement
-            AppendAsm($"je {elseLabel}", "Condition is false, jump to else");
-
-            // Then branch
-            GenerateStatement(ifStmt.ThenBranch);
-            AppendAsm($"jmp {endIfLabel}", "Skip else branch");
-
-            // Else branch
+            AppendAsm($"jmp {endIfLabel}", "Finished 'then' branch, skip 'else'");
             _sb.AppendLine($"{elseLabel}:");
-            GenerateStatement(ifStmt.ElseBranch);
-        }
-        else
-        {
-            // If-only statement
-            AppendAsm($"je {endIfLabel}", "Condition is false, jump to end");
-
-            // Then branch
-            GenerateStatement(ifStmt.ThenBranch);
+            GenerateStatement(ifStmt.ElseBranch!);
         }
 
         // End label for both cases
@@ -226,8 +220,69 @@ public class Generator
                 AppendAsm("add esp, 8", "Clean up stack for printf");
                 AppendAsm("mov eax, 0", "A print expression evaluates to 0");
                 break;
+            case UnaryExpressionNode unaryExpr:
+                GenerateExpression(unaryExpr.Operand);
+                if (unaryExpr.Operator.Type == TokenType.Minus)
+                {
+                    AppendAsm("neg eax", "Negate value");
+                }
+                else
+                {
+                    throw new NotImplementedException($"Unsupported unary operator: {unaryExpr.Operator.Type}");
+                }
+                break;
+            case BinaryExpressionNode binExpr:
+                GenerateBinaryExpression(binExpr);
+                break;
             default:
                 throw new NotImplementedException($"Unsupported expression type: {expression.GetType().Name}");
+        }
+    }
+
+    private void GenerateBinaryExpression(BinaryExpressionNode binExpr)
+    {
+        // Evaluate right-hand side first and push to stack
+        GenerateExpression(binExpr.Right);
+        AppendAsm("push eax");
+
+        // Evaluate left-hand side, result is in EAX
+        GenerateExpression(binExpr.Left);
+
+        // Pop right-hand side into EBX
+        AppendAsm("pop ebx");
+
+        switch (binExpr.Operator.Type)
+        {
+            case TokenType.Plus:
+                AppendAsm("add eax, ebx", "+");
+                break;
+            case TokenType.Minus:
+                AppendAsm("sub eax, ebx", "-"); // EAX = EAX - EBX
+                break;
+
+            case TokenType.Equal:
+            case TokenType.NotEqual:
+            case TokenType.LessThan:
+            case TokenType.LessThanOrEqual:
+            case TokenType.GreaterThan:
+            case TokenType.GreaterThanOrEqual:
+                AppendAsm("cmp eax, ebx");
+                string setInstruction = binExpr.Operator.Type switch
+                {
+                    TokenType.Equal => "sete al",
+                    TokenType.NotEqual => "setne al",
+                    TokenType.LessThan => "setl al",
+                    TokenType.LessThanOrEqual => "setle al",
+                    TokenType.GreaterThan => "setg al",
+                    TokenType.GreaterThanOrEqual => "setge al",
+                    _ => "" // Should not happen
+                };
+                AppendAsm(setInstruction, binExpr.Operator.Value);
+                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
+                break;
+
+            default:
+                throw new NotImplementedException($"Unsupported binary operator: {binExpr.Operator.Type}");
         }
     }
 }

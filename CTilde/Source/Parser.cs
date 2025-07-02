@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-
-namespace CTilde;
+﻿namespace CTilde;
 
 public class Parser
 {
@@ -17,46 +14,52 @@ public class Parser
     private Token Current => _position < _tokens.Count ? _tokens[_position] : new(TokenType.Unknown, string.Empty);
     private Token Peek(int offset) => _position + offset < _tokens.Count ? _tokens[_position + offset] : new(TokenType.Unknown, string.Empty);
 
-
     private Token Eat(TokenType expectedType)
     {
-        var currentToken = Current;
-        if (currentToken.Type == expectedType)
+        Token currentToken = Current;
+
+        if (currentToken.Type != expectedType)
         {
-            _position++;
-            return currentToken;
+            throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type}");
         }
-        throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type}");
+
+        _position++;
+        return currentToken;
     }
 
     public ProgramNode Parse()
     {
-        var function = ParseFunction();
-        return new ProgramNode(function);
+        FunctionDeclarationNode function = ParseFunction();
+        return new(function);
     }
 
     private FunctionDeclarationNode ParseFunction()
     {
-        Eat(TokenType.Keyword); // "int"
-        var identifier = Eat(TokenType.Identifier); // "main"
+        Eat(TokenType.Keyword);
+
+        Token identifier = Eat(TokenType.Identifier);
+
         Eat(TokenType.LeftParen);
         Eat(TokenType.RightParen);
 
-        var body = ParseBlockStatement();
+        BlockStatementNode body = ParseBlockStatement();
 
-        return new FunctionDeclarationNode(identifier.Value, body);
+        return new(identifier.Value, body);
     }
 
     private BlockStatementNode ParseBlockStatement()
     {
         Eat(TokenType.LeftBrace);
-        var statements = new List<StatementNode>();
+
+        List<StatementNode> statements = [];
+
         while (Current.Type != TokenType.RightBrace)
         {
             statements.Add(ParseStatement());
         }
+
         Eat(TokenType.RightBrace);
-        return new BlockStatementNode(statements);
+        return new(statements);
     }
 
     private StatementNode ParseStatement()
@@ -152,67 +155,130 @@ public class Parser
 
     private ExpressionNode ParseAssignmentExpression()
     {
-        // Parse the left-hand side, which could be a function call or variable
-        var left = ParseCallExpression();
+        ExpressionNode left = ParseEqualityExpression();
 
-        if (Current.Type == TokenType.Assignment)
+        if (Current.Type != TokenType.Assignment)
         {
-            Eat(TokenType.Assignment);
-            // Assignment is right-associative
-            var right = ParseAssignmentExpression();
+            return left;
+        }
 
-            // The target of an assignment must be a variable
-            if (left is VariableExpressionNode varNode)
-            {
-                return new AssignmentExpressionNode(varNode.Identifier, right);
-            }
+        Eat(TokenType.Assignment);
 
-            throw new InvalidOperationException("Invalid assignment target.");
+        ExpressionNode right = ParseAssignmentExpression();
+
+        if (left is VariableExpressionNode varNode)
+        {
+            return new AssignmentExpressionNode(varNode.Identifier, right);
+        }
+
+        throw new InvalidOperationException("Invalid assignment target.");
+    }
+
+    private ExpressionNode ParseEqualityExpression()
+    {
+        ExpressionNode left = ParseComparisonExpression();
+
+        while (Current.Type is TokenType.Equal or TokenType.NotEqual)
+        {
+            Token op = Current;
+            Eat(Current.Type);
+            ExpressionNode right = ParseComparisonExpression();
+            left = new BinaryExpressionNode(left, op, right);
         }
 
         return left;
     }
 
-    private ExpressionNode ParseCallExpression()
+    private ExpressionNode ParseComparisonExpression()
     {
-        // A call expression is a primary expression (like an identifier)
-        // possibly followed by parentheses.
-        var expr = ParsePrimaryExpression();
+        ExpressionNode left = ParseAdditiveExpression();
 
-        if (Current.Type == TokenType.LeftParen)
+        while (Current.Type is TokenType.LessThan or TokenType.LessThanOrEqual or TokenType.GreaterThan or TokenType.GreaterThanOrEqual)
         {
-            // If we see a '(', it must be a function call.
-            // The thing being called must have been a variable.
-            if (expr is VariableExpressionNode varNode)
-            {
-                Eat(TokenType.LeftParen);
-                // For now, only one argument is supported.
-                var argument = ParseExpression();
-                Eat(TokenType.RightParen);
-                return new CallExpressionNode(varNode.Identifier, argument);
-            }
-            throw new InvalidOperationException("Expression is not callable.");
+            Token op = Current;
+            Eat(Current.Type);
+            ExpressionNode right = ParseAdditiveExpression();
+            left = new BinaryExpressionNode(left, op, right);
         }
 
-        return expr;
+        return left;
+    }
+
+    private ExpressionNode ParseAdditiveExpression()
+    {
+        ExpressionNode left = ParseUnaryExpression();
+
+        while (Current.Type is TokenType.Plus or TokenType.Minus)
+        {
+            Token op = Current;
+            Eat(Current.Type);
+            ExpressionNode right = ParseUnaryExpression();
+            left = new BinaryExpressionNode(left, op, right);
+        }
+
+        return left;
+    }
+
+    private ExpressionNode ParseUnaryExpression()
+    {
+        if (Current.Type == TokenType.Minus)
+        {
+            Token op = Eat(TokenType.Minus);
+            ExpressionNode operand = ParseUnaryExpression();
+            return new UnaryExpressionNode(op, operand);
+        }
+
+        return ParseCallExpression();
+    }
+
+    private ExpressionNode ParseCallExpression()
+    {
+        ExpressionNode expr = ParsePrimaryExpression();
+
+        if (Current.Type != TokenType.LeftParen)
+        {
+            return expr;
+        }
+
+        if (expr is VariableExpressionNode varNode)
+        {
+            Eat(TokenType.LeftParen);
+
+            ExpressionNode argument = ParseExpression();
+
+            Eat(TokenType.RightParen);
+            return new CallExpressionNode(varNode.Identifier, argument);
+        }
+
+        throw new InvalidOperationException("Expression is not callable.");
     }
 
     private ExpressionNode ParsePrimaryExpression()
     {
         if (Current.Type == TokenType.IntegerLiteral)
         {
-            var token = Eat(TokenType.IntegerLiteral);
+            Token token = Eat(TokenType.IntegerLiteral);
+
             if (int.TryParse(token.Value, out int value))
             {
                 return new IntegerLiteralNode(value);
             }
+
             throw new InvalidOperationException($"Could not parse integer literal: {token.Value}");
         }
 
         if (Current.Type == TokenType.Identifier)
         {
-            var token = Eat(TokenType.Identifier);
+            Token token = Eat(TokenType.Identifier);
             return new VariableExpressionNode(token);
+        }
+
+        if (Current.Type == TokenType.LeftParen)
+        {
+            Eat(TokenType.LeftParen);
+            var expr = ParseExpression();
+            Eat(TokenType.RightParen);
+            return expr;
         }
 
         throw new InvalidOperationException($"Unexpected expression token: {Current.Type}");

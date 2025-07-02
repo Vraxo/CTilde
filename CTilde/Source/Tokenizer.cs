@@ -13,6 +13,14 @@ public enum TokenType
     LeftBrace,
     RightBrace,
     Assignment,
+    Equal,
+    NotEqual,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    Plus,
+    Minus,
     Unknown
 }
 
@@ -66,9 +74,61 @@ public class Tokenizer
                     tokens.Add(new(TokenType.Semicolon, ";"));
                     i++;
                     continue;
-                case '=':
-                    tokens.Add(new(TokenType.Assignment, "="));
+                case '+':
+                    tokens.Add(new(TokenType.Plus, "+"));
                     i++;
+                    continue;
+                case '-':
+                    tokens.Add(new(TokenType.Minus, "-"));
+                    i++;
+                    continue;
+                case '=':
+                    if (i + 1 < input.Length && input[i + 1] == '=')
+                    {
+                        tokens.Add(new Token(TokenType.Equal, "=="));
+                        i += 2;
+                    }
+                    else
+                    {
+                        tokens.Add(new Token(TokenType.Assignment, "="));
+                        i++;
+                    }
+                    continue;
+                case '!':
+                    if (i + 1 < input.Length && input[i + 1] == '=')
+                    {
+                        tokens.Add(new Token(TokenType.NotEqual, "!="));
+                        i += 2;
+                    }
+                    else
+                    {
+                        tokens.Add(new Token(TokenType.Unknown, c.ToString()));
+                        i++;
+                    }
+                    continue;
+                case '<':
+                    if (i + 1 < input.Length && input[i + 1] == '=')
+                    {
+                        tokens.Add(new Token(TokenType.LessThanOrEqual, "<="));
+                        i += 2;
+                    }
+                    else
+                    {
+                        tokens.Add(new Token(TokenType.LessThan, "<"));
+                        i++;
+                    }
+                    continue;
+                case '>':
+                    if (i + 1 < input.Length && input[i + 1] == '=')
+                    {
+                        tokens.Add(new Token(TokenType.GreaterThanOrEqual, ">="));
+                        i += 2;
+                    }
+                    else
+                    {
+                        tokens.Add(new Token(TokenType.GreaterThan, ">"));
+                        i++;
+                    }
                     continue;
             }
 

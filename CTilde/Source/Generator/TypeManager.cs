@@ -99,21 +99,25 @@ public class TypeManager
         }
         if (callee is QualifiedAccessExpressionNode qNode)
         {
-            var nsPart = qNode.Namespace.Value;
+            var qualifier = qNode.Namespace.Value; // This is now potentially an enum type name OR a namespace alias/name
             var funcName = qNode.Member.Value;
 
-            // Check for enum member access first, this method is for functions only.
-            // If it was an enum, it should have been handled in ExpressionGenerator before calling this.
-            if (ResolveEnumMember(nsPart, funcName, context, currentFunction.Namespace).HasValue)
+            // First, check if the qualifier refers to an enum type name.
+            string? enumTypeFQN = ResolveEnumTypeName(qualifier, currentFunction.Namespace, context);
+            if (enumTypeFQN != null)
             {
-                throw new InvalidOperationException($"'{nsPart}::{funcName}' is an enum member, not a function.");
+                // If it resolves to an enum type, then this is not a function call.
+                // It's an error to call a function using EnumType::member syntax, so this path should not be reached for successful enum member lookups
+                throw new InvalidOperationException($"'{qualifier}::{funcName}' is an enum member, not a function.");
             }
 
-            var aliased = context.Usings.FirstOrDefault(u => u.Alias == nsPart);
-            if (aliased != null) nsPart = aliased.Namespace;
+            // If it's not an enum type, treat the qualifier as a namespace or alias.
+            string? resolvedNamespace = qualifier;
+            var aliased = context.Usings.FirstOrDefault(u => u.Alias == qualifier);
+            if (aliased != null) resolvedNamespace = aliased.Namespace;
 
-            var func = _functions.FirstOrDefault(f => f.OwnerStructName == null && f.Namespace == nsPart && f.Name == funcName);
-            if (func == null) throw new InvalidOperationException($"Function '{nsPart}::{funcName}' not found.");
+            var func = _functions.FirstOrDefault(f => f.OwnerStructName == null && f.Namespace == resolvedNamespace && f.Name == funcName);
+            if (func == null) throw new InvalidOperationException($"Function '{resolvedNamespace}::{funcName}' not found.");
             return func;
         }
         throw new NotSupportedException($"Unsupported callee type for resolution: {callee.GetType().Name}");
@@ -155,37 +159,67 @@ public class TypeManager
     }
 
     /// <summary>
-    /// Resolves a qualified enum member access to its integer value.
-    /// Used for `Namespace::Member` syntax.
+    /// Resolves an unqualified or aliased enum type name to its fully qualified name.
     /// </summary>
-    /// <param name="namespaceOrAlias">The namespace or alias part (e.g., "rl" in rl::KEY_D).</param>
-    /// <param name="memberName">The enum member name (e.g., "KEY_D").</param>
-    /// <param name="context">The compilation unit context for `using` directives.</param>
-    /// <param name="currentFunctionNamespace">The namespace of the current function, for direct lookup.</param>
-    /// <returns>The integer value of the enum member, or null if not found.</returns>
-    public int? ResolveEnumMember(string namespaceOrAlias, string memberName, CompilationUnitNode context, string? currentFunctionNamespace)
+    /// <param name="name">The unqualified or aliased enum type name (e.g., "KeyboardKey", "rl::KeyboardKey").</param>
+    /// <param name="currentNamespace">The namespace of the current context.</param>
+    /// <param name="context">The compilation unit context to get `using` directives.</param>
+    /// <returns>The fully qualified enum type name (e.g., "raylib::KeyboardKey"), or null if not found.</returns>
+    public string? ResolveEnumTypeName(string name, string? currentNamespace, CompilationUnitNode context)
     {
-        string? resolvedNamespace = namespaceOrAlias;
-        var aliased = context.Usings.FirstOrDefault(u => u.Alias == namespaceOrAlias);
-        if (aliased != null)
+        if (name.Contains("::"))
         {
-            resolvedNamespace = aliased.Namespace;
-        }
+            var parts = name.Split("::");
+            var nsPart = parts[0];
+            var enumName = parts[1];
 
-        // Search through all known enums
-        foreach (var entry in _enums)
-        {
-            var enumNode = entry.Value;
-
-            // Check if the enum's namespace matches the resolved namespace
-            // Or if it's a global enum being accessed qualifiedly without explicit namespace (e.g., `::KEY_D`)
-            if ((enumNode.Namespace == resolvedNamespace) && enumNode.Members.Any(m => m.Name.Value == memberName))
+            var aliased = context.Usings.FirstOrDefault(u => u.Alias == nsPart);
+            if (aliased != null)
             {
-                return enumNode.Members.First(m => m.Name.Value == memberName).Value;
+                var fqn = $"{aliased.Namespace}::{enumName}";
+                return _enums.ContainsKey(fqn) ? fqn : null;
             }
+            // If it's already a qualified name and not an alias, check it directly
+            return _enums.ContainsKey(name) ? name : null;
         }
-        return null; // Not found as a qualified enum member
+
+        // Try current namespace
+        if (currentNamespace != null)
+        {
+            var fqn = $"{currentNamespace}::{name}";
+            if (_enums.ContainsKey(fqn)) return fqn;
+        }
+
+        // Try using namespaces (without aliases)
+        foreach (var u in context.Usings.Where(u => u.Alias == null))
+        {
+            var fqn = $"{u.Namespace}::{name}";
+            if (_enums.ContainsKey(fqn)) return fqn;
+        }
+
+        // Try global namespace
+        if (_enums.ContainsKey(name)) return name;
+
+        return null; // Enum type not found
     }
+
+
+    /// <summary>
+    /// Gets the integer value of an enum member given its fully qualified enum type name.
+    /// </summary>
+    /// <param name="enumFQN">The fully qualified name of the enum type (e.g., "raylib::KeyboardKey").</param>
+    /// <param name="memberName">The name of the enum member (e.g., "KEY_D").</param>
+    /// <returns>The integer value of the enum member, or null if not found.</returns>
+    public int? GetEnumValue(string enumFQN, string memberName)
+    {
+        if (_enums.TryGetValue(enumFQN, out var enumDef))
+        {
+            var member = enumDef.Members.FirstOrDefault(m => m.Name.Value == memberName);
+            if (member != null) return member.Value;
+        }
+        return null;
+    }
+
 
     /// <summary>
     /// Resolves an unqualified enum member access to its integer value.
@@ -197,7 +231,7 @@ public class TypeManager
     /// <returns>The integer value of the enum member, or null if not found.</returns>
     public int? ResolveUnqualifiedEnumMember(string memberName, CompilationUnitNode context, string? currentContextNamespace)
     {
-        // 1. Check current namespace
+        // 1. Check current namespace for any enum containing this member
         if (currentContextNamespace != null)
         {
             foreach (var enumDef in _enums.Values.Where(e => e.Namespace == currentContextNamespace))
@@ -207,7 +241,7 @@ public class TypeManager
             }
         }
 
-        // 2. Check using namespaces (without aliases)
+        // 2. Check using namespaces (without aliases) for any enum containing this member
         foreach (var u in context.Usings.Where(u => u.Alias == null))
         {
             foreach (var enumDef in _enums.Values.Where(e => e.Namespace == u.Namespace))
@@ -217,7 +251,7 @@ public class TypeManager
             }
         }
 
-        // 3. Check global namespace (enums with null namespace)
+        // 3. Check global namespace (enums with null namespace) for any enum containing this member
         foreach (var enumDef in _enums.Values.Where(e => e.Namespace == null))
         {
             var member = enumDef.Members.FirstOrDefault(m => m.Name.Value == memberName);
@@ -403,13 +437,23 @@ public class TypeManager
                 return returnTypeNameRaw;
 
             case QualifiedAccessExpressionNode q:
-                // If it's an enum member, its "type" is int. Otherwise, it must be a function.
-                if (ResolveEnumMember(q.Namespace.Value, q.Member.Value, context, currentFunction.Namespace).HasValue)
+                // Check if the qualifier refers to an enum type name.
+                string? enumTypeFQN = ResolveEnumTypeName(q.Namespace.Value, currentFunction.Namespace, context);
+                if (enumTypeFQN != null)
                 {
-                    return "int";
+                    if (GetEnumValue(enumTypeFQN, q.Member.Value).HasValue)
+                    {
+                        return "int"; // Enum members are integers
+                    }
+                    // If it resolved to an enum type, but the member isn't found, still an enum context problem
+                    throw new InvalidOperationException($"Enum '{q.Namespace.Value}' does not contain member '{q.Member.Value}'.");
                 }
-                // Otherwise, it must be a function call target, which doesn't have a value type directly here.
-                throw new InvalidOperationException("Qualified access expression cannot be evaluated as a value directly, unless it's an enum member. Expected a function call.");
+                // If not an enum type, it must be a function call target
+                // For a function target, GetExpressionType isn't directly applicable, as it returns the *function itself*, not its return type.
+                // This QualifiedAccessExpressionNode might be the Callee of a CallExpressionNode.
+                // In that context, CallExpressionNode handles the function resolution and return type.
+                // If it's a standalone QualifiedAccessExpressionNode, it's likely an error unless it's an enum.
+                throw new InvalidOperationException($"Qualified access expression '{q.Namespace.Value}::{q.Member.Value}' cannot be evaluated as a value directly. Expected an enum member or part of a function call.");
 
             case BinaryExpressionNode: return "int";
 

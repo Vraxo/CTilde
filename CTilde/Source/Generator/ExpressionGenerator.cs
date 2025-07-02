@@ -236,15 +236,19 @@ public class ExpressionGenerator
             case CallExpressionNode callExpr: GenerateCallExpression(callExpr); break;
             case QualifiedAccessExpressionNode qNode:
                 {
-                    // Check if it's an enum member access
-                    // Note: This call to ResolveEnumMember is for qualified access (e.g., `Namespace::Member`).
-                    var enumValue = TypeManager.ResolveEnumMember(qNode.Namespace.Value, qNode.Member.Value, CurrentCompilationUnit, CurrentFunction.Namespace);
-                    if (enumValue.HasValue)
+                    // First, try to resolve the "Namespace" part as an Enum Type Name
+                    string? enumTypeFQN = TypeManager.ResolveEnumTypeName(qNode.Namespace.Value, CurrentFunction.Namespace, CurrentCompilationUnit);
+                    if (enumTypeFQN != null)
                     {
-                        Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {qNode.Namespace.Value}::{qNode.Member.Value}");
-                        break;
+                        var enumValue = TypeManager.GetEnumValue(enumTypeFQN, qNode.Member.Value);
+                        if (enumValue.HasValue)
+                        {
+                            Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {qNode.Namespace.Value}::{qNode.Member.Value}");
+                            break;
+                        }
                     }
-                    // If not an enum, it must be a qualified function call
+
+                    // If not an enum member access, it must be a qualified function call
                     var func = TypeManager.ResolveFunctionCall(qNode, CurrentCompilationUnit, CurrentFunction);
 
                     if (func.Body == null)

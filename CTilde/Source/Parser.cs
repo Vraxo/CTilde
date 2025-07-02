@@ -147,6 +147,13 @@ public class Parser
                 continue;
             }
 
+            bool isConst = false; // Check for const for member variables
+            if (Current.Type == TokenType.Keyword && Current.Value == "const")
+            {
+                isConst = true;
+                Eat(TokenType.Keyword); // Eat 'const'
+            }
+
             var (type, pointerLevel) = ParseType();
             var name = Eat(TokenType.Identifier);
 
@@ -159,7 +166,7 @@ public class Parser
             else
             {
                 // This is a member variable.
-                members.Add(new MemberVariableNode(type, pointerLevel, name, currentAccess));
+                members.Add(new MemberVariableNode(isConst, type, pointerLevel, name, currentAccess)); // Pass isConst
                 Eat(TokenType.Semicolon);
             }
         }
@@ -296,6 +303,7 @@ public class Parser
                 case "return": return ParseReturnStatement();
                 case "if": return ParseIfStatement();
                 case "while": return ParseWhileStatement();
+                case "const": // Handle 'const' keyword for declarations
                 case "int":
                 case "char":
                 case "struct":
@@ -305,22 +313,46 @@ public class Parser
 
         // Disambiguate between a declaration and an expression statement
         bool isDeclaration = false;
-        if (Current.Type == TokenType.Identifier)
+        // Check for 'const' keyword, type keyword, or identifier followed by variable name
+        if (Current.Type == TokenType.Identifier || (Current.Type == TokenType.Keyword && (Current.Value == "const" || Current.Value == "int" || Current.Value == "char" || Current.Value == "struct")))
         {
-            var lookahead1 = Peek(1).Type;
-            if (lookahead1 == TokenType.Identifier || lookahead1 == TokenType.Star)
+            int tempPos = _position; // Save current position for backtracking
+            try
             {
-                isDeclaration = true;
-            }
-            else if (lookahead1 == TokenType.DoubleColon && Peek(2).Type == TokenType.Identifier)
-            {
-                var lookahead3 = Peek(3).Type;
-                if (lookahead3 == TokenType.Identifier || lookahead3 == TokenType.Star)
+                if (Current.Type == TokenType.Keyword && Current.Value == "const")
                 {
-                    isDeclaration = true;
+                    _position++; // Consume 'const'
+                }
+
+                Token potentialTypeToken = Current;
+                if (potentialTypeToken.Type == TokenType.Identifier || (potentialTypeToken.Type == TokenType.Keyword && (potentialTypeToken.Value == "int" || potentialTypeToken.Value == "char" || potentialTypeToken.Value == "struct")))
+                {
+                    _position++; // Consume potential type (Identifier or Keyword like 'int')
+                    while (Current.Type == TokenType.Star) _position++; // Consume pointers
+
+                    if (Current.Type == TokenType.Identifier) // Next must be the variable name
+                    {
+                        isDeclaration = true;
+                    }
+                    else if (potentialTypeToken.Type == TokenType.Identifier && Peek(0).Type == TokenType.DoubleColon && Peek(1).Type == TokenType.Identifier)
+                    {
+                        // Case for `ns::TypeName varName`
+                        _position++; // Consume ::
+                        _position++; // Consume TypeName
+                        while (Current.Type == TokenType.Star) _position++; // Consume pointers
+                        if (Current.Type == TokenType.Identifier) // Next must be variable name
+                        {
+                            isDeclaration = true;
+                        }
+                    }
                 }
             }
+            finally
+            {
+                _position = tempPos; // Always rewind position
+            }
         }
+
 
         if (isDeclaration)
         {
@@ -352,6 +384,13 @@ public class Parser
 
     private StatementNode ParseDeclarationStatement()
     {
+        bool isConst = false;
+        if (Current.Type == TokenType.Keyword && Current.Value == "const")
+        {
+            isConst = true;
+            Eat(TokenType.Keyword); // Eat 'const'
+        }
+
         var (typeToken, pointerLevel) = ParseType();
         var identifier = Eat(TokenType.Identifier);
         ExpressionNode? initializer = null;
@@ -367,8 +406,13 @@ public class Parser
                 initializer = ParseExpression();
             }
         }
+        else if (isConst)
+        {
+            // const variables must be initialized
+            throw new InvalidOperationException($"Constant variable '{identifier.Value}' must be initialized.");
+        }
         Eat(TokenType.Semicolon);
-        return new DeclarationStatementNode(typeToken, pointerLevel, identifier, initializer);
+        return new DeclarationStatementNode(isConst, typeToken, pointerLevel, identifier, initializer);
     }
 
     private ExpressionNode ParseInitializerListExpression()

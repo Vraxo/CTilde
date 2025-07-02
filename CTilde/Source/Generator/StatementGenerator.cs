@@ -9,7 +9,7 @@ public class StatementGenerator
     private AssemblyBuilder Builder => _context.Builder;
     private TypeManager TypeManager => _context.TypeManager;
     private CompilationUnitNode CurrentCompilationUnit => _context.CurrentCompilationUnit;
-    private FunctionDeclarationNode CurrentFunction => _context.CurrentFunction; // Access new property
+    private FunctionDeclarationNode CurrentFunction => _context.CurrentFunction;
     private ExpressionGenerator ExpressionGenerator => _context.ExpressionGenerator;
 
     public StatementGenerator(CodeGenerator context)
@@ -35,7 +35,7 @@ public class StatementGenerator
                         // Resolve the base type name, then append the pointer suffix back if any
                         string baseTypeName = rawTypeName.TrimEnd('*');
                         string pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
-                        string resolvedTypeName = TypeManager.ResolveTypeName(baseTypeName, CurrentFunction.Namespace, CurrentCompilationUnit) + pointerSuffix; // Use CurrentFunction
+                        string resolvedTypeName = TypeManager.ResolveTypeName(baseTypeName, CurrentFunction.Namespace, CurrentCompilationUnit) + pointerSuffix;
 
                         if (!TypeManager.IsStruct(resolvedTypeName))
                             throw new InvalidOperationException($"Initializer list can only be used for struct types, not '{rawTypeName}'.");
@@ -80,11 +80,22 @@ public class StatementGenerator
                             currentMemberOffset += memberSize;
                         }
                     }
-                    else
+                    else // Simple variable initialization (e.g., int x = 5; or const int x = 5;)
                     {
-                        var left = new VariableExpressionNode(decl.Identifier);
-                        var assignment = new AssignmentExpressionNode(left, decl.Initializer);
-                        ExpressionGenerator.GenerateExpression(assignment);
+                        var variableName = decl.Identifier.Value;
+                        var varType = _context.CurrentSymbols.GetSymbolType(variableName); // Get FQN type from symbol table
+
+                        ExpressionGenerator.GenerateExpression(decl.Initializer); // Value to assign is in EAX
+                        _context.CurrentSymbols.TryGetSymbol(variableName, out var offset, out _);
+
+                        if (TypeManager.GetSizeOfType(varType, CurrentCompilationUnit) == 1)
+                        {
+                            Builder.AppendInstruction($"mov byte [ebp + {offset}], al", $"Initialize {variableName}");
+                        }
+                        else
+                        {
+                            Builder.AppendInstruction($"mov dword [ebp + {offset}], eax", $"Initialize {variableName}");
+                        }
                     }
                 }
                 break;

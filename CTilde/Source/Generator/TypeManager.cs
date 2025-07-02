@@ -234,6 +234,19 @@ public class TypeManager
         throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
     }
 
+    public bool IsMemberConst(string structName, string memberName)
+    {
+        if (!_structs.TryGetValue(structName, out var structDef))
+            throw new InvalidOperationException($"Undefined struct '{structName}'");
+
+        var member = structDef.Members.FirstOrDefault(m => m.Name.Value == memberName);
+        if (member == null)
+        {
+            throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'.");
+        }
+        return member.IsConst;
+    }
+
     public string GetExpressionType(ExpressionNode expr, SymbolTable symbols, CompilationUnitNode context, FunctionDeclarationNode currentFunction)
     {
         switch (expr)

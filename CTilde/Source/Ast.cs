@@ -25,7 +25,7 @@ public abstract record ExpressionNode : AstNode;
 // Program structure
 public record ImportDirectiveNode(string LibraryName) : AstNode;
 public record UsingDirectiveNode(string Namespace, string? Alias) : AstNode;
-public record MemberVariableNode(Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode;
+public record MemberVariableNode(bool IsConst, Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode; // Added IsConst
 public record StructDefinitionNode(string Name, string? Namespace, List<MemberVariableNode> Members) : AstNode;
 public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
 public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, string? Namespace) : AstNode;
@@ -40,7 +40,7 @@ public record BlockStatementNode(List<StatementNode> Statements) : StatementNode
 public record ReturnStatementNode(ExpressionNode? Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBody, StatementNode? ElseBody) : StatementNode;
-public record DeclarationStatementNode(Token Type, int PointerLevel, Token Identifier, ExpressionNode? Initializer) : StatementNode;
+public record DeclarationStatementNode(bool IsConst, Token Type, int PointerLevel, Token Identifier, ExpressionNode? Initializer) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
 
 

@@ -51,7 +51,8 @@ public class Tokenizer
         "public",
         "private",
         "namespace",
-        "using"
+        "using",
+        "const" // Added const keyword
     ];
 
     public static List<Token> Tokenize(string input)

@@ -6,7 +6,7 @@ namespace CTilde;
 
 public class SymbolTable
 {
-    private readonly Dictionary<string, (int Offset, string Type)> _symbols = new();
+    private readonly Dictionary<string, (int Offset, string Type, bool IsConst)> _symbols = new(); // Added IsConst
 
     public int TotalLocalSize { get; }
 
@@ -66,22 +66,23 @@ public class SymbolTable
                 }
             }
 
-            _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName);
+            // Parameters are not marked as 'const' in this simple implementation, they are effectively copies.
+            _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false);
             currentParamOffset += Math.Max(4, typeManager.GetSizeOfType(resolvedTypeName, currentUnit)); // Arguments on stack are 4-byte aligned
         }
 
         // Map local variable offsets (negative on stack frame)
         int currentLocalOffset = 0;
-        foreach (var stmt in allLocalDeclarations) // Use all collected declarations
+        foreach (var decl in allLocalDeclarations) // Use all collected declarations
         {
-            var rawTypeName = typeManager.GetTypeName(stmt.Type, stmt.PointerLevel);
+            var rawTypeName = typeManager.GetTypeName(decl.Type, decl.PointerLevel);
 
             // Resolve the base type name, then append the pointer suffix back if any
             string baseTypeName = rawTypeName.TrimEnd('*');
             string pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
 
             string resolvedTypeName;
-            if (stmt.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
+            if (decl.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
             {
                 resolvedTypeName = rawTypeName;
             }
@@ -92,7 +93,7 @@ public class SymbolTable
 
             int size = typeManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;
-            _symbols[stmt.Identifier.Value] = (currentLocalOffset, resolvedTypeName);
+            _symbols[decl.Identifier.Value] = (currentLocalOffset, resolvedTypeName, decl.IsConst); // Store IsConst
         }
     }
 
@@ -144,5 +145,16 @@ public class SymbolTable
             return symbol.Type;
         }
         throw new InvalidOperationException($"Symbol '{name}' not found in current scope.");
+    }
+
+    public bool IsSymbolConst(string name)
+    {
+        // For const check, if symbol isn't found, it means it's not a local/param,
+        // so it cannot be a const local/param. Return false, let other checks handle.
+        if (_symbols.TryGetValue(name, out var symbol))
+        {
+            return symbol.IsConst;
+        }
+        return false; // Not a local/parameter, so not a const local/parameter.
     }
 }

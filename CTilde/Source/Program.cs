@@ -17,7 +17,7 @@ public class Program
         var ast = parser.Parse();
 
         // 3. Generate
-        var generator = new Generator(ast);
+        var generator = new CodeGenerator(ast);
         string asmCode = generator.Generate();
 
         // 4. Output

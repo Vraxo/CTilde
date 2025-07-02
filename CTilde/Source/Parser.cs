@@ -32,39 +32,43 @@ public class Parser
 
     public ProgramNode Parse()
     {
+        var imports = new List<ImportDirectiveNode>();
         var functions = new List<FunctionDeclarationNode>();
-        while (_position < _tokens.Count)
-        {
-            // Stop if we hit padding tokens at the end.
-            if (Current.Type == TokenType.Unknown && Current.Value == string.Empty)
-            {
-                break;
-            }
 
-            // Check if the current token is a valid start of a function.
-            if (Current.Type == TokenType.Keyword && (Current.Value == "int" || Current.Value == "void"))
+        while (Current.Type != TokenType.Unknown)
+        {
+            if (Current.Type == TokenType.Hash)
             {
-                functions.Add(ParseFunction());
+                imports.Add(ParseImportDirective());
             }
             else
             {
-                throw new InvalidOperationException($"Unexpected token '{Current.Value}' at top level. Only function definitions are allowed.");
+                functions.Add(ParseFunction());
             }
         }
-        var programNode = new ProgramNode(functions);
+
+        var programNode = new ProgramNode(imports, functions);
         SetParents(programNode);
         return programNode;
+    }
+
+    private ImportDirectiveNode ParseImportDirective()
+    {
+        Eat(TokenType.Hash);
+        var keyword = Eat(TokenType.Identifier);
+        if (keyword.Value != "import")
+        {
+            throw new InvalidOperationException($"Expected 'import' after '#' but got '{keyword.Value}'");
+        }
+        var libNameToken = Eat(TokenType.StringLiteral);
+        return new ImportDirectiveNode(libNameToken.Value);
     }
 
     private void SetParents(AstNode node)
     {
         foreach (var property in node.GetType().GetProperties())
         {
-            if (property.CanWrite && property.Name == "Parent" && property.PropertyType == typeof(AstNode))
-            {
-                // This property is already the parent link, skip it.
-                continue;
-            }
+            if (property.CanWrite && property.Name == "Parent") continue;
 
             if (property.GetValue(node) is AstNode child)
             {
@@ -98,7 +102,7 @@ public class Parser
             throw new InvalidOperationException($"Unsupported function return type: {returnType.Value}");
         }
 
-        var identifier = Eat(TokenType.Identifier); // function name
+        var identifier = Eat(TokenType.Identifier);
         Eat(TokenType.LeftParen);
 
         var parameters = new List<ParameterNode>();
@@ -114,7 +118,15 @@ public class Parser
 
         Eat(TokenType.RightParen);
 
-        var body = ParseBlockStatement();
+        StatementNode? body = null;
+        if (Current.Type == TokenType.LeftBrace)
+        {
+            body = ParseBlockStatement();
+        }
+        else
+        {
+            Eat(TokenType.Semicolon); // It's a prototype
+        }
 
         return new FunctionDeclarationNode(returnType, identifier.Value, parameters, body);
     }
@@ -154,7 +166,7 @@ public class Parser
 
         if (Current.Type == TokenType.Keyword && (Current.Value == "int" || Current.Value == "void"))
         {
-            throw new InvalidOperationException($"Function definitions are not allowed inside other functions.");
+            throw new InvalidOperationException($"Function definitions/prototypes are not allowed inside other functions.");
         }
 
 
@@ -163,7 +175,6 @@ public class Parser
             return ParseBlockStatement();
         }
 
-        // Otherwise, it must be an expression statement (e.g. assignment, call)
         var expression = ParseExpression();
         Eat(TokenType.Semicolon);
         return new ExpressionStatementNode(expression);
@@ -171,7 +182,7 @@ public class Parser
 
     private IfStatementNode ParseIfStatement()
     {
-        Eat(TokenType.Keyword); // "if"
+        Eat(TokenType.Keyword);
         Eat(TokenType.LeftParen);
         var condition = ParseExpression();
         Eat(TokenType.RightParen);
@@ -181,7 +192,7 @@ public class Parser
 
         if (Current.Type == TokenType.Keyword && Current.Value == "else")
         {
-            Eat(TokenType.Keyword); // "else"
+            Eat(TokenType.Keyword);
             elseBody = ParseStatement();
         }
 
@@ -190,13 +201,13 @@ public class Parser
 
     private StatementNode ParseDeclarationStatement()
     {
-        Eat(TokenType.Keyword); // "int"
+        Eat(TokenType.Keyword);
         var identifier = Eat(TokenType.Identifier);
         ExpressionNode? initializer = null;
 
         if (Current.Type == TokenType.Assignment)
         {
-            Eat(TokenType.Assignment); // "="
+            Eat(TokenType.Assignment);
             initializer = ParseExpression();
         }
 
@@ -206,7 +217,7 @@ public class Parser
 
     private WhileStatementNode ParseWhileStatement()
     {
-        Eat(TokenType.Keyword); // "while"
+        Eat(TokenType.Keyword);
         Eat(TokenType.LeftParen);
         var condition = ParseExpression();
         Eat(TokenType.RightParen);
@@ -216,7 +227,7 @@ public class Parser
 
     private ReturnStatementNode ParseReturnStatement()
     {
-        Eat(TokenType.Keyword); // "return"
+        Eat(TokenType.Keyword);
         ExpressionNode? expression = null;
         if (Current.Type != TokenType.Semicolon)
         {
@@ -238,7 +249,7 @@ public class Parser
         if (Current.Type == TokenType.Assignment)
         {
             Eat(TokenType.Assignment);
-            var right = ParseAssignmentExpression(); // Right-associative
+            var right = ParseAssignmentExpression();
 
             if (left is VariableExpressionNode varNode)
             {

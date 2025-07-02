@@ -15,6 +15,7 @@ public enum TokenType
     LeftBrace,
     RightBrace,
     Comma,
+    Hash,
     Assignment,
     Unknown,
     Plus,
@@ -82,7 +83,7 @@ public class Tokenizer
                             case 't': sb.Append('\t'); break;
                             case '\\': sb.Append('\\'); break;
                             case '"': sb.Append('"'); break;
-                            default: // Not a recognized escape, treat literally
+                            default:
                                 sb.Append('\\');
                                 sb.Append(input[i]);
                                 break;
@@ -95,10 +96,7 @@ public class Tokenizer
                     i++;
                 }
 
-                if (i < input.Length)
-                {
-                    i++; // Skip closing quote
-                }
+                if (i < input.Length) i++;
 
                 tokens.Add(new Token(TokenType.StringLiteral, sb.ToString()));
                 continue;
@@ -106,95 +104,39 @@ public class Tokenizer
 
             switch (c)
             {
-                case '(':
-                    tokens.Add(new(TokenType.LeftParen, "("));
-                    i++;
-                    continue;
-                case ')':
-                    tokens.Add(new(TokenType.RightParen, ")"));
-                    i++;
-                    continue;
-                case '{':
-                    tokens.Add(new(TokenType.LeftBrace, "{"));
-                    i++;
-                    continue;
-                case '}':
-                    tokens.Add(new(TokenType.RightBrace, "}"));
-                    i++;
-                    continue;
-                case ';':
-                    tokens.Add(new(TokenType.Semicolon, ";"));
-                    i++;
-                    continue;
-                case ',':
-                    tokens.Add(new(TokenType.Comma, ","));
-                    i++;
-                    continue;
-                case '+':
-                    tokens.Add(new(TokenType.Plus, "+"));
-                    i++;
-                    continue;
-                case '-':
-                    tokens.Add(new(TokenType.Minus, "-"));
-                    i++;
-                    continue;
-                case '*':
-                    tokens.Add(new(TokenType.Star, "*"));
-                    i++;
-                    continue;
-                case '/':
-                    tokens.Add(new(TokenType.Slash, "/"));
-                    i++;
-                    continue;
-                case '<':
-                    tokens.Add(new(TokenType.LessThan, "<"));
-                    i++;
-                    continue;
-                case '>':
-                    tokens.Add(new(TokenType.GreaterThan, ">"));
-                    i++;
-                    continue;
+                case '#': tokens.Add(new(TokenType.Hash, "#")); i++; continue;
+                case '(': tokens.Add(new(TokenType.LeftParen, "(")); i++; continue;
+                case ')': tokens.Add(new(TokenType.RightParen, ")")); i++; continue;
+                case '{': tokens.Add(new(TokenType.LeftBrace, "{")); i++; continue;
+                case '}': tokens.Add(new(TokenType.RightBrace, "}")); i++; continue;
+                case ';': tokens.Add(new(TokenType.Semicolon, ";")); i++; continue;
+                case ',': tokens.Add(new(TokenType.Comma, ",")); i++; continue;
+                case '+': tokens.Add(new(TokenType.Plus, "+")); i++; continue;
+                case '-': tokens.Add(new(TokenType.Minus, "-")); i++; continue;
+                case '*': tokens.Add(new(TokenType.Star, "*")); i++; continue;
+                case '/': tokens.Add(new(TokenType.Slash, "/")); i++; continue;
+                case '<': tokens.Add(new(TokenType.LessThan, "<")); i++; continue;
+                case '>': tokens.Add(new(TokenType.GreaterThan, ">")); i++; continue;
                 case '=':
-                    if (i + 1 < input.Length && input[i + 1] == '=')
-                    {
-                        tokens.Add(new(TokenType.DoubleEquals, "=="));
-                        i += 2;
-                    }
-                    else
-                    {
-                        tokens.Add(new(TokenType.Assignment, "="));
-                        i++;
-                    }
+                    if (i + 1 < input.Length && input[i + 1] == '=') { tokens.Add(new(TokenType.DoubleEquals, "==")); i += 2; }
+                    else { tokens.Add(new(TokenType.Assignment, "=")); i++; }
                     continue;
                 case '!':
-                    if (i + 1 < input.Length && input[i + 1] == '=')
-                    {
-                        tokens.Add(new(TokenType.NotEquals, "!="));
-                        i += 2;
-                    }
-                    else
-                    {
-                        tokens.Add(new(TokenType.Unknown, c.ToString()));
-                        i++;
-                    }
+                    if (i + 1 < input.Length && input[i + 1] == '=') { tokens.Add(new(TokenType.NotEquals, "!=")); i += 2; }
+                    else { tokens.Add(new(TokenType.Unknown, c.ToString())); i++; }
                     continue;
             }
 
             if (char.IsLetter(c) || c == '_')
             {
                 int start = i;
-
                 while (i < input.Length && (char.IsLetterOrDigit(input[i]) || input[i] == '_'))
                 {
                     i++;
                 }
 
                 string value = input.Substring(start, i - start);
-
-                TokenType type = Keywords.Contains(value)
-                    ? TokenType.Keyword
-                    : TokenType.Identifier;
-
+                TokenType type = Keywords.Contains(value) ? TokenType.Keyword : TokenType.Identifier;
                 tokens.Add(new(type, value));
                 continue;
             }
@@ -202,12 +144,10 @@ public class Tokenizer
             if (char.IsDigit(c))
             {
                 int start = i;
-
                 while (i < input.Length && char.IsDigit(input[i]))
                 {
                     i++;
                 }
-
                 string value = input.Substring(start, i - start);
                 tokens.Add(new(TokenType.IntegerLiteral, value));
                 continue;
@@ -216,7 +156,7 @@ public class Tokenizer
             tokens.Add(new(TokenType.Unknown, c.ToString()));
             i++;
         }
-
+        tokens.Add(new(TokenType.Unknown, string.Empty)); // EOF token
         return tokens;
     }
 }

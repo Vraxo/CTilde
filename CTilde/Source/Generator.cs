@@ -11,6 +11,7 @@ public class Generator
     private readonly StringBuilder _sb = new();
     private int _labelCounter;
     private readonly Dictionary<string, string> _stringLiterals = new();
+    private readonly HashSet<string> _externalFunctions = new();
 
 
     // Rudimentary symbol table for a function's scope
@@ -24,8 +25,12 @@ public class Generator
 
     public string Generate()
     {
-        // Pre-pass to find all string literals
+        // Pre-pass to find all string literals and external functions
         FindAllStringLiterals(_program);
+        foreach (var func in _program.Functions.Where(f => f.Body == null))
+        {
+            _externalFunctions.Add(func.Name);
+        }
 
         _sb.AppendLine("format PE console");
         _sb.AppendLine("entry start");
@@ -47,22 +52,77 @@ public class Generator
         _sb.AppendLine("    call [ExitProcess]");
         _sb.AppendLine();
 
-        foreach (var function in _program.Functions)
+        foreach (var function in _program.Functions.Where(f => f.Body != null))
         {
             GenerateFunction(function);
             _sb.AppendLine();
         }
 
-        _sb.AppendLine("section '.idata' import data readable");
-        _sb.AppendLine();
-        _sb.AppendLine("    library kernel32,'kernel32.dll', msvcrt,'msvcrt.dll'");
-        _sb.AppendLine();
-        _sb.AppendLine("    import kernel32, ExitProcess,'ExitProcess'");
-        _sb.AppendLine("    import msvcrt, printf,'printf'");
+        GenerateImportDataSection();
 
         return _sb.ToString();
     }
 
+    private void GenerateImportDataSection()
+    {
+        _sb.AppendLine("section '.idata' import data readable");
+        _sb.AppendLine();
+
+        var libraries = new Dictionary<string, List<string>>
+        {
+            { "kernel32.dll", new List<string> { "ExitProcess" } },
+            { "msvcrt.dll", new List<string> { "printf" } }
+        };
+
+        foreach (var import in _program.Imports)
+        {
+            if (!libraries.ContainsKey(import.LibraryName))
+            {
+                libraries[import.LibraryName] = new List<string>();
+            }
+        }
+
+        foreach (var funcName in _externalFunctions)
+        {
+            bool found = false;
+            foreach (var import in _program.Imports)
+            {
+                // This is a simplification. A real compiler would need to know which DLL a function belongs to.
+                // For now, we try to add it to a user-specified DLL.
+                if (libraries.ContainsKey(import.LibraryName))
+                {
+                    libraries[import.LibraryName].Add(funcName);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && funcName != "printf")
+            {
+                // We could default to a common library like msvcrt or user32, or throw an error.
+                // For now, let's assume it's in msvcrt if not specified.
+                libraries["msvcrt.dll"].Add(funcName);
+            }
+        }
+
+        var libDefinitions = new List<string>();
+        foreach (var lib in libraries.Keys)
+        {
+            string libAlias = lib.Split('.')[0];
+            libDefinitions.Add($"{libAlias},'{lib}'");
+        }
+        _sb.AppendLine($"    library {string.Join(", ", libDefinitions)}");
+        _sb.AppendLine();
+
+        foreach (var (libName, functions) in libraries)
+        {
+            if (functions.Count > 0)
+            {
+                string libAlias = libName.Split('.')[0];
+                var importDefs = functions.Select(f => $"{f},'{f}'");
+                _sb.AppendLine($"    import {libAlias}, {string.Join(", ", importDefs)}");
+            }
+        }
+    }
     private string FormatStringForFasm(string value)
     {
         var parts = new List<string>();
@@ -70,16 +130,13 @@ public class Generator
 
         foreach (char c in value)
         {
-            // Check for non-printable characters or characters that need special handling
-            if (c == '\n' || c == '\t' || c == '\r' || c == '\'' || c == '"')
+            if (c is '\n' or '\t' or '\r' or '\'' or '"')
             {
                 if (currentString.Length > 0)
                 {
                     parts.Add($"'{currentString}'");
                     currentString.Clear();
                 }
-
-                // Add the character code
                 parts.Add(((byte)c).ToString());
             }
             else
@@ -110,11 +167,7 @@ public class Generator
 
         foreach (var property in node.GetType().GetProperties())
         {
-            // FIX: Ignore the Parent property to prevent infinite recursion.
-            if (property.Name == "Parent")
-            {
-                continue;
-            }
+            if (property.Name == "Parent") continue;
 
             if (property.GetValue(node) is AstNode child)
             {
@@ -156,20 +209,16 @@ public class Generator
         AppendAsm("mov ebp, esp");
         _sb.AppendLine();
 
-        // Map parameters to their stack locations.
-        // Stack layout: [ebp] = old ebp, [ebp+4] = return address
-        // First parameter is at [ebp+8], second at [ebp+12], etc.
         int paramOffset = 8;
         foreach (var param in function.Parameters)
         {
             _variables[param.Name.Value] = paramOffset;
-            paramOffset += 4; // Assuming all params are 4 bytes.
+            paramOffset += 4;
         }
 
-        GenerateStatement(function.Body);
+        // The body will not be null here because we filter in the main Generate loop.
+        GenerateStatement(function.Body!);
 
-        // A function might not have an explicit return (e.g. a void function).
-        // To be safe, always add the instructions to clean up the stack frame and return.
         _sb.AppendLine();
         AppendAsm("mov esp, ebp", "Implicit return cleanup");
         AppendAsm("pop ebp");
@@ -202,7 +251,6 @@ public class Generator
                 GenerateExpression(exprStmt.Expression);
                 if (exprStmt.Expression is CallExpressionNode call)
                 {
-                    // Caller cleans up the stack for expression statement calls
                     int bytesToClean = call.Arguments.Count * 4;
                     if (bytesToClean > 0)
                     {
@@ -226,7 +274,7 @@ public class Generator
             throw new InvalidOperationException($"Variable '{decl.Identifier.Value}' is already defined.");
         }
 
-        _stackOffset -= 4; // 4 bytes for an int
+        _stackOffset -= 4;
         _variables[decl.Identifier.Value] = _stackOffset;
         AppendAsm("sub esp, 4", "Allocate space for variable " + decl.Identifier.Value);
 
@@ -248,9 +296,7 @@ public class Generator
         GenerateExpression(whileStmt.Condition);
         AppendAsm("cmp eax, 0");
         AppendAsm($"je {endLabel}");
-
         GenerateStatement(whileStmt.Body);
-
         AppendAsm($"jmp {startLabel}");
 
         _sb.AppendLine($"{endLabel}:");
@@ -292,7 +338,6 @@ public class Generator
         {
             GenerateExpression(ret.Expression);
         }
-        // For a void return, EAX is not explicitly set. The caller should not use it.
         AppendAsm("mov esp, ebp");
         AppendAsm("pop ebp");
         AppendAsm("ret");
@@ -338,24 +383,17 @@ public class Generator
 
     private void GenerateCallExpression(CallExpressionNode callExpr)
     {
-        // Push arguments onto the stack from right to left (cdecl)
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
             GenerateExpression(arg);
             AppendAsm("push eax");
         }
 
-        // Check for imported function (like printf) vs user-defined function
-        string callTarget = $"_{callExpr.Callee.Value}";
-        if (callExpr.Callee.Value == "printf")
-        {
-            callTarget = "[printf]";
-        }
+        string calleeName = callExpr.Callee.Value;
+        string callTarget = _externalFunctions.Contains(calleeName) ? $"[{calleeName}]" : $"_{calleeName}";
 
         AppendAsm($"call {callTarget}");
 
-        // For calls that are part of a larger expression, the caller cleans up the stack.
-        // If the call is a statement itself, stack cleanup is handled in GenerateStatement.
         if (callExpr.Parent is not ExpressionStatementNode)
         {
             if (callExpr.Arguments.Count > 0)
@@ -368,27 +406,16 @@ public class Generator
 
     private void GenerateBinaryExpression(BinaryExpressionNode binExpr)
     {
-        // Generate right operand first, push to stack
         GenerateExpression(binExpr.Right);
         AppendAsm("push eax");
-
-        // Generate left operand, result is in EAX
         GenerateExpression(binExpr.Left);
-
-        // Pop right operand into ECX
         AppendAsm("pop ecx");
 
         switch (binExpr.Operator.Type)
         {
-            case TokenType.Plus:
-                AppendAsm("add eax, ecx", "eax = eax + ecx");
-                break;
-            case TokenType.Minus:
-                AppendAsm("sub eax, ecx", "eax = eax - ecx");
-                break;
-            case TokenType.Star:
-                AppendAsm("imul eax, ecx", "eax = eax * ecx");
-                break;
+            case TokenType.Plus: AppendAsm("add eax, ecx", "eax = eax + ecx"); break;
+            case TokenType.Minus: AppendAsm("sub eax, ecx", "eax = eax - ecx"); break;
+            case TokenType.Star: AppendAsm("imul eax, ecx", "eax = eax * ecx"); break;
             case TokenType.Slash:
                 AppendAsm("cdq", "Sign-extend EAX into EDX:EAX");
                 AppendAsm("idiv ecx", "eax = edx:eax / ecx");

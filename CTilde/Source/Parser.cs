@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace CTilde;
 
@@ -19,7 +20,6 @@ public class Parser
     private Token Current => _position < _tokens.Count ? _tokens[_position] : new(TokenType.Unknown, string.Empty);
     private Token Peek(int offset) => _position + offset < _tokens.Count ? _tokens[_position + offset] : new(TokenType.Unknown, string.Empty);
 
-
     private Token Eat(TokenType expectedType)
     {
         var currentToken = Current;
@@ -34,21 +34,17 @@ public class Parser
     public ProgramNode Parse()
     {
         var imports = new List<ImportDirectiveNode>();
+        var structs = new List<StructDefinitionNode>();
         var functions = new List<FunctionDeclarationNode>();
 
         while (Current.Type != TokenType.Unknown)
         {
-            if (Current.Type == TokenType.Hash)
-            {
-                imports.Add(ParseImportDirective());
-            }
-            else
-            {
-                functions.Add(ParseFunction());
-            }
+            if (Current.Type == TokenType.Hash) imports.Add(ParseImportDirective());
+            else if (Current.Value == "struct") structs.Add(ParseStructDefinition());
+            else functions.Add(ParseFunction());
         }
 
-        var programNode = new ProgramNode(imports, functions);
+        var programNode = new ProgramNode(imports, structs, functions);
         SetParents(programNode);
         return programNode;
     }
@@ -57,12 +53,29 @@ public class Parser
     {
         Eat(TokenType.Hash);
         var keyword = Eat(TokenType.Identifier);
-        if (keyword.Value != "import")
-        {
-            throw new InvalidOperationException($"Expected 'import' after '#' but got '{keyword.Value}'");
-        }
+        if (keyword.Value != "import") throw new InvalidOperationException($"Expected 'import' after '#' but got '{keyword.Value}'");
         var libNameToken = Eat(TokenType.StringLiteral);
         return new ImportDirectiveNode(libNameToken.Value);
+    }
+
+    private StructDefinitionNode ParseStructDefinition()
+    {
+        Eat(TokenType.Keyword); // struct
+        var name = Eat(TokenType.Identifier);
+        Eat(TokenType.LeftBrace);
+
+        var members = new List<ParameterNode>();
+        while (Current.Type != TokenType.RightBrace)
+        {
+            var memberType = Eat(TokenType.Keyword);
+            var memberName = Eat(TokenType.Identifier);
+            members.Add(new ParameterNode(memberType, memberName));
+            Eat(TokenType.Semicolon);
+        }
+
+        Eat(TokenType.RightBrace);
+        Eat(TokenType.Semicolon);
+        return new StructDefinitionNode(name.Value, members);
     }
 
     private void SetParents(AstNode node)
@@ -70,25 +83,18 @@ public class Parser
         foreach (var property in node.GetType().GetProperties())
         {
             if (property.CanWrite && property.Name == "Parent") continue;
-
             if (property.GetValue(node) is AstNode child)
             {
                 var parentProp = child.GetType().GetProperty("Parent");
-                if (parentProp != null && parentProp.CanWrite)
-                {
-                    parentProp.SetValue(child, node);
-                }
+                if (parentProp != null && parentProp.CanWrite) parentProp.SetValue(child, node);
                 SetParents(child);
             }
             else if (property.GetValue(node) is IEnumerable<AstNode> children)
             {
-                foreach (var c in children)
+                foreach (var c in children.ToList()) // ToList to avoid mutation issues
                 {
                     var parentProp = c.GetType().GetProperty("Parent");
-                    if (parentProp != null && parentProp.CanWrite)
-                    {
-                        parentProp.SetValue(c, node);
-                    }
+                    if (parentProp != null && parentProp.CanWrite) parentProp.SetValue(c, node);
                     SetParents(c);
                 }
             }
@@ -98,11 +104,6 @@ public class Parser
     private FunctionDeclarationNode ParseFunction()
     {
         var returnType = Eat(TokenType.Keyword);
-        if (returnType.Value != "int" && returnType.Value != "void")
-        {
-            throw new InvalidOperationException($"Unsupported function return type: {returnType.Value}");
-        }
-
         var identifier = Eat(TokenType.Identifier);
         Eat(TokenType.LeftParen);
 
@@ -120,14 +121,8 @@ public class Parser
         Eat(TokenType.RightParen);
 
         StatementNode? body = null;
-        if (Current.Type == TokenType.LeftBrace)
-        {
-            body = ParseBlockStatement();
-        }
-        else
-        {
-            Eat(TokenType.Semicolon); // It's a prototype
-        }
+        if (Current.Type == TokenType.LeftBrace) body = ParseBlockStatement();
+        else Eat(TokenType.Semicolon);
 
         return new FunctionDeclarationNode(returnType, identifier.Value, parameters, body);
     }
@@ -136,10 +131,7 @@ public class Parser
     {
         Eat(TokenType.LeftBrace);
         var statements = new List<StatementNode>();
-        while (Current.Type != TokenType.RightBrace)
-        {
-            statements.Add(ParseStatement());
-        }
+        while (Current.Type != TokenType.RightBrace) statements.Add(ParseStatement());
         Eat(TokenType.RightBrace);
         return new BlockStatementNode(statements);
     }
@@ -150,31 +142,15 @@ public class Parser
         {
             switch (Current.Value)
             {
-                case "return":
-                    return ParseReturnStatement();
-                case "if":
-                    return ParseIfStatement();
-                case "while":
-                    return ParseWhileStatement();
+                case "return": return ParseReturnStatement();
+                case "if": return ParseIfStatement();
+                case "while": return ParseWhileStatement();
                 case "int":
-                    if (Peek(1).Type == TokenType.Identifier && Peek(2).Type != TokenType.LeftParen)
-                    {
-                        return ParseDeclarationStatement();
-                    }
-                    break;
+                case "struct": return ParseDeclarationStatement();
             }
         }
 
-        if (Current.Type == TokenType.Keyword && (Current.Value == "int" || Current.Value == "void"))
-        {
-            throw new InvalidOperationException($"Function definitions/prototypes are not allowed inside other functions.");
-        }
-
-
-        if (Current.Type == TokenType.LeftBrace)
-        {
-            return ParseBlockStatement();
-        }
+        if (Current.Type == TokenType.LeftBrace) return ParseBlockStatement();
 
         var expression = ParseExpression();
         Eat(TokenType.Semicolon);
@@ -187,33 +163,30 @@ public class Parser
         Eat(TokenType.LeftParen);
         var condition = ParseExpression();
         Eat(TokenType.RightParen);
-
         var thenBody = ParseStatement();
         StatementNode? elseBody = null;
-
         if (Current.Type == TokenType.Keyword && Current.Value == "else")
         {
             Eat(TokenType.Keyword);
             elseBody = ParseStatement();
         }
-
         return new IfStatementNode(condition, thenBody, elseBody);
     }
 
     private StatementNode ParseDeclarationStatement()
     {
-        Eat(TokenType.Keyword);
+        var typeToken = Eat(TokenType.Keyword);
+        if (typeToken.Value == "struct") typeToken = Eat(TokenType.Identifier);
+
         var identifier = Eat(TokenType.Identifier);
         ExpressionNode? initializer = null;
-
         if (Current.Type == TokenType.Assignment)
         {
             Eat(TokenType.Assignment);
             initializer = ParseExpression();
         }
-
         Eat(TokenType.Semicolon);
-        return new DeclarationStatementNode(identifier, initializer);
+        return new DeclarationStatementNode(typeToken, identifier, initializer);
     }
 
     private WhileStatementNode ParseWhileStatement()
@@ -230,36 +203,23 @@ public class Parser
     {
         Eat(TokenType.Keyword);
         ExpressionNode? expression = null;
-        if (Current.Type != TokenType.Semicolon)
-        {
-            expression = ParseExpression();
-        }
+        if (Current.Type != TokenType.Semicolon) expression = ParseExpression();
         Eat(TokenType.Semicolon);
         return new ReturnStatementNode(expression);
     }
 
-    private ExpressionNode ParseExpression()
-    {
-        return ParseAssignmentExpression();
-    }
+    private ExpressionNode ParseExpression() => ParseAssignmentExpression();
 
     private ExpressionNode ParseAssignmentExpression()
     {
         var left = ParseEqualityExpression();
-
         if (Current.Type == TokenType.Assignment)
         {
             Eat(TokenType.Assignment);
             var right = ParseAssignmentExpression();
-
-            if (left is VariableExpressionNode varNode)
-            {
-                return new AssignmentExpressionNode(varNode.Identifier, right);
-            }
-
+            if (left is VariableExpressionNode or MemberAccessExpressionNode) return new AssignmentExpressionNode(left, right);
             throw new InvalidOperationException("Invalid assignment target.");
         }
-
         return left;
     }
 
@@ -268,8 +228,7 @@ public class Parser
         var left = ParseRelationalExpression();
         while (Current.Type is TokenType.DoubleEquals or TokenType.NotEquals)
         {
-            var op = Current;
-            _position++;
+            var op = Current; _position++;
             var right = ParseRelationalExpression();
             left = new BinaryExpressionNode(left, op, right);
         }
@@ -281,8 +240,7 @@ public class Parser
         var left = ParseAdditiveExpression();
         while (Current.Type is TokenType.LessThan or TokenType.GreaterThan)
         {
-            var op = Current;
-            _position++;
+            var op = Current; _position++;
             var right = ParseAdditiveExpression();
             left = new BinaryExpressionNode(left, op, right);
         }
@@ -294,8 +252,7 @@ public class Parser
         var left = ParseMultiplicativeExpression();
         while (Current.Type is TokenType.Plus or TokenType.Minus)
         {
-            var op = Current;
-            _position++;
+            var op = Current; _position++;
             var right = ParseMultiplicativeExpression();
             left = new BinaryExpressionNode(left, op, right);
         }
@@ -307,8 +264,7 @@ public class Parser
         var left = ParseUnaryExpression();
         while (Current.Type is TokenType.Star or TokenType.Slash)
         {
-            var op = Current;
-            _position++;
+            var op = Current; _position++;
             var right = ParseUnaryExpression();
             left = new BinaryExpressionNode(left, op, right);
         }
@@ -319,39 +275,43 @@ public class Parser
     {
         if (Current.Type is TokenType.Minus or TokenType.Plus)
         {
-            var op = Current;
-            _position++;
-            var right = ParseUnaryExpression();
-            return new UnaryExpressionNode(op, right);
+            var op = Current; _position++;
+            return new UnaryExpressionNode(op, ParseUnaryExpression());
         }
-        return ParseCallExpression();
+        return ParseMemberAccessExpression();
+    }
+
+    private ExpressionNode ParseMemberAccessExpression()
+    {
+        var left = ParseCallExpression();
+        while (Current.Type == TokenType.Dot)
+        {
+            Eat(TokenType.Dot);
+            var member = Eat(TokenType.Identifier);
+            left = new MemberAccessExpressionNode(left, member);
+        }
+        return left;
     }
 
     private ExpressionNode ParseCallExpression()
     {
         var expr = ParsePrimaryExpression();
-
         if (Current.Type == TokenType.LeftParen)
         {
             if (expr is VariableExpressionNode varNode)
             {
                 Eat(TokenType.LeftParen);
-
                 var arguments = new List<ExpressionNode>();
                 if (Current.Type != TokenType.RightParen)
                 {
-                    do
-                    {
-                        arguments.Add(ParseExpression());
-                    } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+                    do { arguments.Add(ParseExpression()); }
+                    while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
                 }
-
                 Eat(TokenType.RightParen);
                 return new CallExpressionNode(varNode.Identifier, arguments);
             }
             throw new InvalidOperationException("Expression is not callable.");
         }
-
         return expr;
     }
 
@@ -360,37 +320,22 @@ public class Parser
         if (Current.Type == TokenType.IntegerLiteral)
         {
             var token = Eat(TokenType.IntegerLiteral);
-            if (int.TryParse(token.Value, out int value))
-            {
-                return new IntegerLiteralNode(value);
-            }
-            throw new InvalidOperationException($"Could not parse integer literal: {token.Value}");
+            if (int.TryParse(token.Value, out int v)) return new IntegerLiteralNode(v);
+            throw new InvalidOperationException($"Could not parse int: {token.Value}");
         }
-
         if (Current.Type == TokenType.HexLiteral)
         {
             var token = Eat(TokenType.HexLiteral);
-            var hexString = token.Value.StartsWith("0x") ? token.Value.Substring(2) : token.Value;
-            if (int.TryParse(hexString, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int value))
-            {
-                return new IntegerLiteralNode(value);
-            }
-            throw new InvalidOperationException($"Could not parse hex literal: {token.Value}");
+            var hex = token.Value.StartsWith("0x") ? token.Value.Substring(2) : token.Value;
+            if (int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int v)) return new IntegerLiteralNode(v);
+            throw new InvalidOperationException($"Could not parse hex: {token.Value}");
         }
-
         if (Current.Type == TokenType.StringLiteral)
         {
             var token = Eat(TokenType.StringLiteral);
-            string label = $"str{_stringLabelCounter++}";
-            return new StringLiteralNode(token.Value, label);
+            return new StringLiteralNode(token.Value, $"str{_stringLabelCounter++}");
         }
-
-        if (Current.Type == TokenType.Identifier)
-        {
-            var token = Eat(TokenType.Identifier);
-            return new VariableExpressionNode(token);
-        }
-
+        if (Current.Type == TokenType.Identifier) return new VariableExpressionNode(Eat(TokenType.Identifier));
         if (Current.Type == TokenType.LeftParen)
         {
             Eat(TokenType.LeftParen);
@@ -398,7 +343,6 @@ public class Parser
             Eat(TokenType.RightParen);
             return expr;
         }
-
         throw new InvalidOperationException($"Unexpected expression token: {Current.Type}");
     }
 }

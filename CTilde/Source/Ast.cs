@@ -12,7 +12,8 @@ public abstract record ExpressionNode : AstNode;
 
 // Program structure
 public record ImportDirectiveNode(string LibraryName) : AstNode;
-public record ProgramNode(List<ImportDirectiveNode> Imports, List<FunctionDeclarationNode> Functions) : AstNode;
+public record StructDefinitionNode(string Name, List<ParameterNode> Members) : AstNode;
+public record ProgramNode(List<ImportDirectiveNode> Imports, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
 public record ParameterNode(Token Type, Token Name) : AstNode;
 public record FunctionDeclarationNode(Token ReturnType, string Name, List<ParameterNode> Parameters, StatementNode? Body) : AstNode;
 
@@ -21,7 +22,7 @@ public record BlockStatementNode(List<StatementNode> Statements) : StatementNode
 public record ReturnStatementNode(ExpressionNode? Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBody, StatementNode? ElseBody) : StatementNode;
-public record DeclarationStatementNode(Token Identifier, ExpressionNode? Initializer) : StatementNode;
+public record DeclarationStatementNode(Token Type, Token Identifier, ExpressionNode? Initializer) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
 
 
@@ -29,7 +30,8 @@ public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode
 public record IntegerLiteralNode(int Value) : ExpressionNode;
 public record StringLiteralNode(string Value, string Label) : ExpressionNode;
 public record UnaryExpressionNode(Token Operator, ExpressionNode Right) : ExpressionNode;
-public record AssignmentExpressionNode(Token Identifier, ExpressionNode Value) : ExpressionNode;
+public record AssignmentExpressionNode(ExpressionNode Left, ExpressionNode Right) : ExpressionNode;
 public record VariableExpressionNode(Token Identifier) : ExpressionNode;
 public record CallExpressionNode(Token Callee, List<ExpressionNode> Arguments) : ExpressionNode;
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;
+public record MemberAccessExpressionNode(ExpressionNode Left, Token Member) : ExpressionNode;

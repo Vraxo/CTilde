@@ -16,6 +16,7 @@ public enum TokenType
     LeftBrace,
     RightBrace,
     Comma,
+    Dot,
     Hash,
     Assignment,
     Unknown,
@@ -40,7 +41,8 @@ public class Tokenizer
         "return",
         "while",
         "if",
-        "else"
+        "else",
+        "struct"
     ];
 
     public static List<Token> Tokenize(string input)
@@ -52,18 +54,8 @@ public class Tokenizer
         {
             char c = input[i];
 
-            if (char.IsWhiteSpace(c))
-            {
-                i++;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < input.Length && input[i + 1] == '/')
-            {
-                while (i < input.Length && input[i] != '\n') i++;
-                continue;
-            }
-
+            if (char.IsWhiteSpace(c)) { i++; continue; }
+            if (c == '/' && i + 1 < input.Length && input[i + 1] == '/') { while (i < input.Length && input[i] != '\n') i++; continue; }
             if (c == '"')
             {
                 i++;
@@ -80,21 +72,13 @@ public class Tokenizer
                             case 't': sb.Append('\t'); break;
                             case '\\': sb.Append('\\'); break;
                             case '"': sb.Append('"'); break;
-                            default:
-                                sb.Append('\\');
-                                sb.Append(input[i]);
-                                break;
+                            default: sb.Append('\\'); sb.Append(input[i]); break;
                         }
                     }
-                    else
-                    {
-                        sb.Append(current);
-                    }
+                    else sb.Append(current);
                     i++;
                 }
-
                 if (i < input.Length) i++;
-
                 tokens.Add(new Token(TokenType.StringLiteral, sb.ToString()));
                 continue;
             }
@@ -102,6 +86,7 @@ public class Tokenizer
             switch (c)
             {
                 case '#': tokens.Add(new(TokenType.Hash, "#")); i++; continue;
+                case '.': tokens.Add(new(TokenType.Dot, ".")); i++; continue;
                 case '(': tokens.Add(new(TokenType.LeftParen, "(")); i++; continue;
                 case ')': tokens.Add(new(TokenType.RightParen, ")")); i++; continue;
                 case '{': tokens.Add(new(TokenType.LeftBrace, "{")); i++; continue;
@@ -127,38 +112,30 @@ public class Tokenizer
             if (c == '0' && i + 1 < input.Length && (input[i + 1] == 'x' || input[i + 1] == 'X'))
             {
                 int start = i;
-                i += 2; // Skip '0x'
-                while (i < input.Length && "0123456789abcdefABCDEF".Contains(input[i]))
-                {
-                    i++;
-                }
+                i += 2;
+                while (i < input.Length && "0123456789abcdefABCDEF".Contains(input[i])) i++;
                 tokens.Add(new Token(TokenType.HexLiteral, input.Substring(start, i - start)));
                 continue;
             }
-
             if (char.IsDigit(c))
             {
                 int start = i;
                 while (i < input.Length && char.IsDigit(input[i])) i++;
-                string value = input.Substring(start, i - start);
-                tokens.Add(new(TokenType.IntegerLiteral, value));
+                tokens.Add(new(TokenType.IntegerLiteral, input.Substring(start, i - start)));
                 continue;
             }
-
             if (char.IsLetter(c) || c == '_')
             {
                 int start = i;
                 while (i < input.Length && (char.IsLetterOrDigit(input[i]) || input[i] == '_')) i++;
                 string value = input.Substring(start, i - start);
-                TokenType type = Keywords.Contains(value) ? TokenType.Keyword : TokenType.Identifier;
-                tokens.Add(new(type, value));
+                tokens.Add(new(Keywords.Contains(value) ? TokenType.Keyword : TokenType.Identifier, value));
                 continue;
             }
-
             tokens.Add(new(TokenType.Unknown, c.ToString()));
             i++;
         }
-        tokens.Add(new(TokenType.Unknown, string.Empty)); // EOF token
+        tokens.Add(new(TokenType.Unknown, string.Empty));
         return tokens;
     }
 }

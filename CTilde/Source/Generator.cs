@@ -13,9 +13,10 @@ public class Generator
     private readonly Dictionary<string, string> _stringLiterals = new();
     private readonly HashSet<string> _externalFunctions = new();
 
+    private readonly Dictionary<string, StructDefinitionNode> _structDefinitions = new();
 
-    // Rudimentary symbol table for a function's scope
-    private Dictionary<string, int> _variables = new();
+    private Dictionary<string, int> _variables = new(); // name -> stack offset
+    private Dictionary<string, string> _variableTypes = new(); // name -> type name
     private int _stackOffset;
 
     public Generator(ProgramNode program)
@@ -25,12 +26,9 @@ public class Generator
 
     public string Generate()
     {
-        // Pre-pass to find all string literals and external functions
         FindAllStringLiterals(_program);
-        foreach (var func in _program.Functions.Where(f => f.Body == null))
-        {
-            _externalFunctions.Add(func.Name);
-        }
+        foreach (var s in _program.Structs) _structDefinitions[s.Name] = s;
+        foreach (var f in _program.Functions.Where(f => f.Body == null)) _externalFunctions.Add(f.Name);
 
         _sb.AppendLine("format PE console");
         _sb.AppendLine("entry start");
@@ -38,16 +36,13 @@ public class Generator
         _sb.AppendLine("include 'win32a.inc'");
         _sb.AppendLine();
         _sb.AppendLine("section '.data' data readable writeable");
-        foreach (var (label, value) in _stringLiterals)
-        {
-            _sb.AppendLine($"    {label} db {FormatStringForFasm(value)}");
-        }
+        foreach (var (label, value) in _stringLiterals) _sb.AppendLine($"    {label} db {FormatStringForFasm(value)}");
         _sb.AppendLine();
         _sb.AppendLine("section '.text' code readable executable");
         _sb.AppendLine();
         _sb.AppendLine("start:");
         _sb.AppendLine("    call _main");
-        _sb.AppendLine("    mov ebx, eax"); // EAX holds the return value from main
+        _sb.AppendLine("    mov ebx, eax");
         _sb.AppendLine("    push ebx");
         _sb.AppendLine("    call [ExitProcess]");
         _sb.AppendLine();
@@ -76,10 +71,7 @@ public class Generator
 
         foreach (var import in _program.Imports)
         {
-            if (!libraries.ContainsKey(import.LibraryName))
-            {
-                libraries[import.LibraryName] = new List<string>();
-            }
+            if (!libraries.ContainsKey(import.LibraryName)) libraries[import.LibraryName] = new List<string>();
         }
 
         foreach (var funcName in _externalFunctions)
@@ -87,8 +79,6 @@ public class Generator
             bool found = false;
             foreach (var import in _program.Imports)
             {
-                // This is a simplification. A real compiler would need to know which DLL a function belongs to.
-                // For now, we add the function to the first custom DLL we find.
                 if (import.LibraryName != "kernel32.dll" && import.LibraryName != "msvcrt.dll")
                 {
                     libraries[import.LibraryName].Add(funcName);
@@ -98,26 +88,20 @@ public class Generator
             }
             if (!found && funcName != "printf")
             {
-                // Default to user32 if no other home is found, as it's common for GUI apps.
                 if (!libraries.ContainsKey("user32.dll")) libraries["user32.dll"] = new List<string>();
                 if (!libraries["user32.dll"].Contains(funcName)) libraries["user32.dll"].Add(funcName);
             }
         }
 
-        var libDefinitions = new List<string>();
-        foreach (var lib in libraries.Keys)
-        {
-            string libAlias = lib.Split('.')[0];
-            libDefinitions.Add($"{libAlias},'{lib}'");
-        }
-        _sb.AppendLine($"    library {string.Join(", ", libDefinitions)}");
+        var libDefs = libraries.Keys.Select(lib => $"{lib.Split('.')[0]},'{lib}'");
+        _sb.AppendLine($"    library {string.Join(", ", libDefs)}");
         _sb.AppendLine();
 
         foreach (var (libName, functions) in libraries)
         {
             if (functions.Count > 0)
             {
-                string libAlias = libName.Split('.')[0];
+                var libAlias = libName.Split('.')[0];
                 var importDefs = functions.Distinct().Select(f => $"{f},'{f}'");
                 _sb.AppendLine($"    import {libAlias}, {string.Join(", ", importDefs)}");
             }
@@ -139,69 +123,59 @@ public class Generator
                 }
                 parts.Add(((byte)c).ToString());
             }
-            else
-            {
-                currentString.Append(c);
-            }
+            else currentString.Append(c);
         }
 
-        if (currentString.Length > 0)
-        {
-            parts.Add($"'{currentString}'");
-        }
-
-        parts.Add("0"); // Null terminator
-
+        if (currentString.Length > 0) parts.Add($"'{currentString}'");
+        parts.Add("0");
         return string.Join(", ", parts);
     }
 
     private void FindAllStringLiterals(AstNode node)
     {
-        if (node is StringLiteralNode str)
-        {
-            if (!_stringLiterals.ContainsValue(str.Value))
-            {
-                _stringLiterals.Add(str.Label, str.Value);
-            }
-        }
-
+        if (node is StringLiteralNode str && !_stringLiterals.ContainsValue(str.Value)) _stringLiterals.Add(str.Label, str.Value);
         foreach (var property in node.GetType().GetProperties())
         {
             if (property.Name == "Parent") continue;
-
-            if (property.GetValue(node) is AstNode child)
-            {
-                FindAllStringLiterals(child);
-            }
-            else if (property.GetValue(node) is IEnumerable<AstNode> children)
-            {
-                foreach (var c in children)
-                {
-                    FindAllStringLiterals(c);
-                }
-            }
+            if (property.GetValue(node) is AstNode child) FindAllStringLiterals(child);
+            else if (property.GetValue(node) is IEnumerable<AstNode> children) foreach (var c in children) FindAllStringLiterals(c);
         }
     }
 
+    private int GetSizeOfType(string typeName)
+    {
+        if (typeName == "int") return 4;
+        if (_structDefinitions.TryGetValue(typeName, out var structDef))
+        {
+            return structDef.Members.Sum(m => GetSizeOfType(m.Type.Value));
+        }
+        throw new InvalidOperationException($"Unknown type '{typeName}'");
+    }
+
+    private (int offset, string type) GetMemberInfo(string structName, string memberName)
+    {
+        if (!_structDefinitions.TryGetValue(structName, out var structDef))
+            throw new InvalidOperationException($"Undefined struct '{structName}'");
+
+        int offset = 0;
+        foreach (var member in structDef.Members)
+        {
+            if (member.Name.Value == memberName)
+                return (offset, member.Type.Value);
+            offset += GetSizeOfType(member.Type.Value);
+        }
+        throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
+    }
 
     private void AppendAsm(string instruction, string? comment = null)
     {
-        const int commentColumn = 36;
-        string indentedInstruction = $"    {instruction}";
-
-        if (string.IsNullOrEmpty(comment))
-        {
-            _sb.AppendLine(indentedInstruction);
-        }
-        else
-        {
-            _sb.AppendLine(indentedInstruction.PadRight(commentColumn - 1) + $"; {comment}");
-        }
+        _sb.AppendLine($"    {instruction}".PadRight(35) + (comment == null ? "" : $"; {comment}"));
     }
 
     private void GenerateFunction(FunctionDeclarationNode function)
     {
-        _variables = new Dictionary<string, int>();
+        _variables.Clear();
+        _variableTypes.Clear();
         _stackOffset = 0;
 
         _sb.AppendLine($"_{function.Name}:");
@@ -213,10 +187,10 @@ public class Generator
         foreach (var param in function.Parameters)
         {
             _variables[param.Name.Value] = paramOffset;
-            paramOffset += 4;
+            _variableTypes[param.Name.Value] = param.Type.Value;
+            paramOffset += 4; // Assume all params passed by value/pointer are 4 bytes
         }
 
-        // The body will not be null here because we filter in the main Generate loop.
         GenerateStatement(function.Body!);
 
         _sb.AppendLine();
@@ -229,163 +203,135 @@ public class Generator
     {
         switch (statement)
         {
-            case ReturnStatementNode ret:
-                GenerateReturn(ret);
-                break;
-            case BlockStatementNode block:
-                foreach (var stmt in block.Statements)
-                {
-                    GenerateStatement(stmt);
-                }
-                break;
-            case WhileStatementNode whileStmt:
-                GenerateWhile(whileStmt);
-                break;
-            case IfStatementNode ifStmt:
-                GenerateIf(ifStmt);
-                break;
-            case DeclarationStatementNode decl:
-                GenerateDeclaration(decl);
-                break;
+            case ReturnStatementNode ret: GenerateReturn(ret); break;
+            case BlockStatementNode block: foreach (var s in block.Statements) GenerateStatement(s); break;
+            case WhileStatementNode w: GenerateWhile(w); break;
+            case IfStatementNode i: GenerateIf(i); break;
+            case DeclarationStatementNode decl: GenerateDeclaration(decl); break;
             case ExpressionStatementNode exprStmt:
                 GenerateExpression(exprStmt.Expression);
                 if (exprStmt.Expression is CallExpressionNode call)
                 {
                     int bytesToClean = call.Arguments.Count * 4;
-                    if (bytesToClean > 0)
-                    {
-                        AppendAsm($"add esp, {bytesToClean}", "Clean up stack for call in expr stmt");
-                    }
-                }
-                else
-                {
-                    AppendAsm("", "; Expression statement result in EAX is discarded");
+                    if (bytesToClean > 0) AppendAsm($"add esp, {bytesToClean}", "Clean up stack for call in expr stmt");
                 }
                 break;
-            default:
-                throw new NotImplementedException($"Unsupported statement type: {statement.GetType().Name}");
+            default: throw new NotImplementedException($"Stmt: {statement.GetType().Name}");
         }
     }
 
     private void GenerateDeclaration(DeclarationStatementNode decl)
     {
-        if (_variables.ContainsKey(decl.Identifier.Value))
-        {
-            throw new InvalidOperationException($"Variable '{decl.Identifier.Value}' is already defined.");
-        }
+        if (_variables.ContainsKey(decl.Identifier.Value)) throw new InvalidOperationException($"Var '{decl.Identifier.Value}' already defined.");
 
-        _stackOffset -= 4;
+        int size = GetSizeOfType(decl.Type.Value);
+        _stackOffset -= size;
         _variables[decl.Identifier.Value] = _stackOffset;
-        AppendAsm("sub esp, 4", "Allocate space for variable " + decl.Identifier.Value);
+        _variableTypes[decl.Identifier.Value] = decl.Type.Value;
+
+        AppendAsm($"sub esp, {size}", $"Allocate {size} bytes for var {decl.Identifier.Value}");
 
         if (decl.Initializer != null)
         {
+            if (size > 4) throw new NotSupportedException("Struct initialization is not supported yet.");
             GenerateExpression(decl.Initializer);
             AppendAsm($"mov [ebp + {_stackOffset}], eax");
         }
     }
 
-    private void GenerateWhile(WhileStatementNode whileStmt)
+    private void GenerateWhile(WhileStatementNode w)
     {
-        int labelIndex = _labelCounter++;
-        string startLabel = $"_while_start_{labelIndex}";
-        string endLabel = $"_while_end_{labelIndex}";
-
-        _sb.AppendLine($"{startLabel}:");
-
-        GenerateExpression(whileStmt.Condition);
+        int i = _labelCounter++;
+        _sb.AppendLine($"_while_start_{i}:");
+        GenerateExpression(w.Condition);
         AppendAsm("cmp eax, 0");
-        AppendAsm($"je {endLabel}");
-        GenerateStatement(whileStmt.Body);
-        AppendAsm($"jmp {startLabel}");
-
-        _sb.AppendLine($"{endLabel}:");
+        AppendAsm($"je _while_end_{i}");
+        GenerateStatement(w.Body);
+        AppendAsm($"jmp _while_start_{i}");
+        _sb.AppendLine($"_while_end_{i}:");
     }
 
-    private void GenerateIf(IfStatementNode ifStmt)
+    private void GenerateIf(IfStatementNode i)
     {
-        int labelIndex = _labelCounter++;
-        string elseLabel = $"_if_else_{labelIndex}";
-        string endLabel = $"_if_end_{labelIndex}";
-
-        GenerateExpression(ifStmt.Condition);
+        int idx = _labelCounter++;
+        GenerateExpression(i.Condition);
         AppendAsm("cmp eax, 0");
-
-        if (ifStmt.ElseBody != null)
+        AppendAsm(i.ElseBody != null ? $"je _if_else_{idx}" : $"je _if_end_{idx}");
+        GenerateStatement(i.ThenBody);
+        if (i.ElseBody != null)
         {
-            AppendAsm($"je {elseLabel}");
+            AppendAsm($"jmp _if_end_{idx}");
+            _sb.AppendLine($"_if_else_{idx}:");
+            GenerateStatement(i.ElseBody);
         }
-        else
-        {
-            AppendAsm($"je {endLabel}");
-        }
-
-        GenerateStatement(ifStmt.ThenBody);
-
-        if (ifStmt.ElseBody != null)
-        {
-            AppendAsm($"jmp {endLabel}");
-            _sb.AppendLine($"{elseLabel}:");
-            GenerateStatement(ifStmt.ElseBody);
-        }
-
-        _sb.AppendLine($"{endLabel}:");
+        _sb.AppendLine($"_if_end_{idx}:");
     }
 
     private void GenerateReturn(ReturnStatementNode ret)
     {
-        if (ret.Expression != null)
-        {
-            GenerateExpression(ret.Expression);
-        }
+        if (ret.Expression != null) GenerateExpression(ret.Expression);
         AppendAsm("mov esp, ebp");
         AppendAsm("pop ebp");
         AppendAsm("ret");
+    }
+
+    // Puts the address of the l-value into EAX
+    private void GenerateLValueAddress(ExpressionNode expression)
+    {
+        switch (expression)
+        {
+            case VariableExpressionNode varExpr:
+                if (!_variables.TryGetValue(varExpr.Identifier.Value, out var offset)) throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
+                string sign = offset > 0 ? "+" : "";
+                AppendAsm($"lea eax, [ebp {sign} {offset}]", $"Get address of var {varExpr.Identifier.Value}");
+                break;
+            case MemberAccessExpressionNode memberAccess:
+                GenerateLValueAddress(memberAccess.Left); // Puts base address of struct in EAX
+                var leftType = GetExpressionType(memberAccess.Left);
+                var (memberOffset, _) = GetMemberInfo(leftType, memberAccess.Member.Value);
+                AppendAsm($"add eax, {memberOffset}", $"Offset for member .{memberAccess.Member.Value}");
+                break;
+            default: throw new InvalidOperationException("Expression is not a valid L-value.");
+        }
+    }
+
+    private string GetExpressionType(ExpressionNode expr)
+    {
+        switch (expr)
+        {
+            case VariableExpressionNode v: return _variableTypes[v.Identifier.Value];
+            case MemberAccessExpressionNode m:
+                var leftType = GetExpressionType(m.Left);
+                var (_, memberType) = GetMemberInfo(leftType, m.Member.Value);
+                return memberType;
+            default: return "int"; // Simplification
+        }
     }
 
     private void GenerateExpression(ExpressionNode expression)
     {
         switch (expression)
         {
-            case IntegerLiteralNode literal:
-                AppendAsm($"mov eax, {literal.Value}");
+            case IntegerLiteralNode literal: AppendAsm($"mov eax, {literal.Value}"); break;
+            case StringLiteralNode str: AppendAsm($"mov eax, {str.Label}"); break;
+            case UnaryExpressionNode u:
+                GenerateExpression(u.Right);
+                if (u.Operator.Type == TokenType.Minus) AppendAsm("neg eax", "Negate value");
                 break;
-            case StringLiteralNode str:
-                AppendAsm($"mov eax, {str.Label}");
+            case VariableExpressionNode or MemberAccessExpressionNode:
+                GenerateLValueAddress(expression);
+                AppendAsm("mov eax, [eax]", "Dereference address to get value");
                 break;
-            case UnaryExpressionNode unaryExpr:
-                GenerateExpression(unaryExpr.Right);
-                if (unaryExpr.Operator.Type == TokenType.Minus)
-                {
-                    AppendAsm("neg eax", "Negate value");
-                }
-                // Unary plus is a no-op.
+            case AssignmentExpressionNode assign:
+                GenerateLValueAddress(assign.Left);
+                AppendAsm("push eax");
+                GenerateExpression(assign.Right);
+                AppendAsm("pop ecx");
+                AppendAsm("mov [ecx], eax");
                 break;
-            case VariableExpressionNode varExpr:
-                if (!_variables.TryGetValue(varExpr.Identifier.Value, out var offset))
-                {
-                    throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
-                }
-                string sign = offset > 0 ? "+" : "";
-                AppendAsm($"mov eax, [ebp {sign} {offset}]", $"Load variable/param {varExpr.Identifier.Value}");
-                break;
-            case AssignmentExpressionNode assignExpr:
-                if (!_variables.TryGetValue(assignExpr.Identifier.Value, out var assignOffset))
-                {
-                    throw new InvalidOperationException($"Undeclared variable '{assignExpr.Identifier.Value}' for assignment.");
-                }
-                GenerateExpression(assignExpr.Value);
-                string assignSign = assignOffset > 0 ? "+" : "";
-                AppendAsm($"mov [ebp {assignSign} {assignOffset}], eax", $"Assign to variable/param {assignExpr.Identifier.Value}");
-                break;
-            case BinaryExpressionNode binExpr:
-                GenerateBinaryExpression(binExpr);
-                break;
-            case CallExpressionNode callExpr:
-                GenerateCallExpression(callExpr);
-                break;
-            default:
-                throw new NotImplementedException($"Unsupported expression type: {expression.GetType().Name}");
+            case BinaryExpressionNode binExpr: GenerateBinaryExpression(binExpr); break;
+            case CallExpressionNode callExpr: GenerateCallExpression(callExpr); break;
+            default: throw new NotImplementedException($"Expr: {expression.GetType().Name}");
         }
     }
 
@@ -402,13 +348,9 @@ public class Generator
 
         AppendAsm($"call {callTarget}");
 
-        if (callExpr.Parent is not ExpressionStatementNode)
+        if (callExpr.Parent is not ExpressionStatementNode && callExpr.Arguments.Count > 0)
         {
-            if (callExpr.Arguments.Count > 0)
-            {
-                int bytesToClean = callExpr.Arguments.Count * 4;
-                AppendAsm($"add esp, {bytesToClean}", $"Clean up {callExpr.Arguments.Count} args from stack");
-            }
+            AppendAsm($"add esp, {callExpr.Arguments.Count * 4}", $"Clean up {callExpr.Arguments.Count} args");
         }
     }
 
@@ -421,35 +363,15 @@ public class Generator
 
         switch (binExpr.Operator.Type)
         {
-            case TokenType.Plus: AppendAsm("add eax, ecx", "eax = eax + ecx"); break;
-            case TokenType.Minus: AppendAsm("sub eax, ecx", "eax = eax - ecx"); break;
-            case TokenType.Star: AppendAsm("imul eax, ecx", "eax = eax * ecx"); break;
-            case TokenType.Slash:
-                AppendAsm("cdq", "Sign-extend EAX into EDX:EAX");
-                AppendAsm("idiv ecx", "eax = edx:eax / ecx");
-                break;
-            case TokenType.DoubleEquals:
-                AppendAsm("cmp eax, ecx");
-                AppendAsm("sete al", "Set AL if equal");
-                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
-                break;
-            case TokenType.NotEquals:
-                AppendAsm("cmp eax, ecx");
-                AppendAsm("setne al", "Set AL if not equal");
-                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
-                break;
-            case TokenType.LessThan:
-                AppendAsm("cmp eax, ecx");
-                AppendAsm("setl al", "Set AL if less");
-                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
-                break;
-            case TokenType.GreaterThan:
-                AppendAsm("cmp eax, ecx");
-                AppendAsm("setg al", "Set AL if greater");
-                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
-                break;
-            default:
-                throw new NotImplementedException($"Unsupported binary operator: {binExpr.Operator.Type}");
+            case TokenType.Plus: AppendAsm("add eax, ecx"); break;
+            case TokenType.Minus: AppendAsm("sub eax, ecx"); break;
+            case TokenType.Star: AppendAsm("imul eax, ecx"); break;
+            case TokenType.Slash: AppendAsm("cdq"); AppendAsm("idiv ecx"); break;
+            case TokenType.DoubleEquals: AppendAsm("cmp eax, ecx"); AppendAsm("sete al"); AppendAsm("movzx eax, al"); break;
+            case TokenType.NotEquals: AppendAsm("cmp eax, ecx"); AppendAsm("setne al"); AppendAsm("movzx eax, al"); break;
+            case TokenType.LessThan: AppendAsm("cmp eax, ecx"); AppendAsm("setl al"); AppendAsm("movzx eax, al"); break;
+            case TokenType.GreaterThan: AppendAsm("cmp eax, ecx"); AppendAsm("setg al"); AppendAsm("movzx eax, al"); break;
+            default: throw new NotImplementedException($"Op: {binExpr.Operator.Type}");
         }
     }
 }

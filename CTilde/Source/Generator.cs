@@ -31,7 +31,7 @@ public class Generator
         foreach (var s in _program.Structs) _structDefinitions[s.Name] = s;
         foreach (var f in _program.Functions.Where(f => f.Body == null)) _externalFunctions.Add(f.Name);
 
-        _sb.AppendLine("format PE GUI 4.0");
+        _sb.AppendLine("format PE console");
         _sb.AppendLine("entry start");
         _sb.AppendLine();
         _sb.AppendLine("include 'win32a.inc'");
@@ -150,12 +150,7 @@ public class Generator
         if (typeName == "char") return 1;
         if (_structDefinitions.TryGetValue(typeName, out var structDef))
         {
-            return structDef.Members.Sum(m =>
-            {
-                var memberType = new StringBuilder(m.Type.Value);
-                for (int i = 0; i < m.PointerLevel; i++) memberType.Append('*');
-                return GetSizeOfType(memberType.ToString());
-            });
+            return structDef.Members.Sum(m => GetSizeOfType(m.Type.Value)); // Pointer level is 0 for struct members
         }
         throw new InvalidOperationException($"Unknown type '{typeName}'");
     }
@@ -183,20 +178,9 @@ public class Generator
         throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
     }
 
-    private void AppendAsm(string? instruction, string? comment = null)
+    private void AppendAsm(string instruction, string? comment = null)
     {
-        var line = instruction == null ? "" : $"    {instruction}";
-        _sb.AppendLine(line.PadRight(35) + (comment == null ? "" : $"; {comment}"));
-    }
-
-    private void GenerateFunctionEpilogue()
-    {
-        AppendAsm("pop edi");
-        AppendAsm("pop esi");
-        AppendAsm("pop ebx");
-        AppendAsm("mov esp, ebp");
-        AppendAsm("pop ebp");
-        AppendAsm("ret");
+        _sb.AppendLine($"    {instruction}".PadRight(35) + (comment == null ? "" : $"; {comment}"));
     }
 
     private void GenerateFunction(FunctionDeclarationNode function)
@@ -213,9 +197,6 @@ public class Generator
         _sb.AppendLine($"{mangledName}:");
         AppendAsm("push ebp");
         AppendAsm("mov ebp, esp");
-        AppendAsm("push ebx", "Preserve non-volatile registers");
-        AppendAsm("push esi");
-        AppendAsm("push edi");
         _sb.AppendLine();
 
         int paramOffset = 8;
@@ -227,15 +208,15 @@ public class Generator
             for (int i = 0; i < param.PointerLevel; i++) typeName.Append('*');
             _variableTypes[param.Name.Value] = typeName.ToString();
 
-            // All parameters take at least 4 bytes on the stack
-            paramOffset += Math.Max(4, GetSizeOfType(typeName.ToString()));
+            paramOffset += GetSizeOfType(typeName.ToString());
         }
 
         GenerateStatement(function.Body!);
 
         _sb.AppendLine();
-        AppendAsm(null, "Implicit return cleanup");
-        GenerateFunctionEpilogue();
+        AppendAsm("mov esp, ebp", "Implicit return cleanup");
+        AppendAsm("pop ebp");
+        AppendAsm("ret");
     }
 
     private void GenerateStatement(StatementNode statement)
@@ -273,8 +254,8 @@ public class Generator
                 if (!_structDefinitions.TryGetValue(decl.Type.Value, out var structDef))
                     throw new InvalidOperationException($"Cannot use initializer list for non-struct type '{decl.Type.Value}'");
 
-                if (initList.Values.Count > structDef.Members.Count)
-                    throw new InvalidOperationException($"Too many values in initializer list for struct '{structDef.Name}'.");
+                if (initList.Values.Count != structDef.Members.Count)
+                    throw new InvalidOperationException($"Initializer list has {initList.Values.Count} values, but struct '{structDef.Name}' has {structDef.Members.Count} members.");
 
                 int currentMemberOffset = 0;
                 for (var i = 0; i < initList.Values.Count; i++)
@@ -301,10 +282,9 @@ public class Generator
             }
             else
             {
-                // This is now an assignment `var = initializer`, which our main expression handler will deal with.
-                var left = new VariableExpressionNode(decl.Identifier);
-                var assignment = new AssignmentExpressionNode(left, decl.Initializer);
-                GenerateExpression(assignment);
+                if (size > 4) throw new NotSupportedException("Struct initialization must use an initializer list. Struct copy initialization is not supported.");
+                GenerateExpression(decl.Initializer);
+                AppendAsm($"mov [ebp + {_stackOffset}], eax");
             }
         }
     }
@@ -340,7 +320,9 @@ public class Generator
     private void GenerateReturn(ReturnStatementNode ret)
     {
         if (ret.Expression != null) GenerateExpression(ret.Expression);
-        GenerateFunctionEpilogue();
+        AppendAsm("mov esp, ebp");
+        AppendAsm("pop ebp");
+        AppendAsm("ret");
     }
 
     private void GenerateLValueAddress(ExpressionNode expression)
@@ -382,18 +364,6 @@ public class Generator
                 }
             case MemberAccessExpressionNode memberAccess:
                 {
-                    var leftType = GetExpressionType(memberAccess.Left);
-                    string baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
-
-                    var structDef = _structDefinitions[baseStructType];
-                    var memberVar = structDef.Members.FirstOrDefault(m => m.Name.Value == memberAccess.Member.Value);
-                    if (memberVar == null) throw new InvalidOperationException($"Struct '{baseStructType}' has no member '{memberAccess.Member.Value}'");
-
-                    if (memberVar.AccessLevel == AccessSpecifier.Private && _currentMethodOwnerStruct != baseStructType)
-                    {
-                        throw new InvalidOperationException($"Cannot access private member '{baseStructType}::{memberAccess.Member.Value}' from context '{_currentMethodOwnerStruct ?? "global"}'.");
-                    }
-
                     if (memberAccess.Operator.Type == TokenType.Dot)
                     {
                         GenerateLValueAddress(memberAccess.Left); // Puts base address of struct in EAX
@@ -403,7 +373,10 @@ public class Generator
                         GenerateExpression(memberAccess.Left); // Puts pointer value (struct address) in EAX
                     }
 
+                    var leftType = GetExpressionType(memberAccess.Left);
+                    string baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
                     var (memberOffset, _) = GetMemberInfo(baseStructType, memberAccess.Member.Value);
+
                     if (memberOffset > 0)
                     {
                         AppendAsm($"add eax, {memberOffset}", $"Offset for member {memberAccess.Operator.Value}{memberAccess.Member.Value}");
@@ -441,7 +414,7 @@ public class Generator
                     }
                 }
                 throw new InvalidOperationException($"Cannot determine type for undefined variable '{v.Identifier.Value}'.");
-            case AssignmentExpressionNode a: return GetExpressionType(a.Left); // Type of assignment is type of l-value
+            case AssignmentExpressionNode a: return GetExpressionType(a.Right);
             case MemberAccessExpressionNode m:
                 {
                     var leftType = GetExpressionType(m.Left);
@@ -539,54 +512,20 @@ public class Generator
                 }
                 break;
             case AssignmentExpressionNode assign:
+                var lvalueType = GetExpressionType(assign.Left);
+                GenerateLValueAddress(assign.Left);
+                AppendAsm("push eax");
+                GenerateExpression(assign.Right);
+                AppendAsm("pop ecx");
+                if (GetSizeOfType(lvalueType) == 1)
                 {
-                    var lValueType = GetExpressionType(assign.Left);
-                    var rValueType = GetExpressionType(assign.Right);
-
-                    if (_structDefinitions.ContainsKey(lValueType.TrimEnd('*'))) // Struct assignment
-                    {
-                        if (lValueType != rValueType) throw new InvalidOperationException($"Type mismatch in struct assignment: cannot assign '{rValueType}' to '{lValueType}'.");
-
-                        GenerateLValueAddress(assign.Left); // Dest address in EAX
-                        AppendAsm("push eax");
-                        GenerateLValueAddress(assign.Right); // Src address in EAX
-                        AppendAsm("pop edi"); // edi = dest
-                        AppendAsm("mov esi, eax", "esi = src");
-
-                        int size = GetSizeOfType(lValueType);
-                        int dwordCount = size / 4;
-                        int byteCount = size % 4;
-
-                        if (dwordCount > 0)
-                        {
-                            AppendAsm($"mov ecx, {dwordCount}");
-                            AppendAsm("rep movsd");
-                        }
-                        if (byteCount > 0)
-                        {
-                            AppendAsm($"mov ecx, {byteCount}");
-                            AppendAsm("rep movsb");
-                        }
-
-                        AppendAsm("mov eax, edi", "Result of assignment is the l-value");
-                    }
-                    else // Primitive assignment
-                    {
-                        GenerateLValueAddress(assign.Left);
-                        AppendAsm("push eax");
-                        GenerateExpression(assign.Right);
-                        AppendAsm("pop ecx");
-                        if (GetSizeOfType(lValueType) == 1)
-                        {
-                            AppendAsm("mov [ecx], al");
-                        }
-                        else
-                        {
-                            AppendAsm("mov [ecx], eax");
-                        }
-                    }
-                    break;
+                    AppendAsm("mov [ecx], al");
                 }
+                else
+                {
+                    AppendAsm("mov [ecx], eax");
+                }
+                break;
             case BinaryExpressionNode binExpr: GenerateBinaryExpression(binExpr); break;
             case CallExpressionNode callExpr: GenerateCallExpression(callExpr); break;
             default: throw new NotImplementedException($"Expr: {expression.GetType().Name}");
@@ -601,17 +540,6 @@ public class Generator
         // Handle 'this' pointer for method calls
         if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
         {
-            var leftType = GetExpressionType(memberAccess.Left);
-            var baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
-
-            var method = _program.Functions.FirstOrDefault(f => f.OwnerStructName == baseStructType && f.Name == memberAccess.Member.Value);
-            if (method == null) throw new InvalidOperationException($"Struct '{baseStructType}' has no method '{memberAccess.Member.Value}'");
-
-            if (method.AccessLevel == AccessSpecifier.Private && _currentMethodOwnerStruct != baseStructType)
-            {
-                throw new InvalidOperationException($"Cannot access private method '{baseStructType}::{memberAccess.Member.Value}' from context '{_currentMethodOwnerStruct ?? "global"}'.");
-            }
-
             if (memberAccess.Operator.Type == TokenType.Dot) // obj.method()
             {
                 GenerateLValueAddress(memberAccess.Left);
@@ -622,6 +550,9 @@ public class Generator
             }
             AppendAsm("push eax", "Push 'this' pointer");
             totalArgSize += 4;
+
+            var leftType = GetExpressionType(memberAccess.Left);
+            var baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
             calleeTarget = $"_{baseStructType}_{memberAccess.Member.Value}";
         }
         else if (callExpr.Callee is VariableExpressionNode varNode)
@@ -637,25 +568,23 @@ public class Generator
         // Push explicit arguments
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
-            var argType = GetExpressionType(arg);
-            var isStruct = _structDefinitions.ContainsKey(argType);
+            string argType = GetExpressionType(arg);
+            int argSize = GetSizeOfType(argType);
+            totalArgSize += argSize;
 
-            if (isStruct) // Pass struct by value by copying to stack
+            if (argSize <= 4) // Pass by value for int/pointer
             {
-                int argSize = GetSizeOfType(argType);
-                GenerateLValueAddress(arg); // EAX = address of struct
-                AppendAsm("mov esi, eax", $"Copy struct {argType} for call");
+                GenerateExpression(arg);
+                AppendAsm("push eax");
+            }
+            else // Pass struct by value
+            {
+                GenerateLValueAddress(arg); // Get address of struct
+                AppendAsm("mov esi, eax", $"Copy struct for call");
                 for (int offset = argSize - 4; offset >= 0; offset -= 4)
                 {
                     AppendAsm($"push dword [esi + {offset}]");
                 }
-                totalArgSize += argSize;
-            }
-            else // Pass primitive or pointer by value
-            {
-                GenerateExpression(arg);
-                AppendAsm("push eax");
-                totalArgSize += 4;
             }
         }
 

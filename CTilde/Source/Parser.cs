@@ -73,32 +73,22 @@ public class Parser
         var structName = Eat(TokenType.Identifier);
         Eat(TokenType.LeftBrace);
 
-        var members = new List<MemberVariableNode>();
-        var currentAccess = AccessSpecifier.Private; // Default for struct is private
-
+        var members = new List<ParameterNode>();
         while (Current.Type != TokenType.RightBrace)
         {
-            if (Current.Type == TokenType.Keyword && (Current.Value == "public" || Current.Value == "private"))
-            {
-                currentAccess = (Current.Value == "public") ? AccessSpecifier.Public : AccessSpecifier.Private;
-                Eat(TokenType.Keyword);
-                Eat(TokenType.Colon);
-                continue;
-            }
-
             var (type, pointerLevel) = ParseType();
             var name = Eat(TokenType.Identifier);
 
             if (Current.Type == TokenType.LeftParen)
             {
                 // This is a method definition.
-                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value, currentAccess);
+                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value);
                 programFunctions.Add(methodNode);
             }
             else
             {
                 // This is a member variable.
-                members.Add(new MemberVariableNode(type, pointerLevel, name, currentAccess));
+                members.Add(new ParameterNode(type, pointerLevel, name));
                 Eat(TokenType.Semicolon);
             }
         }
@@ -159,11 +149,10 @@ public class Parser
     {
         var (returnType, returnPointerLevel) = ParseType();
         var identifier = Eat(TokenType.Identifier);
-        // Global functions are implicitly public
-        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null, AccessSpecifier.Public);
+        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null);
     }
 
-    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName, AccessSpecifier accessLevel)
+    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName)
     {
         Eat(TokenType.LeftParen);
 
@@ -197,7 +186,7 @@ public class Parser
             Eat(TokenType.Semicolon); // For function prototypes
         }
 
-        return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName, accessLevel);
+        return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName);
     }
 
     private BlockStatementNode ParseBlockStatement()

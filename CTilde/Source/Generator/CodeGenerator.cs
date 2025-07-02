@@ -19,6 +19,7 @@ public class CodeGenerator
 
     internal SymbolTable CurrentSymbols { get; set; } = null!;
     internal CompilationUnitNode CurrentCompilationUnit { get; set; } = null!;
+    internal FunctionDeclarationNode CurrentFunction { get; set; } = null!; // New property
 
     public CodeGenerator(ProgramNode program)
     {
@@ -50,6 +51,7 @@ public class CodeGenerator
             CurrentCompilationUnit = unit;
             foreach (var function in unit.Functions.Where(f => f.Body != null))
             {
+                CurrentFunction = function; // Set current function
                 GenerateFunction(function);
                 Builder.AppendBlankLine();
             }

@@ -85,19 +85,23 @@ public class Parser
     private UsingDirectiveNode ParseUsingDirective()
     {
         Eat(TokenType.Keyword); // using
-        var identifier = Eat(TokenType.Identifier);
+        var firstIdentifier = Eat(TokenType.Identifier);
+        string namespaceName;
         string? alias = null;
 
-        if (Current.Type == TokenType.Assignment)
+        if (Current.Type == TokenType.Assignment) // This is 'using alias = namespace;'
         {
+            alias = firstIdentifier.Value; // 'rl' in 'using rl = raylib;'
             Eat(TokenType.Assignment);
-            alias = Eat(TokenType.Identifier).Value;
-            Eat(TokenType.Semicolon);
-            return new UsingDirectiveNode(identifier.Value, alias);
+            namespaceName = Eat(TokenType.Identifier).Value; // 'raylib' in 'using rl = raylib;'
+        }
+        else // This is 'using namespace;'
+        {
+            namespaceName = firstIdentifier.Value; // 'raylib' in 'using raylib;'
         }
 
         Eat(TokenType.Semicolon);
-        return new UsingDirectiveNode(identifier.Value, null);
+        return new UsingDirectiveNode(namespaceName, alias);
     }
 
     private void ParseNamespaceDirective()

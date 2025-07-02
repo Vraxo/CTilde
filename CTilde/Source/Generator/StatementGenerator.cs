@@ -9,6 +9,7 @@ public class StatementGenerator
     private AssemblyBuilder Builder => _context.Builder;
     private TypeManager TypeManager => _context.TypeManager;
     private CompilationUnitNode CurrentCompilationUnit => _context.CurrentCompilationUnit;
+    private FunctionDeclarationNode CurrentFunction => _context.CurrentFunction; // Access new property
     private ExpressionGenerator ExpressionGenerator => _context.ExpressionGenerator;
 
     public StatementGenerator(CodeGenerator context)
@@ -29,9 +30,12 @@ public class StatementGenerator
                 {
                     if (decl.Initializer is InitializerListExpressionNode initList)
                     {
-                        var function = (FunctionDeclarationNode)decl.Ancestors().First(a => a is FunctionDeclarationNode);
                         string rawTypeName = TypeManager.GetTypeName(decl.Type, decl.PointerLevel);
-                        string resolvedTypeName = TypeManager.ResolveTypeName(rawTypeName, function.Namespace, CurrentCompilationUnit);
+
+                        // Resolve the base type name, then append the pointer suffix back if any
+                        string baseTypeName = rawTypeName.TrimEnd('*');
+                        string pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
+                        string resolvedTypeName = TypeManager.ResolveTypeName(baseTypeName, CurrentFunction.Namespace, CurrentCompilationUnit) + pointerSuffix; // Use CurrentFunction
 
                         if (!TypeManager.IsStruct(resolvedTypeName))
                             throw new InvalidOperationException($"Initializer list can only be used for struct types, not '{rawTypeName}'.");
@@ -50,8 +54,23 @@ public class StatementGenerator
                             var member = structDef.Members[j];
                             var valueExpr = initList.Values[j];
 
-                            var memberTypeName = TypeManager.GetTypeName(member.Type, member.PointerLevel);
-                            var memberSize = TypeManager.GetSizeOfType(memberTypeName, CurrentCompilationUnit);
+                            // Resolve the member type name before getting its size
+                            var rawMemberTypeName = TypeManager.GetTypeName(member.Type, member.PointerLevel);
+                            var baseMemberName = rawMemberTypeName.TrimEnd('*');
+                            var memberPointerSuffix = new string('*', rawMemberTypeName.Length - baseMemberName.Length);
+
+                            string resolvedMemberTypeName;
+                            if (member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", StringComparison.OrdinalIgnoreCase))
+                            {
+                                resolvedMemberTypeName = rawMemberTypeName; // Primitive types, void don't need resolution
+                            }
+                            else
+                            {
+                                // Resolve member type using the namespace of the *struct definition*, not the current function's context
+                                resolvedMemberTypeName = TypeManager.ResolveTypeName(baseMemberName, structDef.Namespace, CurrentCompilationUnit) + memberPointerSuffix;
+                            }
+
+                            var memberSize = TypeManager.GetSizeOfType(resolvedMemberTypeName, CurrentCompilationUnit);
                             var totalOffset = structBaseOffset + currentMemberOffset;
 
                             ExpressionGenerator.GenerateExpression(valueExpr);

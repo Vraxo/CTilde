@@ -19,37 +19,49 @@ public class TypeManager
         _functions = program.CompilationUnits.SelectMany(cu => cu.Functions).ToList();
     }
 
+    /// <summary>
+    /// Resolves an unqualified or aliased type name to its fully qualified name.
+    /// Does NOT handle pointer suffixes (*). Expects base type name (e.g., "Color", "rl::Color").
+    /// </summary>
+    /// <param name="name">The unqualified or aliased type name (e.g., "Color", "rl::Color").</param>
+    /// <param name="currentNamespace">The namespace of the current context (e.g., function's namespace).</param>
+    /// <param name="context">The compilation unit context to get `using` directives.</param>
+    /// <returns>The fully qualified type name (e.g., "raylib::Color").</returns>
     public string ResolveTypeName(string name, string? currentNamespace, CompilationUnitNode context)
     {
         if (name.Contains("::"))
         {
             var parts = name.Split("::");
-            var ns = parts[0];
+            var nsPart = parts[0];
             var typeName = parts[1];
 
-            var aliased = context.Usings.FirstOrDefault(u => u.Alias == ns);
+            var aliased = context.Usings.FirstOrDefault(u => u.Alias == nsPart);
             if (aliased != null)
             {
                 var fqn = $"{aliased.Namespace}::{typeName}";
-                return _structs.ContainsKey(fqn) ? fqn : throw new InvalidOperationException($"Type '{name}' with aliased namespace not found.");
+                return _structs.ContainsKey(fqn) ? fqn : throw new InvalidOperationException($"Type '{name}' with aliased namespace '{nsPart}' not found.");
             }
+            // If it's already a qualified name and not an alias, check it directly
             return _structs.ContainsKey(name) ? name : throw new InvalidOperationException($"Type '{name}' not found.");
         }
 
         var candidates = new List<string>();
 
+        // 1. Check current namespace
         if (currentNamespace != null)
         {
             var fqn = $"{currentNamespace}::{name}";
             if (_structs.ContainsKey(fqn)) candidates.Add(fqn);
         }
 
+        // 2. Check using namespaces (without aliases)
         foreach (var u in context.Usings.Where(u => u.Alias == null))
         {
             var fqn = $"{u.Namespace}::{name}";
             if (_structs.ContainsKey(fqn)) candidates.Add(fqn);
         }
 
+        // 3. Check global namespace
         if (_structs.ContainsKey(name)) candidates.Add(name);
 
         if (candidates.Count == 0) throw new InvalidOperationException($"Type '{name}' could not be resolved in the current context.");
@@ -58,22 +70,21 @@ public class TypeManager
         return candidates.First();
     }
 
-    public FunctionDeclarationNode ResolveFunctionCall(ExpressionNode callee, CompilationUnitNode context)
+    public FunctionDeclarationNode ResolveFunctionCall(ExpressionNode callee, CompilationUnitNode context, FunctionDeclarationNode currentFunction)
     {
         if (callee is VariableExpressionNode varNode)
         {
-            var function = (FunctionDeclarationNode)callee.Ancestors().First(a => a is FunctionDeclarationNode);
-            return ResolveFunctionByName(varNode.Identifier.Value, function.Namespace, context);
+            return ResolveFunctionByName(varNode.Identifier.Value, currentFunction.Namespace, context);
         }
         if (callee is QualifiedAccessExpressionNode qNode)
         {
-            var ns = qNode.Namespace.Value;
+            var nsPart = qNode.Namespace.Value;
             var funcName = qNode.Member.Value;
-            var aliased = context.Usings.FirstOrDefault(u => u.Alias == ns);
-            if (aliased != null) ns = aliased.Namespace;
+            var aliased = context.Usings.FirstOrDefault(u => u.Alias == nsPart);
+            if (aliased != null) nsPart = aliased.Namespace;
 
-            var func = _functions.FirstOrDefault(f => f.OwnerStructName == null && f.Namespace == ns && f.Name == funcName);
-            if (func == null) throw new InvalidOperationException($"Function '{ns}::{funcName}' not found.");
+            var func = _functions.FirstOrDefault(f => f.OwnerStructName == null && f.Namespace == nsPart && f.Name == funcName);
+            if (func == null) throw new InvalidOperationException($"Function '{nsPart}::{funcName}' not found.");
             return func;
         }
         throw new NotSupportedException($"Unsupported callee type for resolution: {callee.GetType().Name}");
@@ -139,29 +150,36 @@ public class TypeManager
 
     public int GetSizeOfType(string typeName, CompilationUnitNode context)
     {
-        if (typeName.EndsWith("*")) return 4;
+        if (typeName.EndsWith("*")) return 4; // Pointers are always 4 bytes
         if (typeName == "int") return 4;
         if (typeName == "char") return 1;
 
         if (_structs.TryGetValue(typeName, out var structDef))
         {
-            return structDef.Members.Sum(m =>
+            return structDef.Members.Sum(mem =>
             {
-                var rawMemberType = GetTypeName(m.Type, m.PointerLevel);
-                if (m.Type.Type == TokenType.Identifier)
+                var rawMemberType = GetTypeName(mem.Type, mem.PointerLevel);
+
+                string baseMemberName = rawMemberType.TrimEnd('*');
+                string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
+
+                string resolvedMemberTypeForSize;
+                if (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", StringComparison.OrdinalIgnoreCase))
                 {
-                    string baseTypeName = rawMemberType.TrimEnd('*');
-                    string pointerSuffix = rawMemberType.Substring(baseTypeName.Length);
-                    var resolved = ResolveTypeName(baseTypeName, structDef.Namespace, context) + pointerSuffix;
-                    return GetSizeOfType(resolved, context);
+                    resolvedMemberTypeForSize = rawMemberType; // Primitive, no resolution needed
                 }
-                return GetSizeOfType(rawMemberType, context);
+                else
+                {
+                    // Resolve member type using the namespace of the *struct definition*, not the call context
+                    resolvedMemberTypeForSize = ResolveTypeName(baseMemberName, structDef.Namespace, context) + pointerSuffix;
+                }
+                return GetSizeOfType(resolvedMemberTypeForSize, context); // Recursive call
             });
         }
         throw new InvalidOperationException($"Unknown type '{typeName}' for size calculation.");
     }
 
-    public bool IsStruct(string typeName) => _structs.ContainsKey(typeName.TrimEnd('*'));
+    public bool IsStruct(string typeName) => _structs.ContainsKey(typeName.TrimEnd('*')); // Check if base type name is a struct
 
     public (int offset, string type) GetMemberInfo(string structName, string memberName, CompilationUnitNode context)
     {
@@ -169,19 +187,25 @@ public class TypeManager
             throw new InvalidOperationException($"Undefined struct '{structName}'");
 
         int currentOffset = 0;
-        foreach (var member in structDef.Members)
+        foreach (var mem in structDef.Members) // Changed loop variable from 'member' to 'mem' to avoid conflict
         {
-            var rawMemberType = GetTypeName(member.Type, member.PointerLevel);
-            var resolvedMemberType = rawMemberType;
+            var rawMemberType = GetTypeName(mem.Type, mem.PointerLevel);
 
-            if (member.Type.Type == TokenType.Identifier)
+            string baseMemberName = rawMemberType.TrimEnd('*');
+            string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
+
+            string resolvedMemberType;
+            if (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", StringComparison.OrdinalIgnoreCase))
             {
-                string baseTypeName = rawMemberType.TrimEnd('*');
-                string pointerSuffix = rawMemberType.Substring(baseTypeName.Length);
-                resolvedMemberType = ResolveTypeName(baseTypeName, structDef.Namespace, context) + pointerSuffix;
+                resolvedMemberType = rawMemberType; // Primitive, no resolution needed
+            }
+            else
+            {
+                // Resolve member type using the namespace of the *struct definition* (structDef.Namespace)
+                resolvedMemberType = ResolveTypeName(baseMemberName, structDef.Namespace, context) + pointerSuffix;
             }
 
-            if (member.Name.Value == memberName)
+            if (mem.Name.Value == memberName)
             {
                 return (currentOffset, resolvedMemberType);
             }
@@ -190,41 +214,39 @@ public class TypeManager
         throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
     }
 
-    public string GetExpressionType(ExpressionNode expr, SymbolTable symbols, CompilationUnitNode context)
+    public string GetExpressionType(ExpressionNode expr, SymbolTable symbols, CompilationUnitNode context, FunctionDeclarationNode currentFunction)
     {
-        var function = (FunctionDeclarationNode)expr.Ancestors().First(a => a is FunctionDeclarationNode);
-
         switch (expr)
         {
             case IntegerLiteralNode: return "int";
             case StringLiteralNode: return "char*";
             case VariableExpressionNode v:
                 if (symbols.TryGetSymbol(v.Identifier.Value, out _, out var type)) return type;
-                if (function.OwnerStructName != null)
+                if (currentFunction.OwnerStructName != null)
                 {
                     try
                     {
-                        var ownerType = GetStructTypeFromUnqualifiedName(function.OwnerStructName, function.Namespace);
-                        var (_, memberType) = GetMemberInfo(ownerType.FullName, v.Identifier.Value, context);
-                        return memberType;
+                        var ownerType = GetStructTypeFromUnqualifiedName(currentFunction.OwnerStructName, currentFunction.Namespace);
+                        var (_, memberTypeResolved) = GetMemberInfo(ownerType.FullName, v.Identifier.Value, context);
+                        return memberTypeResolved;
                     }
                     catch (InvalidOperationException) { /* Fall through */ }
                 }
                 throw new InvalidOperationException($"Cannot determine type for undefined variable '{v.Identifier.Value}'.");
 
-            case AssignmentExpressionNode a: return GetExpressionType(a.Left, symbols, context);
+            case AssignmentExpressionNode a: return GetExpressionType(a.Left, symbols, context, currentFunction);
 
             case MemberAccessExpressionNode ma:
-                var leftType = GetExpressionType(ma.Left, symbols, context);
+                var leftType = GetExpressionType(ma.Left, symbols, context, currentFunction);
                 string baseStructType = leftType.TrimEnd('*');
                 var (_, resolvedMemberType) = GetMemberInfo(baseStructType, ma.Member.Value, context);
                 return resolvedMemberType;
 
             case UnaryExpressionNode u when u.Operator.Type == TokenType.Ampersand:
-                return GetExpressionType(u.Right, symbols, context) + "*";
+                return GetExpressionType(u.Right, symbols, context, currentFunction) + "*";
 
             case UnaryExpressionNode u when u.Operator.Type == TokenType.Star:
-                var operandType = GetExpressionType(u.Right, symbols, context);
+                var operandType = GetExpressionType(u.Right, symbols, context, currentFunction);
                 if (!operandType.EndsWith("*")) throw new InvalidOperationException($"Cannot dereference non-pointer type '{operandType}'.");
                 return operandType.Substring(0, operandType.Length - 1);
 
@@ -232,19 +254,22 @@ public class TypeManager
                 FunctionDeclarationNode func;
                 if (call.Callee is MemberAccessExpressionNode callMemberAccess)
                 {
-                    var ownerTypeName = GetExpressionType(callMemberAccess.Left, symbols, context).TrimEnd('*');
+                    var ownerTypeName = GetExpressionType(callMemberAccess.Left, symbols, context, currentFunction).TrimEnd('*');
                     var (ownerStruct, _) = GetStructTypeFromFullName(ownerTypeName);
                     func = ResolveMethod(ownerStruct, callMemberAccess.Member.Value);
                 }
                 else
                 {
-                    func = ResolveFunctionCall(call.Callee, context);
+                    func = ResolveFunctionCall(call.Callee, context, currentFunction);
                 }
 
                 var returnTypeNameRaw = GetTypeName(func.ReturnType, func.ReturnPointerLevel);
-                if (!returnTypeNameRaw.EndsWith("*") && func.ReturnType.Type != TokenType.Keyword)
+                string baseReturnName = returnTypeNameRaw.TrimEnd('*');
+                string returnPointerSuffix = new string('*', returnTypeNameRaw.Length - baseReturnName.Length);
+
+                if (func.ReturnType.Type != TokenType.Keyword && !baseReturnName.Equals("void", StringComparison.OrdinalIgnoreCase))
                 {
-                    return ResolveTypeName(returnTypeNameRaw, func.Namespace, context);
+                    return ResolveTypeName(baseReturnName, func.Namespace, context) + returnPointerSuffix;
                 }
                 return returnTypeNameRaw;
 

@@ -18,14 +18,12 @@ public record ReturnStatementNode(ExpressionNode Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record DeclarationStatementNode(Token Identifier, ExpressionNode? Initializer) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
-public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBranch, StatementNode? ElseBranch) : StatementNode;
 
 
 // Expressions
 public record IntegerLiteralNode(int Value) : ExpressionNode;
 public record AssignmentExpressionNode(Token Identifier, ExpressionNode Value) : ExpressionNode;
 public record VariableExpressionNode(Token Identifier) : ExpressionNode;
-public record CallExpressionNode(Token Callee, ExpressionNode Argument) : ExpressionNode;
 </file>
 
 <file path="Generator.cs">
@@ -57,9 +55,6 @@ public class Generator
         _sb.AppendLine();
         _sb.AppendLine("include 'win32a.inc'");
         _sb.AppendLine();
-        _sb.AppendLine("section '.data' data readable writeable");
-        _sb.AppendLine("    format_int db '%d', 10, 0 ; Format string for printing an integer with a newline");
-        _sb.AppendLine();
         _sb.AppendLine("section '.text' code readable executable");
         _sb.AppendLine();
         _sb.AppendLine("start:");
@@ -74,27 +69,10 @@ public class Generator
         _sb.AppendLine();
         _sb.AppendLine("section '.idata' import data readable");
         _sb.AppendLine();
-        _sb.AppendLine("    library kernel32,'kernel32.dll', msvcrt,'msvcrt.dll'");
-        _sb.AppendLine();
+        _sb.AppendLine("    library kernel32,'kernel32.dll'");
         _sb.AppendLine("    import kernel32, ExitProcess,'ExitProcess'");
-        _sb.AppendLine("    import msvcrt, printf,'printf'");
 
         return _sb.ToString();
-    }
-
-    private void AppendAsm(string instruction, string? comment = null)
-    {
-        const int commentColumn = 36;
-        string indentedInstruction = $"    {instruction}";
-
-        if (string.IsNullOrEmpty(comment))
-        {
-            _sb.AppendLine(indentedInstruction);
-        }
-        else
-        {
-            _sb.AppendLine(indentedInstruction.PadRight(commentColumn - 1) + $"; {comment}");
-        }
     }
 
     private void GenerateFunction(FunctionDeclarationNode function)
@@ -103,8 +81,8 @@ public class Generator
         _stackOffset = 0;
 
         _sb.AppendLine($"{function.Name}:");
-        AppendAsm("push ebp");
-        AppendAsm("mov ebp, esp");
+        _sb.AppendLine("    push ebp");
+        _sb.AppendLine("    mov ebp, esp");
         _sb.AppendLine();
 
         GenerateStatement(function.Body);
@@ -126,55 +104,15 @@ public class Generator
             case WhileStatementNode whileStmt:
                 GenerateWhile(whileStmt);
                 break;
-            case IfStatementNode ifStmt:
-                GenerateIf(ifStmt);
-                break;
             case DeclarationStatementNode decl:
                 GenerateDeclaration(decl);
                 break;
             case ExpressionStatementNode exprStmt:
                 GenerateExpression(exprStmt.Expression);
-                _sb.AppendLine("    ; Expression statement result is discarded");
                 break;
             default:
                 throw new NotImplementedException($"Unsupported statement type: {statement.GetType().Name}");
         }
-    }
-
-    private void GenerateIf(IfStatementNode ifStmt)
-    {
-        int labelIndex = _labelCounter++;
-        string elseLabel = $"_else_{labelIndex}";
-        string endIfLabel = $"_end_if_{labelIndex}";
-
-        // Evaluate condition
-        GenerateExpression(ifStmt.Condition);
-        AppendAsm("cmp eax, 0");
-
-        if (ifStmt.ElseBranch != null)
-        {
-            // If-Else statement
-            AppendAsm($"je {elseLabel}", "Condition is false, jump to else");
-
-            // Then branch
-            GenerateStatement(ifStmt.ThenBranch);
-            AppendAsm($"jmp {endIfLabel}", "Skip else branch");
-
-            // Else branch
-            _sb.AppendLine($"{elseLabel}:");
-            GenerateStatement(ifStmt.ElseBranch);
-        }
-        else
-        {
-            // If-only statement
-            AppendAsm($"je {endIfLabel}", "Condition is false, jump to end");
-
-            // Then branch
-            GenerateStatement(ifStmt.ThenBranch);
-        }
-
-        // End label for both cases
-        _sb.AppendLine($"{endIfLabel}:");
     }
 
     private void GenerateDeclaration(DeclarationStatementNode decl)
@@ -186,12 +124,12 @@ public class Generator
 
         _stackOffset -= 4; // 4 bytes for an int
         _variables[decl.Identifier.Value] = _stackOffset;
-        AppendAsm("sub esp, 4", "Allocate space for variable " + decl.Identifier.Value);
+        _sb.AppendLine("    sub esp, 4          ; Allocate space for variable " + decl.Identifier.Value);
 
         if (decl.Initializer != null)
         {
             GenerateExpression(decl.Initializer);
-            AppendAsm($"mov [ebp + {_stackOffset}], eax");
+            _sb.AppendLine($"    mov [ebp + {_stackOffset}], eax");
         }
     }
 
@@ -204,12 +142,12 @@ public class Generator
         _sb.AppendLine($"{startLabel}:");
 
         GenerateExpression(whileStmt.Condition);
-        AppendAsm("cmp eax, 0");
-        AppendAsm($"je {endLabel}");
+        _sb.AppendLine("    cmp eax, 0");
+        _sb.AppendLine($"    je {endLabel}");
 
         GenerateStatement(whileStmt.Body);
 
-        AppendAsm($"jmp {startLabel}");
+        _sb.AppendLine($"    jmp {startLabel}");
 
         _sb.AppendLine($"{endLabel}:");
     }
@@ -217,9 +155,9 @@ public class Generator
     private void GenerateReturn(ReturnStatementNode ret)
     {
         GenerateExpression(ret.Expression);
-        AppendAsm("mov esp, ebp");
-        AppendAsm("pop ebp");
-        AppendAsm("ret");
+        _sb.AppendLine("    mov esp, ebp");
+        _sb.AppendLine("    pop ebp");
+        _sb.AppendLine("    ret");
     }
 
     private void GenerateExpression(ExpressionNode expression)
@@ -227,14 +165,14 @@ public class Generator
         switch (expression)
         {
             case IntegerLiteralNode literal:
-                AppendAsm($"mov eax, {literal.Value}");
+                _sb.AppendLine($"    mov eax, {literal.Value}");
                 break;
             case VariableExpressionNode varExpr:
                 if (!_variables.TryGetValue(varExpr.Identifier.Value, out var offset))
                 {
                     throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
                 }
-                AppendAsm($"mov eax, [ebp + {offset}]", $"Load variable {varExpr.Identifier.Value}");
+                _sb.AppendLine($"    mov eax, [ebp + {offset}] ; Load variable {varExpr.Identifier.Value}");
                 break;
             case AssignmentExpressionNode assignExpr:
                 if (!_variables.TryGetValue(assignExpr.Identifier.Value, out var assignOffset))
@@ -242,20 +180,7 @@ public class Generator
                     throw new InvalidOperationException($"Undeclared variable '{assignExpr.Identifier.Value}' for assignment.");
                 }
                 GenerateExpression(assignExpr.Value);
-                AppendAsm($"mov [ebp + {assignOffset}], eax", $"Assign to variable {assignExpr.Identifier.Value}");
-                break;
-            case CallExpressionNode callExpr:
-                if (callExpr.Callee.Value != "print")
-                {
-                    throw new InvalidOperationException($"Undefined function call: '{callExpr.Callee.Value}'");
-                }
-                // The 'print' intrinsic
-                GenerateExpression(callExpr.Argument);
-                AppendAsm("push eax", "Push argument for printf");
-                AppendAsm("push format_int", "Push format string");
-                AppendAsm("call [printf]");
-                AppendAsm("add esp, 8", "Clean up stack for printf");
-                AppendAsm("mov eax, 0", "A print expression evaluates to 0");
+                _sb.AppendLine($"    mov [ebp + {assignOffset}], eax ; Assign to variable {assignExpr.Identifier.Value}");
                 break;
             default:
                 throw new NotImplementedException($"Unsupported expression type: {expression.GetType().Name}");
@@ -265,6 +190,9 @@ public class Generator
 </file>
 
 <file path="Parser.cs">
+using System;
+using System.Collections.Generic;
+
 namespace CTilde;
 
 public class Parser
@@ -281,52 +209,46 @@ public class Parser
     private Token Current => _position < _tokens.Count ? _tokens[_position] : new(TokenType.Unknown, string.Empty);
     private Token Peek(int offset) => _position + offset < _tokens.Count ? _tokens[_position + offset] : new(TokenType.Unknown, string.Empty);
 
+
     private Token Eat(TokenType expectedType)
     {
-        Token currentToken = Current;
-
-        if (currentToken.Type != expectedType)
+        var currentToken = Current;
+        if (currentToken.Type == expectedType)
         {
-            throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type}");
+            _position++;
+            return currentToken;
         }
-
-        _position++;
-        return currentToken;
+        throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type}");
     }
 
     public ProgramNode Parse()
     {
-        FunctionDeclarationNode function = ParseFunction();
-        return new(function);
+        var function = ParseFunction();
+        return new ProgramNode(function);
     }
 
     private FunctionDeclarationNode ParseFunction()
     {
-        Eat(TokenType.Keyword);
-        
-        Token identifier = Eat(TokenType.Identifier);
-        
+        Eat(TokenType.Keyword); // "int"
+        var identifier = Eat(TokenType.Identifier); // "main"
         Eat(TokenType.LeftParen);
         Eat(TokenType.RightParen);
 
-        BlockStatementNode body = ParseBlockStatement();
+        var body = ParseBlockStatement();
 
-        return new(identifier.Value, body);
+        return new FunctionDeclarationNode(identifier.Value, body);
     }
 
     private BlockStatementNode ParseBlockStatement()
     {
         Eat(TokenType.LeftBrace);
-
-        List<StatementNode> statements = [];
-        
+        var statements = new List<StatementNode>();
         while (Current.Type != TokenType.RightBrace)
         {
             statements.Add(ParseStatement());
         }
-        
         Eat(TokenType.RightBrace);
-        return new(statements);
+        return new BlockStatementNode(statements);
     }
 
     private StatementNode ParseStatement()
@@ -341,11 +263,6 @@ public class Parser
             return ParseWhileStatement();
         }
 
-        if (Current.Type == TokenType.Keyword && Current.Value == "if")
-        {
-            return ParseIfStatement();
-        }
-
         if (Current.Type == TokenType.Keyword && Current.Value == "int")
         {
             return ParseDeclarationStatement();
@@ -356,29 +273,10 @@ public class Parser
             return ParseBlockStatement();
         }
 
-        // Otherwise, it must be an expression statement (e.g. assignment, call)
+        // Otherwise, it must be an expression statement (e.g. assignment)
         var expression = ParseExpression();
         Eat(TokenType.Semicolon);
         return new ExpressionStatementNode(expression);
-    }
-
-    private StatementNode ParseIfStatement()
-    {
-        Eat(TokenType.Keyword); // "if"
-        Eat(TokenType.LeftParen);
-        var condition = ParseExpression();
-        Eat(TokenType.RightParen);
-
-        var thenBranch = ParseStatement();
-        StatementNode? elseBranch = null;
-
-        if (Current.Type == TokenType.Keyword && Current.Value == "else")
-        {
-            Eat(TokenType.Keyword); // "else"
-            elseBranch = ParseStatement();
-        }
-
-        return new IfStatementNode(condition, thenBranch, elseBranch);
     }
 
     private StatementNode ParseDeclarationStatement()
@@ -417,69 +315,34 @@ public class Parser
 
     private ExpressionNode ParseExpression()
     {
-        return ParseAssignmentExpression();
-    }
-
-    private ExpressionNode ParseAssignmentExpression()
-    {
-        ExpressionNode left = ParseCallExpression();
-
-        if (Current.Type != TokenType.Assignment)
+        // For now, assignment is the only non-primary expression
+        // Check if it's an assignment: id = ...
+        if (Current.Type == TokenType.Identifier && Peek(1).Type == TokenType.Assignment)
         {
-            return left;
+            var identifier = Eat(TokenType.Identifier);
+            Eat(TokenType.Assignment);
+            var value = ParseExpression(); // Right-associative
+            return new AssignmentExpressionNode(identifier, value);
         }
 
-        Eat(TokenType.Assignment);
-
-        ExpressionNode right = ParseAssignmentExpression();
-
-        if (left is VariableExpressionNode varNode)
-        {
-            return new AssignmentExpressionNode(varNode.Identifier, right);
-        }
-
-        throw new InvalidOperationException("Invalid assignment target.");
-    }
-
-    private ExpressionNode ParseCallExpression()
-    {
-        ExpressionNode expr = ParsePrimaryExpression();
-
-        if (Current.Type != TokenType.LeftParen)
-        {
-            return expr;
-        }
-
-        if (expr is VariableExpressionNode varNode)
-        {
-            Eat(TokenType.LeftParen);
-            
-            ExpressionNode argument = ParseExpression();
-            
-            Eat(TokenType.RightParen);
-            return new CallExpressionNode(varNode.Identifier, argument);
-        }
-
-        throw new InvalidOperationException("Expression is not callable.");
+        return ParsePrimaryExpression();
     }
 
     private ExpressionNode ParsePrimaryExpression()
     {
         if (Current.Type == TokenType.IntegerLiteral)
         {
-            Token token = Eat(TokenType.IntegerLiteral);
-            
+            var token = Eat(TokenType.IntegerLiteral);
             if (int.TryParse(token.Value, out int value))
             {
                 return new IntegerLiteralNode(value);
             }
-
             throw new InvalidOperationException($"Could not parse integer literal: {token.Value}");
         }
 
         if (Current.Type == TokenType.Identifier)
         {
-            Token token = Eat(TokenType.Identifier);
+            var token = Eat(TokenType.Identifier);
             return new VariableExpressionNode(token);
         }
 
@@ -545,9 +408,7 @@ public class Tokenizer
     [
         "int",
         "return",
-        "while",
-        "if",
-        "else"
+        "while"
     ];
 
     public static List<Token> Tokenize(string input)

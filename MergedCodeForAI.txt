@@ -186,6 +186,7 @@ public class Generator
     private int GetSizeOfType(string typeName)
     {
         if (typeName == "int") return 4;
+        if (typeName == "char") return 1;
         if (_structDefinitions.TryGetValue(typeName, out var structDef))
         {
             return structDef.Members.Sum(m => GetSizeOfType(m.Type.Value));
@@ -352,15 +353,31 @@ public class Generator
                 if (u.Operator.Type == TokenType.Minus) AppendAsm("neg eax", "Negate value");
                 break;
             case VariableExpressionNode or MemberAccessExpressionNode:
+                var exprType = GetExpressionType(expression);
                 GenerateLValueAddress(expression);
-                AppendAsm("mov eax, [eax]", "Dereference address to get value");
+                if (GetSizeOfType(exprType) == 1)
+                {
+                    AppendAsm("movzx eax, byte [eax]", "Dereference byte and zero-extend");
+                }
+                else
+                {
+                    AppendAsm("mov eax, [eax]", "Dereference address to get value");
+                }
                 break;
             case AssignmentExpressionNode assign:
+                var lvalueType = GetExpressionType(assign.Left);
                 GenerateLValueAddress(assign.Left);
                 AppendAsm("push eax");
                 GenerateExpression(assign.Right);
                 AppendAsm("pop ecx");
-                AppendAsm("mov [ecx], eax");
+                if (GetSizeOfType(lvalueType) == 1)
+                {
+                    AppendAsm("mov [ecx], al");
+                }
+                else
+                {
+                    AppendAsm("mov [ecx], eax");
+                }
                 break;
             case BinaryExpressionNode binExpr: GenerateBinaryExpression(binExpr); break;
             case CallExpressionNode callExpr: GenerateCallExpression(callExpr); break;
@@ -458,7 +475,7 @@ public class Parser
             _position++;
             return currentToken;
         }
-        throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type} ('{currentToken.Value}')");
+        throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type} ('{currentToken.Value}') at position {_position}");
     }
 
     public ProgramNode Parse()
@@ -469,9 +486,20 @@ public class Parser
 
         while (Current.Type != TokenType.Unknown)
         {
-            if (Current.Type == TokenType.Hash) imports.Add(ParseImportDirective());
-            else if (Current.Value == "struct" && Peek(2).Type == TokenType.LeftBrace) structs.Add(ParseStructDefinition());
-            else functions.Add(ParseFunction());
+            if (Current.Type == TokenType.Hash)
+            {
+                imports.Add(ParseImportDirective());
+            }
+            // `struct Identifier {` is a struct definition
+            else if (Current.Type == TokenType.Keyword && Current.Value == "struct")
+            {
+                structs.Add(ParseStructDefinition());
+            }
+            // Otherwise, assume it's a function declaration
+            else
+            {
+                functions.Add(ParseFunction());
+            }
         }
 
         var programNode = new ProgramNode(imports, structs, functions);
@@ -497,7 +525,9 @@ public class Parser
         var members = new List<ParameterNode>();
         while (Current.Type != TokenType.RightBrace)
         {
-            var memberType = Eat(TokenType.Keyword);
+            // A member type is a keyword (int, char) or an identifier (another struct)
+            var memberType = Current;
+            _position++;
             var memberName = Eat(TokenType.Identifier);
             members.Add(new ParameterNode(memberType, memberName));
             Eat(TokenType.Semicolon);
@@ -533,16 +563,9 @@ public class Parser
 
     private FunctionDeclarationNode ParseFunction()
     {
-        Token returnType;
-        if (Current.Value == "struct")
-        {
-            Eat(TokenType.Keyword);
-            returnType = Eat(TokenType.Identifier);
-        }
-        else
-        {
-            returnType = Eat(TokenType.Keyword);
-        }
+        // A type is a keyword (int, void, char) or an identifier (struct name)
+        var returnType = Current;
+        _position++;
 
         var identifier = Eat(TokenType.Identifier);
         Eat(TokenType.LeftParen);
@@ -552,16 +575,8 @@ public class Parser
         {
             do
             {
-                Token paramType;
-                if (Current.Value == "struct")
-                {
-                    Eat(TokenType.Keyword);
-                    paramType = Eat(TokenType.Identifier);
-                }
-                else
-                {
-                    paramType = Eat(TokenType.Keyword);
-                }
+                var paramType = Current;
+                _position++;
                 var paramName = Eat(TokenType.Identifier);
                 parameters.Add(new ParameterNode(paramType, paramName));
             } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
@@ -595,8 +610,15 @@ public class Parser
                 case "if": return ParseIfStatement();
                 case "while": return ParseWhileStatement();
                 case "int":
-                case "struct": return ParseDeclarationStatement();
+                case "char":
+                    return ParseDeclarationStatement();
             }
+        }
+
+        // `TypeName varName;` is a declaration.
+        if (Current.Type == TokenType.Identifier && Peek(1).Type == TokenType.Identifier)
+        {
+            return ParseDeclarationStatement();
         }
 
         if (Current.Type == TokenType.LeftBrace) return ParseBlockStatement();
@@ -624,16 +646,9 @@ public class Parser
 
     private StatementNode ParseDeclarationStatement()
     {
-        Token typeToken;
-        if (Current.Value == "struct")
-        {
-            Eat(TokenType.Keyword);
-            typeToken = Eat(TokenType.Identifier);
-        }
-        else
-        {
-            typeToken = Eat(TokenType.Keyword);
-        }
+        // A type is a keyword (int, char) or an identifier (struct name).
+        var typeToken = Current;
+        _position++;
 
         var identifier = Eat(TokenType.Identifier);
         ExpressionNode? initializer = null;
@@ -880,7 +895,8 @@ public class Tokenizer
         "while",
         "if",
         "else",
-        "struct"
+        "struct",
+        "char"
     ];
 
     public static List<Token> Tokenize(string input)
@@ -983,10 +999,10 @@ public class Tokenizer
 #import "raylib.dll"
 
 struct Color {
-    int r;
-    int g;
-    int b;
-    int a;
+    char r;
+    char g;
+    char b;
+    char a;
 };
 
 // --- Raylib Function Prototypes with Structs ---
@@ -994,21 +1010,21 @@ void InitWindow(int width, int height, int title);
 int WindowShouldClose();
 void BeginDrawing();
 void EndDrawing();
-void ClearBackground(struct Color color);
-void DrawText(int text, int posX, int posY, int fontSize, struct Color color);
+void ClearBackground(Color color);
+void DrawText(int text, int posX, int posY, int fontSize, Color color);
 void CloseWindow();
 
 int main() {
     int screenWidth = 800;
     int screenHeight = 600;
 
-    struct Color rayWhite;
+    Color rayWhite;
     rayWhite.r = 245;
     rayWhite.g = 245;
     rayWhite.b = 245;
     rayWhite.a = 255;
 
-    struct Color maroon;
+    Color maroon;
     maroon.r = 190;
     maroon.g = 33;
     maroon.b = 55;

@@ -227,9 +227,40 @@ public class Generator
 
         if (decl.Initializer != null)
         {
-            if (size > 4) throw new NotSupportedException("Struct initialization is not supported yet.");
-            GenerateExpression(decl.Initializer);
-            AppendAsm($"mov [ebp + {_stackOffset}], eax");
+            if (decl.Initializer is InitializerListExpressionNode initList)
+            {
+                if (!_structDefinitions.TryGetValue(decl.Type.Value, out var structDef))
+                    throw new InvalidOperationException($"Cannot use initializer list for non-struct type '{decl.Type.Value}'");
+
+                if (initList.Values.Count != structDef.Members.Count)
+                    throw new InvalidOperationException($"Initializer list has {initList.Values.Count} values, but struct '{structDef.Name}' has {structDef.Members.Count} members.");
+
+                int currentMemberOffset = 0;
+                for (var i = 0; i < initList.Values.Count; i++)
+                {
+                    var valueExpr = initList.Values[i];
+                    var member = structDef.Members[i];
+                    var memberSize = GetSizeOfType(member.Type.Value);
+
+                    GenerateExpression(valueExpr); // Result is in EAX
+
+                    var totalOffset = _stackOffset + currentMemberOffset;
+                    if (memberSize == 1)
+                        AppendAsm($"mov [ebp + {totalOffset}], al", $"Initialize member {member.Name.Value}");
+                    else if (memberSize == 4)
+                        AppendAsm($"mov [ebp + {totalOffset}], eax", $"Initialize member {member.Name.Value}");
+                    else
+                        throw new NotSupportedException($"Struct member initialization for size {memberSize} not supported.");
+
+                    currentMemberOffset += memberSize;
+                }
+            }
+            else
+            {
+                if (size > 4) throw new NotSupportedException("Struct initialization must use an initializer list. Struct copy initialization is not supported.");
+                GenerateExpression(decl.Initializer);
+                AppendAsm($"mov [ebp + {_stackOffset}], eax");
+            }
         }
     }
 

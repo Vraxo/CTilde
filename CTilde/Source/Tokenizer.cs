@@ -31,6 +31,7 @@ public class Tokenizer
     private static readonly HashSet<string> Keywords =
     [
         "int",
+        "void",
         "return",
         "while",
         "if",

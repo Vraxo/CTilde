@@ -41,14 +41,19 @@ public class Parser
 
     private FunctionDeclarationNode ParseFunction()
     {
-        Eat(TokenType.Keyword); // "int"
+        var returnType = Eat(TokenType.Keyword);
+        if (returnType.Value != "int" && returnType.Value != "void")
+        {
+            throw new InvalidOperationException($"Unsupported function return type: {returnType.Value}");
+        }
+
         var identifier = Eat(TokenType.Identifier); // function name
         Eat(TokenType.LeftParen);
         Eat(TokenType.RightParen); // No parameters yet
 
         var body = ParseBlockStatement();
 
-        return new FunctionDeclarationNode(identifier.Value, body);
+        return new FunctionDeclarationNode(returnType, identifier.Value, body);
     }
 
     private BlockStatementNode ParseBlockStatement()
@@ -67,14 +72,20 @@ public class Parser
     {
         if (Current.Type == TokenType.Keyword)
         {
-            return Current.Value switch
+            switch (Current.Value)
             {
-                "return" => ParseReturnStatement(),
-                "if" => ParseIfStatement(),
-                "while" => ParseWhileStatement(),
-                "int" => ParseDeclarationStatement(),
-                _ => throw new InvalidOperationException($"Unexpected keyword '{Current.Value}' at the beginning of a statement."),// An 'else' on its own, or other future keywords, are syntax errors here.
-            };
+                case "return":
+                    return ParseReturnStatement();
+                case "if":
+                    return ParseIfStatement();
+                case "while":
+                    return ParseWhileStatement();
+                case "int":
+                    return ParseDeclarationStatement();
+                default:
+                    // An 'else' on its own, or other future keywords, are syntax errors here.
+                    throw new InvalidOperationException($"Unexpected keyword '{Current.Value}' at the beginning of a statement.");
+            }
         }
 
         if (Current.Type == TokenType.LeftBrace)
@@ -136,7 +147,11 @@ public class Parser
     private ReturnStatementNode ParseReturnStatement()
     {
         Eat(TokenType.Keyword); // "return"
-        var expression = ParseExpression();
+        ExpressionNode? expression = null;
+        if (Current.Type != TokenType.Semicolon)
+        {
+            expression = ParseExpression();
+        }
         Eat(TokenType.Semicolon);
         return new ReturnStatementNode(expression);
     }

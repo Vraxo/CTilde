@@ -80,6 +80,13 @@ public class Generator
         _sb.AppendLine();
 
         GenerateStatement(function.Body);
+
+        // A function might not have an explicit return (e.g. a void function).
+        // To be safe, always add the instructions to clean up the stack frame and return.
+        _sb.AppendLine();
+        AppendAsm("mov esp, ebp", "Implicit return cleanup");
+        AppendAsm("pop ebp");
+        AppendAsm("ret");
     }
 
     private void GenerateStatement(StatementNode statement)
@@ -182,7 +189,11 @@ public class Generator
 
     private void GenerateReturn(ReturnStatementNode ret)
     {
-        GenerateExpression(ret.Expression);
+        if (ret.Expression != null)
+        {
+            GenerateExpression(ret.Expression);
+        }
+        // For a void return, EAX is not explicitly set. The caller should not use it.
         AppendAsm("mov esp, ebp");
         AppendAsm("pop ebp");
         AppendAsm("ret");

@@ -145,6 +145,7 @@ public class Generator
     private int GetSizeOfType(string typeName)
     {
         if (typeName == "int") return 4;
+        if (typeName == "char") return 1;
         if (_structDefinitions.TryGetValue(typeName, out var structDef))
         {
             return structDef.Members.Sum(m => GetSizeOfType(m.Type.Value));
@@ -311,15 +312,31 @@ public class Generator
                 if (u.Operator.Type == TokenType.Minus) AppendAsm("neg eax", "Negate value");
                 break;
             case VariableExpressionNode or MemberAccessExpressionNode:
+                var exprType = GetExpressionType(expression);
                 GenerateLValueAddress(expression);
-                AppendAsm("mov eax, [eax]", "Dereference address to get value");
+                if (GetSizeOfType(exprType) == 1)
+                {
+                    AppendAsm("movzx eax, byte [eax]", "Dereference byte and zero-extend");
+                }
+                else
+                {
+                    AppendAsm("mov eax, [eax]", "Dereference address to get value");
+                }
                 break;
             case AssignmentExpressionNode assign:
+                var lvalueType = GetExpressionType(assign.Left);
                 GenerateLValueAddress(assign.Left);
                 AppendAsm("push eax");
                 GenerateExpression(assign.Right);
                 AppendAsm("pop ecx");
-                AppendAsm("mov [ecx], eax");
+                if (GetSizeOfType(lvalueType) == 1)
+                {
+                    AppendAsm("mov [ecx], al");
+                }
+                else
+                {
+                    AppendAsm("mov [ecx], eax");
+                }
                 break;
             case BinaryExpressionNode binExpr: GenerateBinaryExpression(binExpr); break;
             case CallExpressionNode callExpr: GenerateCallExpression(callExpr); break;

@@ -4,34 +4,44 @@ using System.Collections.Generic;
 namespace CTilde;
 
 // Base classes
-public abstract record AstNode;
+public abstract record AstNode
+{
+    public AstNode? Parent { get; set; }
+}
 public abstract record StatementNode : AstNode;
 public abstract record ExpressionNode : AstNode;
 
 // Program structure
-public record ProgramNode(FunctionDeclarationNode Function) : AstNode;
-public record FunctionDeclarationNode(string Name, StatementNode Body) : AstNode;
+public record ImportDirectiveNode(string LibraryName) : AstNode;
+public record StructDefinitionNode(string Name, List<ParameterNode> Members) : AstNode;
+public record ProgramNode(List<ImportDirectiveNode> Imports, List<StructDefinitionNode> Structs, List<FunctionDeclarationNode> Functions) : AstNode;
+public record ParameterNode(Token Type, Token Name) : AstNode;
+public record FunctionDeclarationNode(Token ReturnType, string Name, List<ParameterNode> Parameters, StatementNode? Body) : AstNode;
 
 // Statements
 public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;
-public record ReturnStatementNode(ExpressionNode Expression) : StatementNode;
+public record ReturnStatementNode(ExpressionNode? Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBody, StatementNode? ElseBody) : StatementNode;
-public record DeclarationStatementNode(Token Identifier, ExpressionNode? Initializer) : StatementNode;
+public record DeclarationStatementNode(Token Type, Token Identifier, ExpressionNode? Initializer) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
 
 
 // Expressions
 public record IntegerLiteralNode(int Value) : ExpressionNode;
-public record AssignmentExpressionNode(Token Identifier, ExpressionNode Value) : ExpressionNode;
+public record StringLiteralNode(string Value, string Label) : ExpressionNode;
+public record UnaryExpressionNode(Token Operator, ExpressionNode Right) : ExpressionNode;
+public record AssignmentExpressionNode(ExpressionNode Left, ExpressionNode Right) : ExpressionNode;
 public record VariableExpressionNode(Token Identifier) : ExpressionNode;
-public record CallExpressionNode(Token Callee, ExpressionNode Argument) : ExpressionNode;
+public record CallExpressionNode(Token Callee, List<ExpressionNode> Arguments) : ExpressionNode;
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;
+public record MemberAccessExpressionNode(ExpressionNode Left, Token Member) : ExpressionNode;
 </file>
 
 <file path="Generator.cs">
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace CTilde;
@@ -41,9 +51,13 @@ public class Generator
     private readonly ProgramNode _program;
     private readonly StringBuilder _sb = new();
     private int _labelCounter;
+    private readonly Dictionary<string, string> _stringLiterals = new();
+    private readonly HashSet<string> _externalFunctions = new();
 
-    // Rudimentary symbol table for a function's scope
-    private Dictionary<string, int> _variables = new();
+    private readonly Dictionary<string, StructDefinitionNode> _structDefinitions = new();
+
+    private Dictionary<string, int> _variables = new(); // name -> stack offset
+    private Dictionary<string, string> _variableTypes = new(); // name -> type name
     private int _stackOffset;
 
     public Generator(ProgramNode program)
@@ -53,262 +67,361 @@ public class Generator
 
     public string Generate()
     {
+        FindAllStringLiterals(_program);
+        foreach (var s in _program.Structs) _structDefinitions[s.Name] = s;
+        foreach (var f in _program.Functions.Where(f => f.Body == null)) _externalFunctions.Add(f.Name);
+
         _sb.AppendLine("format PE console");
         _sb.AppendLine("entry start");
         _sb.AppendLine();
         _sb.AppendLine("include 'win32a.inc'");
         _sb.AppendLine();
         _sb.AppendLine("section '.data' data readable writeable");
-        _sb.AppendLine("    format_int db '%d', 10, 0 ; Format string for printing an integer with a newline");
+        foreach (var (label, value) in _stringLiterals) _sb.AppendLine($"    {label} db {FormatStringForFasm(value)}");
         _sb.AppendLine();
         _sb.AppendLine("section '.text' code readable executable");
         _sb.AppendLine();
         _sb.AppendLine("start:");
-        _sb.AppendLine("    call main");
-        _sb.AppendLine("    mov ebx, eax"); // EAX holds the return value from main
+        _sb.AppendLine("    call _main");
+        _sb.AppendLine("    mov ebx, eax");
         _sb.AppendLine("    push ebx");
         _sb.AppendLine("    call [ExitProcess]");
         _sb.AppendLine();
 
-        GenerateFunction(_program.Function);
+        foreach (var function in _program.Functions.Where(f => f.Body != null))
+        {
+            GenerateFunction(function);
+            _sb.AppendLine();
+        }
 
-        _sb.AppendLine();
-        _sb.AppendLine("section '.idata' import data readable");
-        _sb.AppendLine();
-        _sb.AppendLine("    library kernel32,'kernel32.dll', msvcrt,'msvcrt.dll'");
-        _sb.AppendLine();
-        _sb.AppendLine("    import kernel32, ExitProcess,'ExitProcess'");
-        _sb.AppendLine("    import msvcrt, printf,'printf'");
+        GenerateImportDataSection();
 
         return _sb.ToString();
     }
 
+    private void GenerateImportDataSection()
+    {
+        _sb.AppendLine("section '.idata' import data readable");
+        _sb.AppendLine();
+
+        var libraries = new Dictionary<string, List<string>>
+        {
+            { "kernel32.dll", new List<string> { "ExitProcess" } },
+            { "msvcrt.dll", new List<string> { "printf" } }
+        };
+
+        foreach (var import in _program.Imports)
+        {
+            if (!libraries.ContainsKey(import.LibraryName)) libraries[import.LibraryName] = new List<string>();
+        }
+
+        foreach (var funcName in _externalFunctions)
+        {
+            bool found = false;
+            foreach (var import in _program.Imports)
+            {
+                if (import.LibraryName != "kernel32.dll" && import.LibraryName != "msvcrt.dll")
+                {
+                    libraries[import.LibraryName].Add(funcName);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && funcName != "printf")
+            {
+                if (!libraries.ContainsKey("user32.dll")) libraries["user32.dll"] = new List<string>();
+                if (!libraries["user32.dll"].Contains(funcName)) libraries["user32.dll"].Add(funcName);
+            }
+        }
+
+        var libDefs = libraries.Keys.Select(lib => $"{lib.Split('.')[0]},'{lib}'");
+        _sb.AppendLine($"    library {string.Join(", ", libDefs)}");
+        _sb.AppendLine();
+
+        foreach (var (libName, functions) in libraries)
+        {
+            if (functions.Count > 0)
+            {
+                var libAlias = libName.Split('.')[0];
+                var importDefs = functions.Distinct().Select(f => $"{f},'{f}'");
+                _sb.AppendLine($"    import {libAlias}, {string.Join(", ", importDefs)}");
+            }
+        }
+    }
+    private string FormatStringForFasm(string value)
+    {
+        var parts = new List<string>();
+        var currentString = new StringBuilder();
+
+        foreach (char c in value)
+        {
+            if (c is '\n' or '\t' or '\r' or '\'' or '"')
+            {
+                if (currentString.Length > 0)
+                {
+                    parts.Add($"'{currentString}'");
+                    currentString.Clear();
+                }
+                parts.Add(((byte)c).ToString());
+            }
+            else currentString.Append(c);
+        }
+
+        if (currentString.Length > 0) parts.Add($"'{currentString}'");
+        parts.Add("0");
+        return string.Join(", ", parts);
+    }
+
+    private void FindAllStringLiterals(AstNode node)
+    {
+        if (node is StringLiteralNode str && !_stringLiterals.ContainsValue(str.Value)) _stringLiterals.Add(str.Label, str.Value);
+        foreach (var property in node.GetType().GetProperties())
+        {
+            if (property.Name == "Parent") continue;
+            if (property.GetValue(node) is AstNode child) FindAllStringLiterals(child);
+            else if (property.GetValue(node) is IEnumerable<AstNode> children) foreach (var c in children) FindAllStringLiterals(c);
+        }
+    }
+
+    private int GetSizeOfType(string typeName)
+    {
+        if (typeName == "int") return 4;
+        if (_structDefinitions.TryGetValue(typeName, out var structDef))
+        {
+            return structDef.Members.Sum(m => GetSizeOfType(m.Type.Value));
+        }
+        throw new InvalidOperationException($"Unknown type '{typeName}'");
+    }
+
+    private (int offset, string type) GetMemberInfo(string structName, string memberName)
+    {
+        if (!_structDefinitions.TryGetValue(structName, out var structDef))
+            throw new InvalidOperationException($"Undefined struct '{structName}'");
+
+        int offset = 0;
+        foreach (var member in structDef.Members)
+        {
+            if (member.Name.Value == memberName)
+                return (offset, member.Type.Value);
+            offset += GetSizeOfType(member.Type.Value);
+        }
+        throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
+    }
+
     private void AppendAsm(string instruction, string? comment = null)
     {
-        const int commentColumn = 36;
-        string indentedInstruction = $"    {instruction}";
-
-        if (string.IsNullOrEmpty(comment))
-        {
-            _sb.AppendLine(indentedInstruction);
-        }
-        else
-        {
-            _sb.AppendLine(indentedInstruction.PadRight(commentColumn - 1) + $"; {comment}");
-        }
+        _sb.AppendLine($"    {instruction}".PadRight(35) + (comment == null ? "" : $"; {comment}"));
     }
 
     private void GenerateFunction(FunctionDeclarationNode function)
     {
-        _variables = new Dictionary<string, int>();
+        _variables.Clear();
+        _variableTypes.Clear();
         _stackOffset = 0;
 
-        _sb.AppendLine($"{function.Name}:");
+        _sb.AppendLine($"_{function.Name}:");
         AppendAsm("push ebp");
         AppendAsm("mov ebp, esp");
         _sb.AppendLine();
 
-        GenerateStatement(function.Body);
+        int paramOffset = 8;
+        foreach (var param in function.Parameters)
+        {
+            _variables[param.Name.Value] = paramOffset;
+            _variableTypes[param.Name.Value] = param.Type.Value;
+            paramOffset += GetSizeOfType(param.Type.Value);
+        }
+
+        GenerateStatement(function.Body!);
+
+        _sb.AppendLine();
+        AppendAsm("mov esp, ebp", "Implicit return cleanup");
+        AppendAsm("pop ebp");
+        AppendAsm("ret");
     }
 
     private void GenerateStatement(StatementNode statement)
     {
         switch (statement)
         {
-            case ReturnStatementNode ret:
-                GenerateReturn(ret);
-                break;
-            case BlockStatementNode block:
-                foreach (var stmt in block.Statements)
-                {
-                    GenerateStatement(stmt);
-                }
-                break;
-            case WhileStatementNode whileStmt:
-                GenerateWhile(whileStmt);
-                break;
-            case IfStatementNode ifStmt:
-                GenerateIf(ifStmt);
-                break;
-            case DeclarationStatementNode decl:
-                GenerateDeclaration(decl);
-                break;
-            case ExpressionStatementNode exprStmt:
-                GenerateExpression(exprStmt.Expression);
-                _sb.AppendLine("    ; Expression statement result is discarded");
-                break;
-            default:
-                throw new NotImplementedException($"Unsupported statement type: {statement.GetType().Name}");
+            case ReturnStatementNode ret: GenerateReturn(ret); break;
+            case BlockStatementNode block: foreach (var s in block.Statements) GenerateStatement(s); break;
+            case WhileStatementNode w: GenerateWhile(w); break;
+            case IfStatementNode i: GenerateIf(i); break;
+            case DeclarationStatementNode decl: GenerateDeclaration(decl); break;
+            case ExpressionStatementNode exprStmt: GenerateExpression(exprStmt.Expression); break;
+            default: throw new NotImplementedException($"Stmt: {statement.GetType().Name}");
         }
     }
 
     private void GenerateDeclaration(DeclarationStatementNode decl)
     {
-        if (_variables.ContainsKey(decl.Identifier.Value))
-        {
-            throw new InvalidOperationException($"Variable '{decl.Identifier.Value}' is already defined.");
-        }
+        if (_variables.ContainsKey(decl.Identifier.Value)) throw new InvalidOperationException($"Var '{decl.Identifier.Value}' already defined.");
 
-        _stackOffset -= 4; // 4 bytes for an int
+        int size = GetSizeOfType(decl.Type.Value);
+        _stackOffset -= size;
         _variables[decl.Identifier.Value] = _stackOffset;
-        AppendAsm("sub esp, 4", "Allocate space for variable " + decl.Identifier.Value);
+        _variableTypes[decl.Identifier.Value] = decl.Type.Value;
+
+        AppendAsm($"sub esp, {size}", $"Allocate {size} bytes for var {decl.Identifier.Value}");
 
         if (decl.Initializer != null)
         {
+            if (size > 4) throw new NotSupportedException("Struct initialization is not supported yet.");
             GenerateExpression(decl.Initializer);
             AppendAsm($"mov [ebp + {_stackOffset}], eax");
         }
     }
 
-    private void GenerateWhile(WhileStatementNode whileStmt)
+    private void GenerateWhile(WhileStatementNode w)
     {
-        int labelIndex = _labelCounter++;
-        string startLabel = $"_while_start_{labelIndex}";
-        string endLabel = $"_while_end_{labelIndex}";
-
-        _sb.AppendLine($"{startLabel}:");
-
-        GenerateExpression(whileStmt.Condition);
+        int i = _labelCounter++;
+        _sb.AppendLine($"_while_start_{i}:");
+        GenerateExpression(w.Condition);
         AppendAsm("cmp eax, 0");
-        AppendAsm($"je {endLabel}");
-
-        GenerateStatement(whileStmt.Body);
-
-        AppendAsm($"jmp {startLabel}");
-
-        _sb.AppendLine($"{endLabel}:");
+        AppendAsm($"je _while_end_{i}");
+        GenerateStatement(w.Body);
+        AppendAsm($"jmp _while_start_{i}");
+        _sb.AppendLine($"_while_end_{i}:");
     }
 
-    private void GenerateIf(IfStatementNode ifStmt)
+    private void GenerateIf(IfStatementNode i)
     {
-        int labelIndex = _labelCounter++;
-        string elseLabel = $"_if_else_{labelIndex}";
-        string endLabel = $"_if_end_{labelIndex}";
-
-        GenerateExpression(ifStmt.Condition);
+        int idx = _labelCounter++;
+        GenerateExpression(i.Condition);
         AppendAsm("cmp eax, 0");
-
-        if (ifStmt.ElseBody != null)
+        AppendAsm(i.ElseBody != null ? $"je _if_else_{idx}" : $"je _if_end_{idx}");
+        GenerateStatement(i.ThenBody);
+        if (i.ElseBody != null)
         {
-            AppendAsm($"je {elseLabel}");
+            AppendAsm($"jmp _if_end_{idx}");
+            _sb.AppendLine($"_if_else_{idx}:");
+            GenerateStatement(i.ElseBody);
         }
-        else
-        {
-            AppendAsm($"je {endLabel}");
-        }
-
-        GenerateStatement(ifStmt.ThenBody);
-
-        if (ifStmt.ElseBody != null)
-        {
-            AppendAsm($"jmp {endLabel}");
-            _sb.AppendLine($"{elseLabel}:");
-            GenerateStatement(ifStmt.ElseBody);
-        }
-
-        _sb.AppendLine($"{endLabel}:");
+        _sb.AppendLine($"_if_end_{idx}:");
     }
 
     private void GenerateReturn(ReturnStatementNode ret)
     {
-        GenerateExpression(ret.Expression);
+        if (ret.Expression != null) GenerateExpression(ret.Expression);
         AppendAsm("mov esp, ebp");
         AppendAsm("pop ebp");
         AppendAsm("ret");
+    }
+
+    private void GenerateLValueAddress(ExpressionNode expression)
+    {
+        switch (expression)
+        {
+            case VariableExpressionNode varExpr:
+                if (!_variables.TryGetValue(varExpr.Identifier.Value, out var offset)) throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
+                string sign = offset > 0 ? "+" : "";
+                AppendAsm($"lea eax, [ebp {sign} {offset}]", $"Get address of var {varExpr.Identifier.Value}");
+                break;
+            case MemberAccessExpressionNode memberAccess:
+                GenerateLValueAddress(memberAccess.Left); // Puts base address of struct in EAX
+                var leftType = GetExpressionType(memberAccess.Left);
+                var (memberOffset, _) = GetMemberInfo(leftType, memberAccess.Member.Value);
+                AppendAsm($"add eax, {memberOffset}", $"Offset for member .{memberAccess.Member.Value}");
+                break;
+            default: throw new InvalidOperationException("Expression is not a valid L-value.");
+        }
+    }
+
+    private string GetExpressionType(ExpressionNode expr)
+    {
+        switch (expr)
+        {
+            case VariableExpressionNode v: return _variableTypes[v.Identifier.Value];
+            case MemberAccessExpressionNode m:
+                var leftType = GetExpressionType(m.Left);
+                var (_, memberType) = GetMemberInfo(leftType, m.Member.Value);
+                return memberType;
+            default: return "int"; // Simplification for literals etc.
+        }
     }
 
     private void GenerateExpression(ExpressionNode expression)
     {
         switch (expression)
         {
-            case IntegerLiteralNode literal:
-                AppendAsm($"mov eax, {literal.Value}");
+            case IntegerLiteralNode literal: AppendAsm($"mov eax, {literal.Value}"); break;
+            case StringLiteralNode str: AppendAsm($"mov eax, {str.Label}"); break;
+            case UnaryExpressionNode u:
+                GenerateExpression(u.Right);
+                if (u.Operator.Type == TokenType.Minus) AppendAsm("neg eax", "Negate value");
                 break;
-            case VariableExpressionNode varExpr:
-                if (!_variables.TryGetValue(varExpr.Identifier.Value, out var offset))
+            case VariableExpressionNode or MemberAccessExpressionNode:
+                GenerateLValueAddress(expression);
+                AppendAsm("mov eax, [eax]", "Dereference address to get value");
+                break;
+            case AssignmentExpressionNode assign:
+                GenerateLValueAddress(assign.Left);
+                AppendAsm("push eax");
+                GenerateExpression(assign.Right);
+                AppendAsm("pop ecx");
+                AppendAsm("mov [ecx], eax");
+                break;
+            case BinaryExpressionNode binExpr: GenerateBinaryExpression(binExpr); break;
+            case CallExpressionNode callExpr: GenerateCallExpression(callExpr); break;
+            default: throw new NotImplementedException($"Expr: {expression.GetType().Name}");
+        }
+    }
+
+    private void GenerateCallExpression(CallExpressionNode callExpr)
+    {
+        int totalArgSize = 0;
+        foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
+        {
+            string argType = GetExpressionType(arg);
+            int argSize = GetSizeOfType(argType);
+            totalArgSize += argSize;
+
+            if (argSize <= 4) // Pass by value for int/pointer
+            {
+                GenerateExpression(arg);
+                AppendAsm("push eax");
+            }
+            else // Pass struct by value
+            {
+                GenerateLValueAddress(arg);
+                AppendAsm("mov esi, eax", $"Copy struct for call");
+                for (int offset = argSize - 4; offset >= 0; offset -= 4)
                 {
-                    throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
+                    AppendAsm($"push dword [esi + {offset}]");
                 }
-                AppendAsm($"mov eax, [ebp + {offset}]", $"Load variable {varExpr.Identifier.Value}");
-                break;
-            case AssignmentExpressionNode assignExpr:
-                if (!_variables.TryGetValue(assignExpr.Identifier.Value, out var assignOffset))
-                {
-                    throw new InvalidOperationException($"Undeclared variable '{assignExpr.Identifier.Value}' for assignment.");
-                }
-                GenerateExpression(assignExpr.Value);
-                AppendAsm($"mov [ebp + {assignOffset}], eax", $"Assign to variable {assignExpr.Identifier.Value}");
-                break;
-            case BinaryExpressionNode binExpr:
-                GenerateBinaryExpression(binExpr);
-                break;
-            case CallExpressionNode callExpr:
-                if (callExpr.Callee.Value != "print")
-                {
-                    throw new InvalidOperationException($"Undefined function call: '{callExpr.Callee.Value}'");
-                }
-                // The 'print' intrinsic
-                GenerateExpression(callExpr.Argument);
-                AppendAsm("push eax", "Push argument for printf");
-                AppendAsm("push format_int", "Push format string");
-                AppendAsm("call [printf]");
-                AppendAsm("add esp, 8", "Clean up stack for printf");
-                AppendAsm("mov eax, 0", "A print expression evaluates to 0");
-                break;
-            default:
-                throw new NotImplementedException($"Unsupported expression type: {expression.GetType().Name}");
+            }
+        }
+
+        string calleeName = callExpr.Callee.Value;
+        string callTarget = _externalFunctions.Contains(calleeName) ? $"[{calleeName}]" : $"_{calleeName}";
+
+        AppendAsm($"call {callTarget}");
+
+        if (totalArgSize > 0)
+        {
+            AppendAsm($"add esp, {totalArgSize}", $"Clean up {callExpr.Arguments.Count} args");
         }
     }
 
     private void GenerateBinaryExpression(BinaryExpressionNode binExpr)
     {
-        // Generate right operand first, push to stack
         GenerateExpression(binExpr.Right);
         AppendAsm("push eax");
-
-        // Generate left operand, result is in EAX
         GenerateExpression(binExpr.Left);
-
-        // Pop right operand into ECX
         AppendAsm("pop ecx");
 
         switch (binExpr.Operator.Type)
         {
-            case TokenType.Plus:
-                AppendAsm("add eax, ecx", "eax = eax + ecx");
-                break;
-            case TokenType.Minus:
-                AppendAsm("sub eax, ecx", "eax = eax - ecx");
-                break;
-            case TokenType.Star:
-                AppendAsm("imul eax, ecx", "eax = eax * ecx");
-                break;
-            case TokenType.Slash:
-                AppendAsm("cdq", "Sign-extend EAX into EDX:EAX");
-                AppendAsm("idiv ecx", "eax = edx:eax / ecx");
-                break;
-            case TokenType.DoubleEquals:
-                AppendAsm("cmp eax, ecx");
-                AppendAsm("sete al", "Set AL if equal");
-                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
-                break;
-            case TokenType.NotEquals:
-                AppendAsm("cmp eax, ecx");
-                AppendAsm("setne al", "Set AL if not equal");
-                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
-                break;
-            case TokenType.LessThan:
-                AppendAsm("cmp eax, ecx");
-                AppendAsm("setl al", "Set AL if less");
-                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
-                break;
-            case TokenType.GreaterThan:
-                AppendAsm("cmp eax, ecx");
-                AppendAsm("setg al", "Set AL if greater");
-                AppendAsm("movzx eax, al", "Zero-extend AL to EAX");
-                break;
-            default:
-                throw new NotImplementedException($"Unsupported binary operator: {binExpr.Operator.Type}");
+            case TokenType.Plus: AppendAsm("add eax, ecx"); break;
+            case TokenType.Minus: AppendAsm("sub eax, ecx"); break;
+            case TokenType.Star: AppendAsm("imul eax, ecx"); break;
+            case TokenType.Slash: AppendAsm("cdq"); AppendAsm("idiv ecx"); break;
+            case TokenType.DoubleEquals: AppendAsm("cmp eax, ecx"); AppendAsm("sete al"); AppendAsm("movzx eax, al"); break;
+            case TokenType.NotEquals: AppendAsm("cmp eax, ecx"); AppendAsm("setne al"); AppendAsm("movzx eax, al"); break;
+            case TokenType.LessThan: AppendAsm("cmp eax, ecx"); AppendAsm("setl al"); AppendAsm("movzx eax, al"); break;
+            case TokenType.GreaterThan: AppendAsm("cmp eax, ecx"); AppendAsm("setg al"); AppendAsm("movzx eax, al"); break;
+            default: throw new NotImplementedException($"Op: {binExpr.Operator.Type}");
         }
     }
 }
@@ -317,6 +430,8 @@ public class Generator
 <file path="Parser.cs">
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 
 namespace CTilde;
 
@@ -324,6 +439,7 @@ public class Parser
 {
     private readonly List<Token> _tokens;
     private int _position;
+    private int _stringLabelCounter;
 
     public Parser(List<Token> tokens)
     {
@@ -334,7 +450,6 @@ public class Parser
     private Token Current => _position < _tokens.Count ? _tokens[_position] : new(TokenType.Unknown, string.Empty);
     private Token Peek(int offset) => _position + offset < _tokens.Count ? _tokens[_position + offset] : new(TokenType.Unknown, string.Empty);
 
-
     private Token Eat(TokenType expectedType)
     {
         var currentToken = Current;
@@ -343,35 +458,129 @@ public class Parser
             _position++;
             return currentToken;
         }
-        throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type}");
+        throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type} ('{currentToken.Value}')");
     }
 
     public ProgramNode Parse()
     {
-        var function = ParseFunction();
-        return new ProgramNode(function);
+        var imports = new List<ImportDirectiveNode>();
+        var structs = new List<StructDefinitionNode>();
+        var functions = new List<FunctionDeclarationNode>();
+
+        while (Current.Type != TokenType.Unknown)
+        {
+            if (Current.Type == TokenType.Hash) imports.Add(ParseImportDirective());
+            else if (Current.Value == "struct" && Peek(2).Type == TokenType.LeftBrace) structs.Add(ParseStructDefinition());
+            else functions.Add(ParseFunction());
+        }
+
+        var programNode = new ProgramNode(imports, structs, functions);
+        SetParents(programNode);
+        return programNode;
+    }
+
+    private ImportDirectiveNode ParseImportDirective()
+    {
+        Eat(TokenType.Hash);
+        var keyword = Eat(TokenType.Identifier);
+        if (keyword.Value != "import") throw new InvalidOperationException($"Expected 'import' after '#' but got '{keyword.Value}'");
+        var libNameToken = Eat(TokenType.StringLiteral);
+        return new ImportDirectiveNode(libNameToken.Value);
+    }
+
+    private StructDefinitionNode ParseStructDefinition()
+    {
+        Eat(TokenType.Keyword); // struct
+        var name = Eat(TokenType.Identifier);
+        Eat(TokenType.LeftBrace);
+
+        var members = new List<ParameterNode>();
+        while (Current.Type != TokenType.RightBrace)
+        {
+            var memberType = Eat(TokenType.Keyword);
+            var memberName = Eat(TokenType.Identifier);
+            members.Add(new ParameterNode(memberType, memberName));
+            Eat(TokenType.Semicolon);
+        }
+
+        Eat(TokenType.RightBrace);
+        Eat(TokenType.Semicolon);
+        return new StructDefinitionNode(name.Value, members);
+    }
+
+    private void SetParents(AstNode node)
+    {
+        foreach (var property in node.GetType().GetProperties())
+        {
+            if (property.CanWrite && property.Name == "Parent") continue;
+            if (property.GetValue(node) is AstNode child)
+            {
+                var parentProp = child.GetType().GetProperty("Parent");
+                if (parentProp != null && parentProp.CanWrite) parentProp.SetValue(child, node);
+                SetParents(child);
+            }
+            else if (property.GetValue(node) is IEnumerable<AstNode> children)
+            {
+                foreach (var c in children.ToList()) // ToList to avoid mutation issues
+                {
+                    var parentProp = c.GetType().GetProperty("Parent");
+                    if (parentProp != null && parentProp.CanWrite) parentProp.SetValue(c, node);
+                    SetParents(c);
+                }
+            }
+        }
     }
 
     private FunctionDeclarationNode ParseFunction()
     {
-        Eat(TokenType.Keyword); // "int"
-        var identifier = Eat(TokenType.Identifier); // "main"
+        Token returnType;
+        if (Current.Value == "struct")
+        {
+            Eat(TokenType.Keyword);
+            returnType = Eat(TokenType.Identifier);
+        }
+        else
+        {
+            returnType = Eat(TokenType.Keyword);
+        }
+
+        var identifier = Eat(TokenType.Identifier);
         Eat(TokenType.LeftParen);
+
+        var parameters = new List<ParameterNode>();
+        if (Current.Type != TokenType.RightParen)
+        {
+            do
+            {
+                Token paramType;
+                if (Current.Value == "struct")
+                {
+                    Eat(TokenType.Keyword);
+                    paramType = Eat(TokenType.Identifier);
+                }
+                else
+                {
+                    paramType = Eat(TokenType.Keyword);
+                }
+                var paramName = Eat(TokenType.Identifier);
+                parameters.Add(new ParameterNode(paramType, paramName));
+            } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+        }
+
         Eat(TokenType.RightParen);
 
-        var body = ParseBlockStatement();
+        StatementNode? body = null;
+        if (Current.Type == TokenType.LeftBrace) body = ParseBlockStatement();
+        else Eat(TokenType.Semicolon);
 
-        return new FunctionDeclarationNode(identifier.Value, body);
+        return new FunctionDeclarationNode(returnType, identifier.Value, parameters, body);
     }
 
     private BlockStatementNode ParseBlockStatement()
     {
         Eat(TokenType.LeftBrace);
         var statements = new List<StatementNode>();
-        while (Current.Type != TokenType.RightBrace)
-        {
-            statements.Add(ParseStatement());
-        }
+        while (Current.Type != TokenType.RightBrace) statements.Add(ParseStatement());
         Eat(TokenType.RightBrace);
         return new BlockStatementNode(statements);
     }
@@ -382,26 +591,16 @@ public class Parser
         {
             switch (Current.Value)
             {
-                case "return":
-                    return ParseReturnStatement();
-                case "if":
-                    return ParseIfStatement();
-                case "while":
-                    return ParseWhileStatement();
+                case "return": return ParseReturnStatement();
+                case "if": return ParseIfStatement();
+                case "while": return ParseWhileStatement();
                 case "int":
-                    return ParseDeclarationStatement();
-                default:
-                    // An 'else' on its own, or other future keywords, are syntax errors here.
-                    throw new InvalidOperationException($"Unexpected keyword '{Current.Value}' at the beginning of a statement.");
+                case "struct": return ParseDeclarationStatement();
             }
         }
 
-        if (Current.Type == TokenType.LeftBrace)
-        {
-            return ParseBlockStatement();
-        }
+        if (Current.Type == TokenType.LeftBrace) return ParseBlockStatement();
 
-        // Otherwise, it must be an expression statement (e.g. assignment, call)
         var expression = ParseExpression();
         Eat(TokenType.Semicolon);
         return new ExpressionStatementNode(expression);
@@ -409,42 +608,47 @@ public class Parser
 
     private IfStatementNode ParseIfStatement()
     {
-        Eat(TokenType.Keyword); // "if"
+        Eat(TokenType.Keyword);
         Eat(TokenType.LeftParen);
         var condition = ParseExpression();
         Eat(TokenType.RightParen);
-
         var thenBody = ParseStatement();
         StatementNode? elseBody = null;
-
         if (Current.Type == TokenType.Keyword && Current.Value == "else")
         {
-            Eat(TokenType.Keyword); // "else"
+            Eat(TokenType.Keyword);
             elseBody = ParseStatement();
         }
-
         return new IfStatementNode(condition, thenBody, elseBody);
     }
 
     private StatementNode ParseDeclarationStatement()
     {
-        Eat(TokenType.Keyword); // "int"
-        var identifier = Eat(TokenType.Identifier);
-        ExpressionNode? initializer = null;
-
-        if (Current.Type == TokenType.Assignment)
+        Token typeToken;
+        if (Current.Value == "struct")
         {
-            Eat(TokenType.Assignment); // "="
-            initializer = ParseExpression();
+            Eat(TokenType.Keyword);
+            typeToken = Eat(TokenType.Identifier);
+        }
+        else
+        {
+            typeToken = Eat(TokenType.Keyword);
         }
 
+        var identifier = Eat(TokenType.Identifier);
+        ExpressionNode? initializer = null;
+        if (Current.Type == TokenType.Assignment)
+        {
+            Eat(TokenType.Assignment);
+            initializer = ParseExpression();
+        }
         Eat(TokenType.Semicolon);
-        return new DeclarationStatementNode(identifier, initializer);
+        return new DeclarationStatementNode(typeToken, identifier, initializer);
     }
 
     private WhileStatementNode ParseWhileStatement()
     {
-        Eat(TokenType.Keyword); // "while"
+        Eat(TokenType.Keyword);
         Eat(TokenType.LeftParen);
         var condition = ParseExpression();
         Eat(TokenType.RightParen);
@@ -454,34 +658,25 @@ public class Parser
 
     private ReturnStatementNode ParseReturnStatement()
     {
-        Eat(TokenType.Keyword); // "return"
-        var expression = ParseExpression();
+        Eat(TokenType.Keyword);
+        ExpressionNode? expression = null;
+        if (Current.Type != TokenType.Semicolon) expression = ParseExpression();
         Eat(TokenType.Semicolon);
         return new ReturnStatementNode(expression);
     }
 
-    private ExpressionNode ParseExpression()
-    {
-        return ParseAssignmentExpression();
-    }
+    private ExpressionNode ParseExpression() => ParseAssignmentExpression();
 
     private ExpressionNode ParseAssignmentExpression()
     {
         var left = ParseEqualityExpression();
-
         if (Current.Type == TokenType.Assignment)
         {
             Eat(TokenType.Assignment);
-            var right = ParseAssignmentExpression(); // Right-associative
-
-            if (left is VariableExpressionNode varNode)
-            {
-                return new AssignmentExpressionNode(varNode.Identifier, right);
-            }
-
+            var right = ParseAssignmentExpression();
+            if (left is VariableExpressionNode or MemberAccessExpressionNode) return new AssignmentExpressionNode(left, right);
             throw new InvalidOperationException("Invalid assignment target.");
         }
-
         return left;
     }
 
@@ -490,8 +685,7 @@ public class Parser
         var left = ParseRelationalExpression();
         while (Current.Type is TokenType.DoubleEquals or TokenType.NotEquals)
         {
-            var op = Current;
-            _position++;
+            var op = Current; _position++;
             var right = ParseRelationalExpression();
             left = new BinaryExpressionNode(left, op, right);
         }
@@ -503,8 +697,7 @@ public class Parser
         var left = ParseAdditiveExpression();
         while (Current.Type is TokenType.LessThan or TokenType.GreaterThan)
         {
-            var op = Current;
-            _position++;
+            var op = Current; _position++;
             var right = ParseAdditiveExpression();
             left = new BinaryExpressionNode(left, op, right);
         }
@@ -516,8 +709,7 @@ public class Parser
         var left = ParseMultiplicativeExpression();
         while (Current.Type is TokenType.Plus or TokenType.Minus)
         {
-            var op = Current;
-            _position++;
+            var op = Current; _position++;
             var right = ParseMultiplicativeExpression();
             left = new BinaryExpressionNode(left, op, right);
         }
@@ -526,38 +718,57 @@ public class Parser
 
     private ExpressionNode ParseMultiplicativeExpression()
     {
-        var left = ParseCallExpression();
+        var left = ParseUnaryExpression();
         while (Current.Type is TokenType.Star or TokenType.Slash)
         {
-            var op = Current;
-            _position++;
-            var right = ParseCallExpression();
+            var op = Current; _position++;
+            var right = ParseUnaryExpression();
             left = new BinaryExpressionNode(left, op, right);
+        }
+        return left;
+    }
+
+    private ExpressionNode ParseUnaryExpression()
+    {
+        if (Current.Type is TokenType.Minus or TokenType.Plus)
+        {
+            var op = Current; _position++;
+            return new UnaryExpressionNode(op, ParseUnaryExpression());
+        }
+        return ParseMemberAccessExpression();
+    }
+
+    private ExpressionNode ParseMemberAccessExpression()
+    {
+        var left = ParseCallExpression();
+        while (Current.Type == TokenType.Dot)
+        {
+            Eat(TokenType.Dot);
+            var member = Eat(TokenType.Identifier);
+            left = new MemberAccessExpressionNode(left, member);
         }
         return left;
     }
 
     private ExpressionNode ParseCallExpression()
     {
-        // A call expression is a primary expression (like an identifier)
-        // possibly followed by parentheses.
         var expr = ParsePrimaryExpression();
-
         if (Current.Type == TokenType.LeftParen)
         {
-            // If we see a '(', it must be a function call.
-            // The thing being called must have been a variable.
             if (expr is VariableExpressionNode varNode)
             {
                 Eat(TokenType.LeftParen);
-                // For now, only one argument is supported.
-                var argument = ParseExpression();
+                var arguments = new List<ExpressionNode>();
+                if (Current.Type != TokenType.RightParen)
+                {
+                    do { arguments.Add(ParseExpression()); }
+                    while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+                }
                 Eat(TokenType.RightParen);
-                return new CallExpressionNode(varNode.Identifier, argument);
+                return new CallExpressionNode(varNode.Identifier, arguments);
             }
             throw new InvalidOperationException("Expression is not callable.");
         }
-
         return expr;
     }
 
@@ -566,19 +777,22 @@ public class Parser
         if (Current.Type == TokenType.IntegerLiteral)
         {
             var token = Eat(TokenType.IntegerLiteral);
-            if (int.TryParse(token.Value, out int value))
-            {
-                return new IntegerLiteralNode(value);
-            }
-            throw new InvalidOperationException($"Could not parse integer literal: {token.Value}");
+            if (int.TryParse(token.Value, out int v)) return new IntegerLiteralNode(v);
+            throw new InvalidOperationException($"Could not parse int: {token.Value}");
         }
-
-        if (Current.Type == TokenType.Identifier)
+        if (Current.Type == TokenType.HexLiteral)
         {
-            var token = Eat(TokenType.Identifier);
-            return new VariableExpressionNode(token);
+            var token = Eat(TokenType.HexLiteral);
+            var hex = token.Value.StartsWith("0x") ? token.Value.Substring(2) : token.Value;
+            if (int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int v)) return new IntegerLiteralNode(v);
+            throw new InvalidOperationException($"Could not parse hex: {token.Value}");
         }
-
+        if (Current.Type == TokenType.StringLiteral)
+        {
+            var token = Eat(TokenType.StringLiteral);
+            return new StringLiteralNode(token.Value, $"str{_stringLabelCounter++}");
+        }
+        if (Current.Type == TokenType.Identifier) return new VariableExpressionNode(Eat(TokenType.Identifier));
         if (Current.Type == TokenType.LeftParen)
         {
             Eat(TokenType.LeftParen);
@@ -586,7 +800,6 @@ public class Parser
             Eat(TokenType.RightParen);
             return expr;
         }
-
         throw new InvalidOperationException($"Unexpected expression token: {Current.Type}");
     }
 }
@@ -624,6 +837,7 @@ public class Program
 
 <file path="Tokenizer.cs">
 using System.Collections.Generic;
+using System.Text;
 
 namespace CTilde;
 
@@ -632,11 +846,16 @@ public enum TokenType
     Keyword,
     Identifier,
     IntegerLiteral,
+    HexLiteral,
+    StringLiteral,
     Semicolon,
     LeftParen,
     RightParen,
     LeftBrace,
     RightBrace,
+    Comma,
+    Dot,
+    Hash,
     Assignment,
     Unknown,
     Plus,
@@ -656,10 +875,12 @@ public class Tokenizer
     private static readonly HashSet<string> Keywords =
     [
         "int",
+        "void",
         "return",
         "while",
         "if",
-        "else"
+        "else",
+        "struct"
     ];
 
     public static List<Token> Tokenize(string input)
@@ -671,173 +892,140 @@ public class Tokenizer
         {
             char c = input[i];
 
-            if (char.IsWhiteSpace(c))
+            if (char.IsWhiteSpace(c)) { i++; continue; }
+            if (c == '/' && i + 1 < input.Length && input[i + 1] == '/') { while (i < input.Length && input[i] != '\n') i++; continue; }
+            if (c == '"')
             {
                 i++;
-                continue;
-            }
-
-            // Handle single-line comments
-            if (c == '/' && i + 1 < input.Length && input[i + 1] == '/')
-            {
-                while (i < input.Length && input[i] != '\n')
+                var sb = new StringBuilder();
+                while (i < input.Length && input[i] != '"')
                 {
+                    char current = input[i];
+                    if (current == '\\' && i + 1 < input.Length)
+                    {
+                        i++;
+                        switch (input[i])
+                        {
+                            case 'n': sb.Append('\n'); break;
+                            case 't': sb.Append('\t'); break;
+                            case '\\': sb.Append('\\'); break;
+                            case '"': sb.Append('"'); break;
+                            default: sb.Append('\\'); sb.Append(input[i]); break;
+                        }
+                    }
+                    else sb.Append(current);
                     i++;
                 }
+                if (i < input.Length) i++;
+                tokens.Add(new Token(TokenType.StringLiteral, sb.ToString()));
                 continue;
             }
 
             switch (c)
             {
-                case '(':
-                    tokens.Add(new(TokenType.LeftParen, "("));
-                    i++;
-                    continue;
-                case ')':
-                    tokens.Add(new(TokenType.RightParen, ")"));
-                    i++;
-                    continue;
-                case '{':
-                    tokens.Add(new(TokenType.LeftBrace, "{"));
-                    i++;
-                    continue;
-                case '}':
-                    tokens.Add(new(TokenType.RightBrace, "}"));
-                    i++;
-                    continue;
-                case ';':
-                    tokens.Add(new(TokenType.Semicolon, ";"));
-                    i++;
-                    continue;
-                case '+':
-                    tokens.Add(new(TokenType.Plus, "+"));
-                    i++;
-                    continue;
-                case '-':
-                    tokens.Add(new(TokenType.Minus, "-"));
-                    i++;
-                    continue;
-                case '*':
-                    tokens.Add(new(TokenType.Star, "*"));
-                    i++;
-                    continue;
-                case '/':
-                    tokens.Add(new(TokenType.Slash, "/"));
-                    i++;
-                    continue;
-                case '<':
-                    tokens.Add(new(TokenType.LessThan, "<"));
-                    i++;
-                    continue;
-                case '>':
-                    tokens.Add(new(TokenType.GreaterThan, ">"));
-                    i++;
-                    continue;
+                case '#': tokens.Add(new(TokenType.Hash, "#")); i++; continue;
+                case '.': tokens.Add(new(TokenType.Dot, ".")); i++; continue;
+                case '(': tokens.Add(new(TokenType.LeftParen, "(")); i++; continue;
+                case ')': tokens.Add(new(TokenType.RightParen, ")")); i++; continue;
+                case '{': tokens.Add(new(TokenType.LeftBrace, "{")); i++; continue;
+                case '}': tokens.Add(new(TokenType.RightBrace, "}")); i++; continue;
+                case ';': tokens.Add(new(TokenType.Semicolon, ";")); i++; continue;
+                case ',': tokens.Add(new(TokenType.Comma, ",")); i++; continue;
+                case '+': tokens.Add(new(TokenType.Plus, "+")); i++; continue;
+                case '-': tokens.Add(new(TokenType.Minus, "-")); i++; continue;
+                case '*': tokens.Add(new(TokenType.Star, "*")); i++; continue;
+                case '/': tokens.Add(new(TokenType.Slash, "/")); i++; continue;
+                case '<': tokens.Add(new(TokenType.LessThan, "<")); i++; continue;
+                case '>': tokens.Add(new(TokenType.GreaterThan, ">")); i++; continue;
                 case '=':
-                    if (i + 1 < input.Length && input[i + 1] == '=')
-                    {
-                        tokens.Add(new(TokenType.DoubleEquals, "=="));
-                        i += 2;
-                    }
-                    else
-                    {
-                        tokens.Add(new(TokenType.Assignment, "="));
-                        i++;
-                    }
+                    if (i + 1 < input.Length && input[i + 1] == '=') { tokens.Add(new(TokenType.DoubleEquals, "==")); i += 2; }
+                    else { tokens.Add(new(TokenType.Assignment, "=")); i++; }
                     continue;
                 case '!':
-                    if (i + 1 < input.Length && input[i + 1] == '=')
-                    {
-                        tokens.Add(new(TokenType.NotEquals, "!="));
-                        i += 2;
-                    }
-                    else
-                    {
-                        tokens.Add(new(TokenType.Unknown, c.ToString()));
-                        i++;
-                    }
+                    if (i + 1 < input.Length && input[i + 1] == '=') { tokens.Add(new(TokenType.NotEquals, "!=")); i += 2; }
+                    else { tokens.Add(new(TokenType.Unknown, c.ToString())); i++; }
                     continue;
             }
 
-            if (char.IsLetter(c))
+            if (c == '0' && i + 1 < input.Length && (input[i + 1] == 'x' || input[i + 1] == 'X'))
             {
                 int start = i;
-
-                while (i < input.Length && char.IsLetterOrDigit(input[i]))
-                {
-                    i++;
-                }
-
-                string value = input[start..i];
-
-                TokenType type = Keywords.Contains(value)
-                    ? TokenType.Keyword
-                    : TokenType.Identifier;
-
-                tokens.Add(new(type, value));
+                i += 2;
+                while (i < input.Length && "0123456789abcdefABCDEF".Contains(input[i])) i++;
+                tokens.Add(new Token(TokenType.HexLiteral, input.Substring(start, i - start)));
                 continue;
             }
-
             if (char.IsDigit(c))
             {
                 int start = i;
-
-                while (i < input.Length && char.IsDigit(input[i]))
-                {
-                    i++;
-                }
-
-                string value = input[start..i];
-                tokens.Add(new(TokenType.IntegerLiteral, value));
+                while (i < input.Length && char.IsDigit(input[i])) i++;
+                tokens.Add(new(TokenType.IntegerLiteral, input.Substring(start, i - start)));
                 continue;
             }
-
+            if (char.IsLetter(c) || c == '_')
+            {
+                int start = i;
+                while (i < input.Length && (char.IsLetterOrDigit(input[i]) || input[i] == '_')) i++;
+                string value = input.Substring(start, i - start);
+                tokens.Add(new(Keywords.Contains(value) ? TokenType.Keyword : TokenType.Identifier, value));
+                continue;
+            }
             tokens.Add(new(TokenType.Unknown, c.ToString()));
             i++;
         }
-
+        tokens.Add(new(TokenType.Unknown, string.Empty));
         return tokens;
     }
 }
 </file>
 
 <file path="main.c">
+#import "raylib.dll"
+
+struct Color {
+    int r;
+    int g;
+    int b;
+    int a;
+};
+
+// --- Raylib Function Prototypes with Structs ---
+void InitWindow(int width, int height, int title);
+int WindowShouldClose();
+void BeginDrawing();
+void EndDrawing();
+void ClearBackground(struct Color color);
+void DrawText(int text, int posX, int posY, int fontSize, struct Color color);
+void CloseWindow();
+
 int main() {
-    // A simple test for if-else statements
-    int a = 5;
-    int b = 10;
-    int result = 0;
+    int screenWidth = 800;
+    int screenHeight = 600;
 
-    // Test 1: Simple if
-    if (a < b) {
-        print(1); // Should print 1
+    struct Color rayWhite;
+    rayWhite.r = 245;
+    rayWhite.g = 245;
+    rayWhite.b = 245;
+    rayWhite.a = 255;
+
+    struct Color maroon;
+    maroon.r = 190;
+    maroon.g = 33;
+    maroon.b = 55;
+    maroon.a = 255;
+
+    InitWindow(screenWidth, screenHeight, "CTilde with Structs by Value!");
+
+    while (WindowShouldClose() == 0) {
+        BeginDrawing();
+        ClearBackground(rayWhite);
+        DrawText("Structs are being passed by value!", 140, 275, 20, maroon);
+        EndDrawing();
     }
 
-    // Test 2: if-else
-    if (a > b) {
-        print(999); // Should not print
-    } else {
-        print(2); // Should print 2
-    }
-
-    // Test 3: Chained conditions modifying a variable
-    if (a == 5) {
-        result = 100;
-    } else {
-        result = 200;
-    }
-
-    if (b != 10) {
-        result = result + 1;
-    } else {
-        result = result + 5;
-    }
-
-    print(result); // Should print 105
-
-    while (1) { }
-
-    return result; // Should return 105
+    CloseWindow();
+    
+    return 0;
 }
 </file>
 

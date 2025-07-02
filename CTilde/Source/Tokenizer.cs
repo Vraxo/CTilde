@@ -42,7 +42,8 @@ public class Tokenizer
         "while",
         "if",
         "else",
-        "struct"
+        "struct",
+        "char"
     ];
 
     public static List<Token> Tokenize(string input)

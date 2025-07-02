@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace CTilde;
@@ -32,7 +33,7 @@ public class Generator
         _sb.AppendLine("section '.text' code readable executable");
         _sb.AppendLine();
         _sb.AppendLine("start:");
-        _sb.AppendLine("    call main");
+        _sb.AppendLine("    call _main");
         _sb.AppendLine("    mov ebx, eax"); // EAX holds the return value from main
         _sb.AppendLine("    push ebx");
         _sb.AppendLine("    call [ExitProcess]");
@@ -74,10 +75,20 @@ public class Generator
         _variables = new Dictionary<string, int>();
         _stackOffset = 0;
 
-        _sb.AppendLine($"{function.Name}:");
+        _sb.AppendLine($"_{function.Name}:");
         AppendAsm("push ebp");
         AppendAsm("mov ebp, esp");
         _sb.AppendLine();
+
+        // Map parameters to their stack locations.
+        // Stack layout: [ebp] = old ebp, [ebp+4] = return address
+        // First parameter is at [ebp+8], second at [ebp+12], etc.
+        int paramOffset = 8;
+        foreach (var param in function.Parameters)
+        {
+            _variables[param.Name.Value] = paramOffset;
+            paramOffset += 4; // Assuming all params are 4 bytes.
+        }
 
         GenerateStatement(function.Body);
 
@@ -113,7 +124,15 @@ public class Generator
                 break;
             case ExpressionStatementNode exprStmt:
                 GenerateExpression(exprStmt.Expression);
-                _sb.AppendLine("    ; Expression statement result is discarded");
+                if (exprStmt.Expression is CallExpressionNode)
+                {
+                    // For expression statements that are calls, the EAX return value is discarded,
+                    // but the stack cleanup must still have happened. No extra ASM needed here.
+                }
+                else
+                {
+                    AppendAsm("", "; Expression statement result in EAX is discarded");
+                }
                 break;
             default:
                 throw new NotImplementedException($"Unsupported statement type: {statement.GetType().Name}");
@@ -211,7 +230,8 @@ public class Generator
                 {
                     throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
                 }
-                AppendAsm($"mov eax, [ebp + {offset}]", $"Load variable {varExpr.Identifier.Value}");
+                string sign = offset > 0 ? "+" : "";
+                AppendAsm($"mov eax, [ebp {sign} {offset}]", $"Load variable/param {varExpr.Identifier.Value}");
                 break;
             case AssignmentExpressionNode assignExpr:
                 if (!_variables.TryGetValue(assignExpr.Identifier.Value, out var assignOffset))
@@ -219,7 +239,8 @@ public class Generator
                     throw new InvalidOperationException($"Undeclared variable '{assignExpr.Identifier.Value}' for assignment.");
                 }
                 GenerateExpression(assignExpr.Value);
-                AppendAsm($"mov [ebp + {assignOffset}], eax", $"Assign to variable {assignExpr.Identifier.Value}");
+                string assignSign = assignOffset > 0 ? "+" : "";
+                AppendAsm($"mov [ebp {assignSign} {assignOffset}], eax", $"Assign to variable/param {assignExpr.Identifier.Value}");
                 break;
             case BinaryExpressionNode binExpr:
                 GenerateBinaryExpression(binExpr);
@@ -234,27 +255,34 @@ public class Generator
 
     private void GenerateCallExpression(CallExpressionNode callExpr)
     {
+        // Push arguments onto the stack from right to left (cdecl)
+        foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
+        {
+            GenerateExpression(arg);
+            AppendAsm("push eax");
+        }
+
         if (callExpr.Callee.Value == "print")
         {
             if (callExpr.Arguments.Count != 1)
                 throw new InvalidOperationException("print() intrinsic requires exactly one argument.");
 
-            // The 'print' intrinsic
-            GenerateExpression(callExpr.Arguments[0]);
-            AppendAsm("push eax", "Push argument for printf");
-            AppendAsm("push format_int", "Push format string");
+            AppendAsm("push format_int", "Push format string for printf");
             AppendAsm("call [printf]");
+            // Caller cleans up stack: 1 arg + 1 format string = 8 bytes
             AppendAsm("add esp, 8", "Clean up stack for printf");
             AppendAsm("mov eax, 0", "A print expression evaluates to 0");
         }
         else
         {
-            // User-defined function call
-            if (callExpr.Arguments.Count != 0)
-                throw new InvalidOperationException($"Function '{callExpr.Callee.Value}' does not support arguments yet.");
-
-            AppendAsm($"call {callExpr.Callee.Value}");
-            // Return value is in EAX, as per convention. No stack cleanup for 0 args.
+            AppendAsm($"call _{callExpr.Callee.Value}");
+            // Caller cleans up the stack
+            if (callExpr.Arguments.Count > 0)
+            {
+                int bytesToClean = callExpr.Arguments.Count * 4;
+                AppendAsm($"add esp, {bytesToClean}", $"Clean up {callExpr.Arguments.Count} args from stack");
+            }
+            // Return value is in EAX, as per convention.
         }
     }
 

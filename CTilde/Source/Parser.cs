@@ -29,6 +29,14 @@ public class Parser
         throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type}");
     }
 
+    private void EatOptional(TokenType type)
+    {
+        if (Current.Type == type)
+        {
+            _position++;
+        }
+    }
+
     public ProgramNode Parse()
     {
         var functions = new List<FunctionDeclarationNode>();
@@ -49,11 +57,23 @@ public class Parser
 
         var identifier = Eat(TokenType.Identifier); // function name
         Eat(TokenType.LeftParen);
-        Eat(TokenType.RightParen); // No parameters yet
+
+        var parameters = new List<ParameterNode>();
+        if (Current.Type != TokenType.RightParen)
+        {
+            do
+            {
+                var paramType = Eat(TokenType.Keyword);
+                var paramName = Eat(TokenType.Identifier);
+                parameters.Add(new ParameterNode(paramType, paramName));
+            } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+        }
+
+        Eat(TokenType.RightParen);
 
         var body = ParseBlockStatement();
 
-        return new FunctionDeclarationNode(returnType, identifier.Value, body);
+        return new FunctionDeclarationNode(returnType, identifier.Value, parameters, body);
     }
 
     private BlockStatementNode ParseBlockStatement()
@@ -81,12 +101,20 @@ public class Parser
                 case "while":
                     return ParseWhileStatement();
                 case "int":
-                    return ParseDeclarationStatement();
-                default:
-                    // An 'else' on its own, or other future keywords, are syntax errors here.
-                    throw new InvalidOperationException($"Unexpected keyword '{Current.Value}' at the beginning of a statement.");
+                    // Check if it's a declaration or part of a function definition (which shouldn't happen here)
+                    if (Peek(1).Type == TokenType.Identifier && Peek(2).Type != TokenType.LeftParen)
+                    {
+                        return ParseDeclarationStatement();
+                    }
+                    break;
             }
         }
+
+        if (Current.Type == TokenType.Keyword && (Current.Value == "int" || Current.Value == "void"))
+        {
+            throw new InvalidOperationException($"Function definitions are not allowed inside other functions.");
+        }
+
 
         if (Current.Type == TokenType.LeftBrace)
         {
@@ -246,9 +274,10 @@ public class Parser
                 var arguments = new List<ExpressionNode>();
                 if (Current.Type != TokenType.RightParen)
                 {
-                    // For now, only one argument is supported.
-                    // A proper implementation would loop on comma.
-                    arguments.Add(ParseExpression());
+                    do
+                    {
+                        arguments.Add(ParseExpression());
+                    } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
                 }
 
                 Eat(TokenType.RightParen);

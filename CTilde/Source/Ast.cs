@@ -9,7 +9,8 @@ public abstract record ExpressionNode : AstNode;
 
 // Program structure
 public record ProgramNode(List<FunctionDeclarationNode> Functions) : AstNode;
-public record FunctionDeclarationNode(Token ReturnType, string Name, StatementNode Body) : AstNode;
+public record ParameterNode(Token Type, Token Name) : AstNode;
+public record FunctionDeclarationNode(Token ReturnType, string Name, List<ParameterNode> Parameters, StatementNode Body) : AstNode;
 
 // Statements
 public record BlockStatementNode(List<StatementNode> Statements) : StatementNode;

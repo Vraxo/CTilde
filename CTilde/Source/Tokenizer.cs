@@ -28,7 +28,8 @@ public enum TokenType
     NotEquals,
     LessThan,
     GreaterThan,
-    Ampersand
+    Ampersand,
+    Arrow
 }
 
 public record Token(TokenType Type, string Value);
@@ -96,7 +97,10 @@ public class Tokenizer
                 case ';': tokens.Add(new(TokenType.Semicolon, ";")); i++; continue;
                 case ',': tokens.Add(new(TokenType.Comma, ",")); i++; continue;
                 case '+': tokens.Add(new(TokenType.Plus, "+")); i++; continue;
-                case '-': tokens.Add(new(TokenType.Minus, "-")); i++; continue;
+                case '-':
+                    if (i + 1 < input.Length && input[i + 1] == '>') { tokens.Add(new(TokenType.Arrow, "->")); i += 2; }
+                    else { tokens.Add(new(TokenType.Minus, "-")); i++; }
+                    continue;
                 case '*': tokens.Add(new(TokenType.Star, "*")); i++; continue;
                 case '/': tokens.Add(new(TokenType.Slash, "/")); i++; continue;
                 case '&': tokens.Add(new(TokenType.Ampersand, "&")); i++; continue;

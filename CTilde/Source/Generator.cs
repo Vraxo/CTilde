@@ -329,10 +329,25 @@ public class Generator
                 AppendAsm($"lea eax, [ebp {sign} {offset}]", $"Get address of var {varExpr.Identifier.Value}");
                 break;
             case MemberAccessExpressionNode memberAccess:
-                GenerateLValueAddress(memberAccess.Left); // Puts base address of struct in EAX
+                if (memberAccess.Operator.Type == TokenType.Dot)
+                {
+                    // For s.member, get address of s, which is what GenerateLValueAddress does.
+                    GenerateLValueAddress(memberAccess.Left); // Puts base address of struct in EAX
+                }
+                else // Arrow (->)
+                {
+                    // For p->member, get value of p (which is the address of the struct).
+                    GenerateExpression(memberAccess.Left); // Puts pointer value (struct address) in EAX
+                }
+
                 var leftType = GetExpressionType(memberAccess.Left);
-                var (memberOffset, _) = GetMemberInfo(leftType, memberAccess.Member.Value);
-                AppendAsm($"add eax, {memberOffset}", $"Offset for member .{memberAccess.Member.Value}");
+                string baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
+                var (memberOffset, _) = GetMemberInfo(baseStructType, memberAccess.Member.Value);
+
+                if (memberOffset > 0)
+                {
+                    AppendAsm($"add eax, {memberOffset}", $"Offset for member {memberAccess.Operator.Value}{memberAccess.Member.Value}");
+                }
                 break;
             case UnaryExpressionNode u when u.Operator.Type == TokenType.Star: // *ptr
                 // The address of *ptr is the value held by ptr.
@@ -353,8 +368,22 @@ public class Generator
             case MemberAccessExpressionNode m:
                 {
                     var leftType = GetExpressionType(m.Left);
-                    if (leftType.EndsWith("*")) throw new InvalidOperationException($"Cannot use . on a pointer type '{leftType}'. Dereference it first.");
-                    var (_, memberType) = GetMemberInfo(leftType, m.Member.Value);
+                    string baseStructType;
+
+                    if (m.Operator.Type == TokenType.Dot)
+                    {
+                        if (leftType.EndsWith("*"))
+                            throw new InvalidOperationException($"Cannot use . on a pointer type '{leftType}'. Use -> instead.");
+                        baseStructType = leftType;
+                    }
+                    else // Arrow
+                    {
+                        if (!leftType.EndsWith("*"))
+                            throw new InvalidOperationException($"Cannot use -> on a non-pointer type '{leftType}'. Use . instead.");
+                        baseStructType = leftType.Substring(0, leftType.Length - 1);
+                    }
+
+                    var (_, memberType) = GetMemberInfo(baseStructType, m.Member.Value);
                     return memberType;
                 }
             case UnaryExpressionNode u when u.Operator.Type == TokenType.Ampersand:

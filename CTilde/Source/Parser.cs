@@ -347,11 +347,12 @@ public class Parser
     private ExpressionNode ParseMemberAccessExpression()
     {
         var left = ParseCallExpression();
-        while (Current.Type == TokenType.Dot)
+        while (Current.Type is TokenType.Dot or TokenType.Arrow)
         {
-            Eat(TokenType.Dot);
+            var op = Current;
+            _position++;
             var member = Eat(TokenType.Identifier);
-            left = new MemberAccessExpressionNode(left, member);
+            left = new MemberAccessExpressionNode(left, op, member);
         }
         return left;
     }

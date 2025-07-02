@@ -35,4 +35,4 @@ public record AssignmentExpressionNode(ExpressionNode Left, ExpressionNode Right
 public record VariableExpressionNode(Token Identifier) : ExpressionNode;
 public record CallExpressionNode(Token Callee, List<ExpressionNode> Arguments) : ExpressionNode;
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;
-public record MemberAccessExpressionNode(ExpressionNode Left, Token Member) : ExpressionNode;
+public record MemberAccessExpressionNode(ExpressionNode Left, Token Operator, Token Member) : ExpressionNode;

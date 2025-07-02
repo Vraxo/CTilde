@@ -10,6 +10,8 @@ public class TypeManager
     private readonly ProgramNode _program;
     private readonly Dictionary<string, StructDefinitionNode> _structs;
     private readonly List<FunctionDeclarationNode> _functions;
+    private readonly Dictionary<string, CompilationUnitNode> _structUnitMap;
+
 
     public TypeManager(ProgramNode program)
     {
@@ -17,6 +19,15 @@ public class TypeManager
         _structs = program.CompilationUnits.SelectMany(cu => cu.Structs)
             .ToDictionary(s => s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name);
         _functions = program.CompilationUnits.SelectMany(cu => cu.Functions).ToList();
+
+        _structUnitMap = new Dictionary<string, CompilationUnitNode>();
+        foreach (var cu in program.CompilationUnits)
+        {
+            foreach (var s in cu.Structs)
+            {
+                _structUnitMap[s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name] = cu;
+            }
+        }
     }
 
     /// <summary>
@@ -154,8 +165,14 @@ public class TypeManager
         if (typeName == "int") return 4;
         if (typeName == "char") return 1;
 
+        // If it's not a primitive or pointer, it must be a struct type.
+        // It must be a fully qualified name here.
         if (_structs.TryGetValue(typeName, out var structDef))
         {
+            // When calculating the size of a struct, resolve its members' types
+            // using the *struct's own compilation unit context*, not the calling context.
+            var structDefUnit = _structUnitMap[typeName]; // Get the unit where this struct was defined
+
             return structDef.Members.Sum(mem =>
             {
                 var rawMemberType = GetTypeName(mem.Type, mem.PointerLevel);
@@ -170,10 +187,10 @@ public class TypeManager
                 }
                 else
                 {
-                    // Resolve member type using the namespace of the *struct definition*, not the call context
-                    resolvedMemberTypeForSize = ResolveTypeName(baseMemberName, structDef.Namespace, context) + pointerSuffix;
+                    // Resolve member type using the namespace and usings of the *struct definition's unit*
+                    resolvedMemberTypeForSize = ResolveTypeName(baseMemberName, structDef.Namespace, structDefUnit) + pointerSuffix;
                 }
-                return GetSizeOfType(resolvedMemberTypeForSize, context); // Recursive call
+                return GetSizeOfType(resolvedMemberTypeForSize, structDefUnit); // Recursive call, passing struct's unit
             });
         }
         throw new InvalidOperationException($"Unknown type '{typeName}' for size calculation.");
@@ -187,6 +204,9 @@ public class TypeManager
             throw new InvalidOperationException($"Undefined struct '{structName}'");
 
         int currentOffset = 0;
+        // Get the compilation unit where this struct was defined to use its usings for member type resolution
+        var structDefUnit = _structUnitMap[structName];
+
         foreach (var mem in structDef.Members) // Changed loop variable from 'member' to 'mem' to avoid conflict
         {
             var rawMemberType = GetTypeName(mem.Type, mem.PointerLevel);
@@ -201,15 +221,15 @@ public class TypeManager
             }
             else
             {
-                // Resolve member type using the namespace of the *struct definition* (structDef.Namespace)
-                resolvedMemberType = ResolveTypeName(baseMemberName, structDef.Namespace, context) + pointerSuffix;
+                // Resolve member type using the namespace and usings of the *struct definition's unit*
+                resolvedMemberType = ResolveTypeName(baseMemberName, structDef.Namespace, structDefUnit) + pointerSuffix;
             }
 
             if (mem.Name.Value == memberName)
             {
                 return (currentOffset, resolvedMemberType);
             }
-            currentOffset += GetSizeOfType(resolvedMemberType, context);
+            currentOffset += GetSizeOfType(resolvedMemberType, structDefUnit); // Pass struct's unit here too
         }
         throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
     }

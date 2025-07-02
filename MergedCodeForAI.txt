@@ -628,27 +628,7 @@ public class Generator
         int totalArgSize = 0;
         string calleeTarget;
 
-        if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
-        {
-            var leftType = GetExpressionType(memberAccess.Left);
-            var baseStructType = leftType.TrimEnd('*');
-            var method = _program.Functions.First(f => f.OwnerStructName == baseStructType && f.Name == memberAccess.Member.Value);
-
-            if (method.AccessLevel == AccessSpecifier.Private && _currentMethodOwnerStruct != baseStructType)
-                throw new InvalidOperationException($"Cannot access private method '{baseStructType}::{memberAccess.Member.Value}'.");
-
-            GenerateLValueAddress(memberAccess.Left);
-            AppendAsm("push eax", "Push 'this' pointer");
-            totalArgSize += 4;
-            calleeTarget = $"_{baseStructType}_{memberAccess.Member.Value}";
-        }
-        else if (callExpr.Callee is VariableExpressionNode varNode)
-        {
-            string calleeName = varNode.Identifier.Value;
-            calleeTarget = _externalFunctions.Contains(calleeName) ? $"[{calleeName}]" : $"_{calleeName}";
-        }
-        else throw new NotSupportedException($"Unsupported callee type for call: {callExpr.Callee.GetType().Name}");
-
+        // 1. Push all regular arguments from right-to-left.
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
             var argType = GetExpressionType(arg);
@@ -672,8 +652,33 @@ public class Generator
             }
         }
 
+        // 2. Determine callee and push `this` if it's a method call.
+        if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
+        {
+            var leftType = GetExpressionType(memberAccess.Left);
+            var baseStructType = leftType.TrimEnd('*');
+            var method = _program.Functions.First(f => f.OwnerStructName == baseStructType && f.Name == memberAccess.Member.Value);
+
+            if (method.AccessLevel == AccessSpecifier.Private && _currentMethodOwnerStruct != baseStructType)
+                throw new InvalidOperationException($"Cannot access private method '{baseStructType}::{memberAccess.Member.Value}'.");
+
+            // Push 'this' pointer as the last argument (first on the stack for cdecl)
+            GenerateLValueAddress(memberAccess.Left);
+            AppendAsm("push eax", "Push 'this' pointer");
+            totalArgSize += 4;
+            calleeTarget = $"_{baseStructType}_{memberAccess.Member.Value}";
+        }
+        else if (callExpr.Callee is VariableExpressionNode varNode)
+        {
+            string calleeName = varNode.Identifier.Value;
+            calleeTarget = _externalFunctions.Contains(calleeName) ? $"[{calleeName}]" : $"_{calleeName}";
+        }
+        else throw new NotSupportedException($"Unsupported callee type for call: {callExpr.Callee.GetType().Name}");
+
+        // 3. Call the function.
         AppendAsm($"call {calleeTarget}");
 
+        // 4. Clean up the stack.
         if (totalArgSize > 0) AppendAsm($"add esp, {totalArgSize}", "Clean up args");
     }
 
@@ -1370,7 +1375,7 @@ public:
     }
     
     void move_right() {
-        x = x + 1;
+        //x = x + 1;
     }
 };
 
@@ -1393,7 +1398,7 @@ int main() {
     struct TextObject myText;
     // Initialize the object using its public method.
     // Direct access like `myText.x = 140;` would fail because x is private.
-    //myText.init(140, 275, "Encapsulation!", 20, maroon);
+    myText.init(140, 275, "Encapsulation!", 20, maroon);
 
     InitWindow(screenWidth, screenHeight, "CTilde with Access Specifiers!");
 

@@ -18,6 +18,7 @@ public class Generator
     private Dictionary<string, int> _variables = new(); // name -> stack offset
     private Dictionary<string, string> _variableTypes = new(); // name -> type name (e.g. "int", "Color*")
     private int _stackOffset;
+    private string? _currentMethodOwnerStruct;
 
     public Generator(ProgramNode program)
     {
@@ -187,6 +188,7 @@ public class Generator
         _variables.Clear();
         _variableTypes.Clear();
         _stackOffset = 0;
+        _currentMethodOwnerStruct = function.OwnerStructName;
 
         string mangledName = function.OwnerStructName != null
             ? $"_{function.OwnerStructName}_{function.Name}"
@@ -328,33 +330,60 @@ public class Generator
         switch (expression)
         {
             case VariableExpressionNode varExpr:
-                if (!_variables.TryGetValue(varExpr.Identifier.Value, out var offset)) throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
-                string sign = offset > 0 ? "+" : "";
-                AppendAsm($"lea eax, [ebp {sign} {offset}]", $"Get address of var {varExpr.Identifier.Value}");
-                break;
+                {
+                    // Check for local variable first
+                    if (_variables.TryGetValue(varExpr.Identifier.Value, out var offset))
+                    {
+                        string sign = offset > 0 ? "+" : "";
+                        AppendAsm($"lea eax, [ebp {sign} {offset}]", $"Get address of var {varExpr.Identifier.Value}");
+                    }
+                    // If not local, and we are in a method, check for implicit 'this' member access
+                    else if (_currentMethodOwnerStruct != null)
+                    {
+                        try
+                        {
+                            var (memberOffset, _) = GetMemberInfo(_currentMethodOwnerStruct, varExpr.Identifier.Value);
+                            var thisOffset = _variables["this"]; // 'this' is always a parameter
+                            AppendAsm($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
+                            if (memberOffset > 0)
+                            {
+                                AppendAsm($"add eax, {memberOffset}", $"Offset for implicit this->{varExpr.Identifier.Value}");
+                            }
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            // If it's not a member either, then it's undefined.
+                            throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
+                        }
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
+                    }
+                    break;
+                }
             case MemberAccessExpressionNode memberAccess:
-                if (memberAccess.Operator.Type == TokenType.Dot)
                 {
-                    // For s.member, get address of s, which is what GenerateLValueAddress does.
-                    GenerateLValueAddress(memberAccess.Left); // Puts base address of struct in EAX
-                }
-                else // Arrow (->)
-                {
-                    // For p->member, get value of p (which is the address of the struct).
-                    GenerateExpression(memberAccess.Left); // Puts pointer value (struct address) in EAX
-                }
+                    if (memberAccess.Operator.Type == TokenType.Dot)
+                    {
+                        GenerateLValueAddress(memberAccess.Left); // Puts base address of struct in EAX
+                    }
+                    else // Arrow (->)
+                    {
+                        GenerateExpression(memberAccess.Left); // Puts pointer value (struct address) in EAX
+                    }
 
-                var leftType = GetExpressionType(memberAccess.Left);
-                string baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
-                var (memberOffset, _) = GetMemberInfo(baseStructType, memberAccess.Member.Value);
+                    var leftType = GetExpressionType(memberAccess.Left);
+                    string baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
+                    var (memberOffset, _) = GetMemberInfo(baseStructType, memberAccess.Member.Value);
 
-                if (memberOffset > 0)
-                {
-                    AppendAsm($"add eax, {memberOffset}", $"Offset for member {memberAccess.Operator.Value}{memberAccess.Member.Value}");
+                    if (memberOffset > 0)
+                    {
+                        AppendAsm($"add eax, {memberOffset}", $"Offset for member {memberAccess.Operator.Value}{memberAccess.Member.Value}");
+                    }
+                    break;
                 }
-                break;
             case UnaryExpressionNode u when u.Operator.Type == TokenType.Star: // *ptr
-                // The address of *ptr is the value held by ptr.
                 GenerateExpression(u.Right); // puts value of ptr (the address it holds) into EAX.
                 break;
             default: throw new InvalidOperationException($"Expression '{expression.GetType().Name}' is not a valid L-value.");
@@ -367,8 +396,25 @@ public class Generator
         {
             case IntegerLiteralNode: return "int";
             case StringLiteralNode: return "char*"; // String literals are pointers to char
-            case VariableExpressionNode v: return _variableTypes[v.Identifier.Value];
-            case AssignmentExpressionNode a: return GetExpressionType(a.Right); // C-style: type of assignment is type of rhs
+            case VariableExpressionNode v:
+                if (_variableTypes.TryGetValue(v.Identifier.Value, out var type))
+                {
+                    return type;
+                }
+                if (_currentMethodOwnerStruct != null)
+                {
+                    try
+                    {
+                        var (_, memberType) = GetMemberInfo(_currentMethodOwnerStruct, v.Identifier.Value);
+                        return memberType;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Not a member, fall through to throw.
+                    }
+                }
+                throw new InvalidOperationException($"Cannot determine type for undefined variable '{v.Identifier.Value}'.");
+            case AssignmentExpressionNode a: return GetExpressionType(a.Right);
             case MemberAccessExpressionNode m:
                 {
                     var leftType = GetExpressionType(m.Left);
@@ -403,8 +449,6 @@ public class Generator
                 }
             case CallExpressionNode call:
                 {
-                    // This is now more complex. We need to find the function/method declaration.
-                    // This simplified approach might not be robust enough for function pointers later.
                     if (call.Callee is VariableExpressionNode v)
                     {
                         var func = _program.Functions.First(f => f.Name == v.Identifier.Value && f.OwnerStructName == null);
@@ -423,7 +467,7 @@ public class Generator
                     }
                     throw new InvalidOperationException("Cannot determine return type of complex call expression.");
                 }
-            case BinaryExpressionNode: return "int"; // Assume all binary ops result in int for now
+            case BinaryExpressionNode: return "int";
             default: throw new NotImplementedException($"GetExpressionType not implemented for {expr.GetType().Name}");
         }
     }

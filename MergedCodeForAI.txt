@@ -514,7 +514,7 @@ public class Program
         var ast = parser.Parse();
 
         // 3. Generate
-        var generator = new Generator(ast);
+        var generator = new CodeGenerator(ast);
         string asmCode = generator.Generate();
 
         // 4. Output
@@ -679,19 +679,62 @@ public class Tokenizer
 }
 </file>
 
-<file path="Generator\Generator.cs">
-using System;
-using System.Collections.Generic;
-using System.Linq;
+<file path="Generator\AssemblyBuilder.cs">
 using System.Text;
 
 namespace CTilde;
 
-public class Generator
+public class AssemblyBuilder
+{
+    private readonly StringBuilder _sb = new();
+
+    public void AppendDirective(string directive)
+    {
+        _sb.AppendLine(directive);
+    }
+
+    public void AppendLabel(string label)
+    {
+        _sb.AppendLine($"{label}:");
+    }
+
+    public void AppendInstruction(string? instruction, string? comment = null)
+    {
+        var line = instruction == null ? "" : $"    {instruction}";
+        _sb.AppendLine(line.PadRight(35) + (comment == null ? "" : $"; {comment}"));
+    }
+
+    public void AppendData(string label, string value)
+    {
+        _sb.AppendLine($"    {label} db {value}");
+    }
+
+    public void AppendBlankLine()
+    {
+        _sb.AppendLine();
+    }
+
+    public override string ToString()
+    {
+        return _sb.ToString();
+    }
+}
+</file>
+
+<file path="Generator\CodeGenerator.cs">
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace CTilde;
+
+public class CodeGenerator
 {
     private readonly ProgramNode _program;
     private readonly TypeManager _typeManager;
-    private readonly StringBuilder _sb = new();
+    private readonly FasmWriter _fasmWriter = new();
+    private readonly AssemblyBuilder _builder = new();
+
     private int _labelCounter;
     private readonly Dictionary<string, string> _stringLiterals = new();
     private readonly HashSet<string> _externalFunctions = new();
@@ -700,7 +743,7 @@ public class Generator
     private SymbolTable _currentSymbols = null!;
     private string? _currentMethodOwnerStruct;
 
-    public Generator(ProgramNode program)
+    public CodeGenerator(ProgramNode program)
     {
         _program = program;
         _typeManager = new TypeManager(program);
@@ -709,134 +752,50 @@ public class Generator
     public string Generate()
     {
         FindAllStringLiterals(_program);
-        foreach (var f in _program.Functions.Where(f => f.Body == null)) _externalFunctions.Add(f.Name);
+        foreach (var f in _program.Functions.Where(f => f.Body == null))
+        {
+            _externalFunctions.Add(f.Name);
+        }
 
-        _sb.AppendLine("format PE GUI 4.0");
-        _sb.AppendLine("entry start");
-        _sb.AppendLine();
-        _sb.AppendLine("include 'win32a.inc'");
-        _sb.AppendLine();
-        _sb.AppendLine("section '.data' data readable writeable");
-        foreach (var (label, value) in _stringLiterals) _sb.AppendLine($"    {label} db {FormatStringForFasm(value)}");
-        _sb.AppendLine();
-        _sb.AppendLine("section '.text' code readable executable");
-        _sb.AppendLine();
-        _sb.AppendLine("start:");
-        _sb.AppendLine("    call _main");
-        _sb.AppendLine("    mov ebx, eax");
-        _sb.AppendLine("    push ebx");
-        _sb.AppendLine("    call [ExitProcess]");
-        _sb.AppendLine();
+        _fasmWriter.WritePreamble(_builder);
+        _fasmWriter.WriteDataSection(_builder, _stringLiterals);
+        _fasmWriter.WriteTextSectionHeader(_builder);
+        _fasmWriter.WriteEntryPoint(_builder);
 
         foreach (var function in _program.Functions.Where(f => f.Body != null))
         {
             GenerateFunction(function);
-            _sb.AppendLine();
+            _builder.AppendBlankLine();
         }
 
-        GenerateImportDataSection();
+        _fasmWriter.WriteImportDataSection(_builder, _program, _externalFunctions);
 
-        return _sb.ToString();
-    }
-
-    private void GenerateImportDataSection()
-    {
-        _sb.AppendLine("section '.idata' import data readable");
-        _sb.AppendLine();
-
-        var libraries = new Dictionary<string, List<string>>
-        {
-            { "kernel32.dll", new List<string> { "ExitProcess" } },
-            { "msvcrt.dll", new List<string> { "printf" } }
-        };
-
-        foreach (var import in _program.Imports)
-        {
-            if (!libraries.ContainsKey(import.LibraryName)) libraries[import.LibraryName] = new List<string>();
-        }
-
-        foreach (var funcName in _externalFunctions)
-        {
-            bool found = false;
-            foreach (var import in _program.Imports)
-            {
-                if (import.LibraryName != "kernel32.dll" && import.LibraryName != "msvcrt.dll")
-                {
-                    libraries[import.LibraryName].Add(funcName);
-                    found = true;
-                    break;
-                }
-            }
-            if (!found && funcName != "printf")
-            {
-                if (!libraries.ContainsKey("user32.dll")) libraries["user32.dll"] = new List<string>();
-                if (!libraries["user32.dll"].Contains(funcName)) libraries["user32.dll"].Add(funcName);
-            }
-        }
-
-        var libDefs = libraries.Keys.Select(lib => $"{lib.Split('.')[0]},'{lib}'");
-        _sb.AppendLine($"    library {string.Join(", ", libDefs)}");
-        _sb.AppendLine();
-
-        foreach (var (libName, functions) in libraries)
-        {
-            if (functions.Count > 0)
-            {
-                var libAlias = libName.Split('.')[0];
-                var importDefs = functions.Distinct().Select(f => $"{f},'{f}'");
-                _sb.AppendLine($"    import {libAlias}, {string.Join(", ", importDefs)}");
-            }
-        }
-    }
-    private string FormatStringForFasm(string value)
-    {
-        var parts = new List<string>();
-        var currentString = new StringBuilder();
-
-        foreach (char c in value)
-        {
-            if (c is '\n' or '\t' or '\r' or '\'' or '"')
-            {
-                if (currentString.Length > 0)
-                {
-                    parts.Add($"'{currentString}'");
-                    currentString.Clear();
-                }
-                parts.Add(((byte)c).ToString());
-            }
-            else currentString.Append(c);
-        }
-
-        if (currentString.Length > 0) parts.Add($"'{currentString}'");
-        parts.Add("0");
-        return string.Join(", ", parts);
+        return _builder.ToString();
     }
 
     private void FindAllStringLiterals(AstNode node)
     {
-        if (node is StringLiteralNode str && !_stringLiterals.ContainsValue(str.Value)) _stringLiterals.Add(str.Label, str.Value);
+        if (node is StringLiteralNode str && !_stringLiterals.ContainsValue(str.Value))
+        {
+            _stringLiterals.Add(str.Label, str.Value);
+        }
+
         foreach (var property in node.GetType().GetProperties())
         {
             if (property.Name == "Parent") continue;
-            if (property.GetValue(node) is AstNode child) FindAllStringLiterals(child);
-            else if (property.GetValue(node) is IEnumerable<AstNode> children) foreach (var c in children) FindAllStringLiterals(c);
+
+            if (property.GetValue(node) is AstNode child)
+            {
+                FindAllStringLiterals(child);
+            }
+            else if (property.GetValue(node) is IEnumerable<AstNode> children)
+            {
+                foreach (var c in children)
+                {
+                    FindAllStringLiterals(c);
+                }
+            }
         }
-    }
-
-    private void AppendAsm(string? instruction, string? comment = null)
-    {
-        var line = instruction == null ? "" : $"    {instruction}";
-        _sb.AppendLine(line.PadRight(35) + (comment == null ? "" : $"; {comment}"));
-    }
-
-    private void GenerateFunctionEpilogue()
-    {
-        AppendAsm("pop edi");
-        AppendAsm("pop esi");
-        AppendAsm("pop ebx");
-        AppendAsm("mov esp, ebp");
-        AppendAsm("pop ebp");
-        AppendAsm("ret");
     }
 
     private void GenerateFunction(FunctionDeclarationNode function)
@@ -848,18 +807,18 @@ public class Generator
             ? $"_{function.OwnerStructName}_{function.Name}"
             : $"_{function.Name}";
 
-        _sb.AppendLine($"{mangledName}:");
-        AppendAsm("push ebp");
-        AppendAsm("mov ebp, esp");
-        AppendAsm("push ebx", "Preserve non-volatile registers");
-        AppendAsm("push esi");
-        AppendAsm("push edi");
-        _sb.AppendLine();
+        _builder.AppendLabel(mangledName);
+        _builder.AppendInstruction("push ebp");
+        _builder.AppendInstruction("mov ebp, esp");
+        _builder.AppendInstruction("push ebx", "Preserve non-volatile registers");
+        _builder.AppendInstruction("push esi");
+        _builder.AppendInstruction("push edi");
+        _builder.AppendBlankLine();
 
         int totalLocalSize = _currentSymbols.TotalLocalSize;
         if (totalLocalSize > 0)
         {
-            AppendAsm($"sub esp, {totalLocalSize}", $"Allocate space for all local variables");
+            _builder.AppendInstruction($"sub esp, {totalLocalSize}", "Allocate space for all local variables");
         }
 
         if (function.Body != null)
@@ -867,9 +826,19 @@ public class Generator
             GenerateStatement(function.Body);
         }
 
-        _sb.AppendLine();
-        AppendAsm(null, "Implicit return cleanup");
+        _builder.AppendBlankLine();
+        _builder.AppendInstruction(null, "Implicit return cleanup");
         GenerateFunctionEpilogue();
+    }
+
+    private void GenerateFunctionEpilogue()
+    {
+        _builder.AppendInstruction("pop edi");
+        _builder.AppendInstruction("pop esi");
+        _builder.AppendInstruction("pop ebx");
+        _builder.AppendInstruction("mov esp, ebp");
+        _builder.AppendInstruction("pop ebp");
+        _builder.AppendInstruction("ret");
     }
 
     private void GenerateReturn(ReturnStatementNode ret)
@@ -881,29 +850,29 @@ public class Generator
     private void GenerateWhile(WhileStatementNode w)
     {
         int i = _labelCounter++;
-        _sb.AppendLine($"_while_start_{i}:");
+        _builder.AppendLabel($"_while_start_{i}");
         GenerateExpression(w.Condition);
-        AppendAsm("cmp eax, 0");
-        AppendAsm($"je _while_end_{i}");
+        _builder.AppendInstruction("cmp eax, 0");
+        _builder.AppendInstruction($"je _while_end_{i}");
         GenerateStatement(w.Body);
-        AppendAsm($"jmp _while_start_{i}");
-        _sb.AppendLine($"_while_end_{i}:");
+        _builder.AppendInstruction($"jmp _while_start_{i}");
+        _builder.AppendLabel($"_while_end_{i}");
     }
 
     private void GenerateIf(IfStatementNode i)
     {
         int idx = _labelCounter++;
         GenerateExpression(i.Condition);
-        AppendAsm("cmp eax, 0");
-        AppendAsm(i.ElseBody != null ? $"je _if_else_{idx}" : $"je _if_end_{idx}");
+        _builder.AppendInstruction("cmp eax, 0");
+        _builder.AppendInstruction(i.ElseBody != null ? $"je _if_else_{idx}" : $"je _if_end_{idx}");
         GenerateStatement(i.ThenBody);
         if (i.ElseBody != null)
         {
-            AppendAsm($"jmp _if_end_{idx}");
-            _sb.AppendLine($"_if_else_{idx}:");
+            _builder.AppendInstruction($"jmp _if_end_{idx}");
+            _builder.AppendLabel($"_if_else_{idx}");
             GenerateStatement(i.ElseBody);
         }
-        _sb.AppendLine($"_if_end_{idx}:");
+        _builder.AppendLabel($"_if_end_{idx}");
     }
 
     private void GenerateStatement(StatementNode statement)
@@ -941,8 +910,8 @@ public class Generator
                             var totalOffset = structBaseOffset + currentMemberOffset;
 
                             GenerateExpression(valueExpr);
-                            if (memberSize == 1) AppendAsm($"mov byte [ebp + {totalOffset}], al", $"Init member {member.Name.Value}");
-                            else AppendAsm($"mov dword [ebp + {totalOffset}], eax", $"Init member {member.Name.Value}");
+                            if (memberSize == 1) _builder.AppendInstruction($"mov byte [ebp + {totalOffset}], al", $"Init member {member.Name.Value}");
+                            else _builder.AppendInstruction($"mov dword [ebp + {totalOffset}], eax", $"Init member {member.Name.Value}");
 
                             currentMemberOffset += memberSize;
                         }
@@ -969,7 +938,7 @@ public class Generator
                     if (_currentSymbols.TryGetSymbol(varExpr.Identifier.Value, out var offset, out _))
                     {
                         string sign = offset > 0 ? "+" : "";
-                        AppendAsm($"lea eax, [ebp {sign} {offset}]", $"Get address of var/param {varExpr.Identifier.Value}");
+                        _builder.AppendInstruction($"lea eax, [ebp {sign} {offset}]", $"Get address of var/param {varExpr.Identifier.Value}");
                     }
                     else if (_currentMethodOwnerStruct != null)
                     {
@@ -977,10 +946,10 @@ public class Generator
                         {
                             var (memberOffset, _) = _typeManager.GetMemberInfo(_currentMethodOwnerStruct, varExpr.Identifier.Value);
                             _currentSymbols.TryGetSymbol("this", out var thisOffset, out _);
-                            AppendAsm($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
+                            _builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
                             if (memberOffset > 0)
                             {
-                                AppendAsm($"add eax, {memberOffset}", $"Offset for implicit this->{varExpr.Identifier.Value}");
+                                _builder.AppendInstruction($"add eax, {memberOffset}", $"Offset for implicit this->{varExpr.Identifier.Value}");
                             }
                         }
                         catch (InvalidOperationException)
@@ -1020,7 +989,7 @@ public class Generator
                     var (memberOffset, _) = _typeManager.GetMemberInfo(baseStructType, memberAccess.Member.Value);
                     if (memberOffset > 0)
                     {
-                        AppendAsm($"add eax, {memberOffset}", $"Offset for member {memberAccess.Operator.Value}{memberAccess.Member.Value}");
+                        _builder.AppendInstruction($"add eax, {memberOffset}", $"Offset for member {memberAccess.Operator.Value}{memberAccess.Member.Value}");
                     }
                     break;
                 }
@@ -1035,8 +1004,8 @@ public class Generator
     {
         switch (expression)
         {
-            case IntegerLiteralNode literal: AppendAsm($"mov eax, {literal.Value}"); break;
-            case StringLiteralNode str: AppendAsm($"mov eax, {str.Label}"); break;
+            case IntegerLiteralNode literal: _builder.AppendInstruction($"mov eax, {literal.Value}"); break;
+            case StringLiteralNode str: _builder.AppendInstruction($"mov eax, {str.Label}"); break;
             case VariableExpressionNode varExpr:
                 _currentSymbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out _);
                 if (offset > 0)
@@ -1044,20 +1013,20 @@ public class Generator
                     var exprType = _typeManager.GetExpressionType(varExpr, _currentSymbols, _currentMethodOwnerStruct);
                     if (_typeManager.IsStruct(exprType))
                     {
-                        AppendAsm($"lea eax, [ebp + {offset}]");
+                        _builder.AppendInstruction($"lea eax, [ebp + {offset}]");
                     }
                     else
                     {
-                        if (_typeManager.GetSizeOfType(exprType) == 1) AppendAsm($"movzx eax, byte [ebp + {offset}]");
-                        else AppendAsm($"mov eax, [ebp + {offset}]");
+                        if (_typeManager.GetSizeOfType(exprType) == 1) _builder.AppendInstruction($"movzx eax, byte [ebp + {offset}]");
+                        else _builder.AppendInstruction($"mov eax, [ebp + {offset}]");
                     }
                 }
                 else
                 {
                     GenerateLValueAddress(varExpr);
                     var type = _typeManager.GetExpressionType(varExpr, _currentSymbols, _currentMethodOwnerStruct);
-                    if (_typeManager.GetSizeOfType(type) == 1) AppendAsm("movzx eax, byte [eax]");
-                    else AppendAsm("mov eax, [eax]");
+                    if (_typeManager.GetSizeOfType(type) == 1) _builder.AppendInstruction("movzx eax, byte [eax]");
+                    else _builder.AppendInstruction("mov eax, [eax]");
                 }
                 break;
             case UnaryExpressionNode u:
@@ -1065,20 +1034,20 @@ public class Generator
                 else
                 {
                     GenerateExpression(u.Right);
-                    if (u.Operator.Type == TokenType.Minus) AppendAsm("neg eax");
+                    if (u.Operator.Type == TokenType.Minus) _builder.AppendInstruction("neg eax");
                     else if (u.Operator.Type == TokenType.Star)
                     {
                         var type = _typeManager.GetExpressionType(u, _currentSymbols, _currentMethodOwnerStruct);
-                        if (_typeManager.GetSizeOfType(type) == 1) AppendAsm("movzx eax, byte [eax]");
-                        else AppendAsm("mov eax, [eax]");
+                        if (_typeManager.GetSizeOfType(type) == 1) _builder.AppendInstruction("movzx eax, byte [eax]");
+                        else _builder.AppendInstruction("mov eax, [eax]");
                     }
                 }
                 break;
             case MemberAccessExpressionNode m:
                 GenerateLValueAddress(m);
                 var memberType = _typeManager.GetExpressionType(m, _currentSymbols, _currentMethodOwnerStruct);
-                if (_typeManager.GetSizeOfType(memberType) == 1) AppendAsm("movzx eax, byte [eax]");
-                else AppendAsm("mov eax, [eax]");
+                if (_typeManager.GetSizeOfType(memberType) == 1) _builder.AppendInstruction("movzx eax, byte [eax]");
+                else _builder.AppendInstruction("mov eax, [eax]");
                 break;
             case AssignmentExpressionNode assign:
                 {
@@ -1088,28 +1057,28 @@ public class Generator
                     if (isStructAssign)
                     {
                         GenerateLValueAddress(assign.Left);
-                        AppendAsm("push eax");
+                        _builder.AppendInstruction("push eax");
                         GenerateExpression(assign.Right);
-                        AppendAsm("pop edi");
-                        AppendAsm("mov esi, eax");
+                        _builder.AppendInstruction("pop edi");
+                        _builder.AppendInstruction("mov esi, eax");
 
                         int size = _typeManager.GetSizeOfType(lValueType);
-                        AppendAsm($"mov ecx, {size / 4}");
-                        AppendAsm("rep movsd");
+                        _builder.AppendInstruction($"mov ecx, {size / 4}");
+                        _builder.AppendInstruction("rep movsd");
                         if (size % 4 > 0)
                         {
-                            AppendAsm($"mov ecx, {size % 4}");
-                            AppendAsm("rep movsb");
+                            _builder.AppendInstruction($"mov ecx, {size % 4}");
+                            _builder.AppendInstruction("rep movsb");
                         }
                     }
                     else
                     {
                         GenerateLValueAddress(assign.Left);
-                        AppendAsm("push eax");
+                        _builder.AppendInstruction("push eax");
                         GenerateExpression(assign.Right);
-                        AppendAsm("pop ecx");
-                        if (_typeManager.GetSizeOfType(lValueType) == 1) AppendAsm("mov [ecx], al");
-                        else AppendAsm("mov [ecx], eax");
+                        _builder.AppendInstruction("pop ecx");
+                        if (_typeManager.GetSizeOfType(lValueType) == 1) _builder.AppendInstruction("mov [ecx], al");
+                        else _builder.AppendInstruction("mov [ecx], eax");
                     }
                     break;
                 }
@@ -1135,14 +1104,14 @@ public class Generator
                 GenerateLValueAddress(arg);
                 for (int offset = argSize - 4; offset >= 0; offset -= 4)
                 {
-                    AppendAsm($"push dword [eax + {offset}]");
+                    _builder.AppendInstruction($"push dword [eax + {offset}]");
                 }
                 totalArgSize += argSize;
             }
             else
             {
                 GenerateExpression(arg);
-                AppendAsm("push eax");
+                _builder.AppendInstruction("push eax");
                 totalArgSize += 4;
             }
         }
@@ -1157,7 +1126,7 @@ public class Generator
                 throw new InvalidOperationException($"Cannot access private method '{baseStructType}::{memberAccess.Member.Value}'.");
 
             GenerateLValueAddress(memberAccess.Left);
-            AppendAsm("push eax", "Push 'this' pointer");
+            _builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
             calleeTarget = $"_{baseStructType}_{memberAccess.Member.Value}";
         }
@@ -1168,30 +1137,150 @@ public class Generator
         }
         else throw new NotSupportedException($"Unsupported callee type for call: {callExpr.Callee.GetType().Name}");
 
-        AppendAsm($"call {calleeTarget}");
+        _builder.AppendInstruction($"call {calleeTarget}");
 
-        if (totalArgSize > 0) AppendAsm($"add esp, {totalArgSize}", "Clean up args");
+        if (totalArgSize > 0) _builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
     }
 
     private void GenerateBinaryExpression(BinaryExpressionNode binExpr)
     {
         GenerateExpression(binExpr.Right);
-        AppendAsm("push eax");
+        _builder.AppendInstruction("push eax");
         GenerateExpression(binExpr.Left);
-        AppendAsm("pop ecx");
+        _builder.AppendInstruction("pop ecx");
 
         switch (binExpr.Operator.Type)
         {
-            case TokenType.Plus: AppendAsm("add eax, ecx"); break;
-            case TokenType.Minus: AppendAsm("sub eax, ecx"); break;
-            case TokenType.Star: AppendAsm("imul eax, ecx"); break;
-            case TokenType.Slash: AppendAsm("cdq"); AppendAsm("idiv ecx"); break;
-            case TokenType.DoubleEquals: AppendAsm("cmp eax, ecx"); AppendAsm("sete al"); AppendAsm("movzx eax, al"); break;
-            case TokenType.NotEquals: AppendAsm("cmp eax, ecx"); AppendAsm("setne al"); AppendAsm("movzx eax, al"); break;
-            case TokenType.LessThan: AppendAsm("cmp eax, ecx"); AppendAsm("setl al"); AppendAsm("movzx eax, al"); break;
-            case TokenType.GreaterThan: AppendAsm("cmp eax, ecx"); AppendAsm("setg al"); AppendAsm("movzx eax, al"); break;
+            case TokenType.Plus: _builder.AppendInstruction("add eax, ecx"); break;
+            case TokenType.Minus: _builder.AppendInstruction("sub eax, ecx"); break;
+            case TokenType.Star: _builder.AppendInstruction("imul eax, ecx"); break;
+            case TokenType.Slash: _builder.AppendInstruction("cdq"); _builder.AppendInstruction("idiv ecx"); break;
+            case TokenType.DoubleEquals: _builder.AppendInstruction("cmp eax, ecx"); _builder.AppendInstruction("sete al"); _builder.AppendInstruction("movzx eax, al"); break;
+            case TokenType.NotEquals: _builder.AppendInstruction("cmp eax, ecx"); _builder.AppendInstruction("setne al"); _builder.AppendInstruction("movzx eax, al"); break;
+            case TokenType.LessThan: _builder.AppendInstruction("cmp eax, ecx"); _builder.AppendInstruction("setl al"); _builder.AppendInstruction("movzx eax, al"); break;
+            case TokenType.GreaterThan: _builder.AppendInstruction("cmp eax, ecx"); _builder.AppendInstruction("setg al"); _builder.AppendInstruction("movzx eax, al"); break;
             default: throw new NotImplementedException($"Op: {binExpr.Operator.Type}");
         }
+    }
+}
+</file>
+
+<file path="Generator\FasmWriter.cs">
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+
+namespace CTilde;
+
+public class FasmWriter
+{
+    public void WritePreamble(AssemblyBuilder builder)
+    {
+        builder.AppendDirective("format PE GUI 4.0");
+        builder.AppendDirective("entry start");
+        builder.AppendBlankLine();
+        builder.AppendDirective("include 'win32a.inc'");
+        builder.AppendBlankLine();
+    }
+
+    public void WriteDataSection(AssemblyBuilder builder, Dictionary<string, string> stringLiterals)
+    {
+        builder.AppendDirective("section '.data' data readable writeable");
+        foreach (var (label, value) in stringLiterals)
+        {
+            builder.AppendData(label, FormatStringForFasm(value));
+        }
+        builder.AppendBlankLine();
+    }
+
+    public void WriteTextSectionHeader(AssemblyBuilder builder)
+    {
+        builder.AppendDirective("section '.text' code readable executable");
+        builder.AppendBlankLine();
+    }
+
+    public void WriteEntryPoint(AssemblyBuilder builder)
+    {
+        builder.AppendLabel("start");
+        builder.AppendInstruction("call _main");
+        builder.AppendInstruction("mov ebx, eax");
+        builder.AppendInstruction("push ebx");
+        builder.AppendInstruction("call [ExitProcess]");
+        builder.AppendBlankLine();
+    }
+
+    public void WriteImportDataSection(AssemblyBuilder builder, ProgramNode program, IEnumerable<string> externalFunctions)
+    {
+        builder.AppendDirective("section '.idata' import data readable");
+        builder.AppendBlankLine();
+
+        var libraries = new Dictionary<string, List<string>>
+        {
+            { "kernel32.dll", new List<string> { "ExitProcess" } },
+            { "msvcrt.dll", new List<string> { "printf" } }
+        };
+
+        foreach (var import in program.Imports)
+        {
+            if (!libraries.ContainsKey(import.LibraryName)) libraries[import.LibraryName] = new List<string>();
+        }
+
+        foreach (var funcName in externalFunctions)
+        {
+            bool found = false;
+            foreach (var import in program.Imports)
+            {
+                if (import.LibraryName != "kernel32.dll" && import.LibraryName != "msvcrt.dll")
+                {
+                    libraries[import.LibraryName].Add(funcName);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && funcName != "printf")
+            {
+                if (!libraries.ContainsKey("user32.dll")) libraries["user32.dll"] = new List<string>();
+                if (!libraries["user32.dll"].Contains(funcName)) libraries["user32.dll"].Add(funcName);
+            }
+        }
+
+        var libDefs = libraries.Keys.Select(lib => $"{lib.Split('.')[0]},'{lib}'");
+        builder.AppendDirective($"    library {string.Join(", ", libDefs)}");
+        builder.AppendBlankLine();
+
+        foreach (var (libName, functions) in libraries)
+        {
+            if (functions.Count > 0)
+            {
+                var libAlias = libName.Split('.')[0];
+                var importDefs = functions.Distinct().Select(f => $"{f},'{f}'");
+                builder.AppendDirective($"    import {libAlias}, {string.Join(", ", importDefs)}");
+            }
+        }
+    }
+
+    private string FormatStringForFasm(string value)
+    {
+        var parts = new List<string>();
+        var currentString = new StringBuilder();
+
+        foreach (char c in value)
+        {
+            if (c is '\n' or '\t' or '\r' or '\'' or '"')
+            {
+                if (currentString.Length > 0)
+                {
+                    parts.Add($"'{currentString}'");
+                    currentString.Clear();
+                }
+                parts.Add(((byte)c).ToString());
+            }
+            else currentString.Append(c);
+        }
+
+        if (currentString.Length > 0) parts.Add($"'{currentString}'");
+        parts.Add("0");
+        return string.Join(", ", parts);
     }
 }
 </file>
@@ -1410,7 +1499,8 @@ public:
     int fontSize;
     Color color;
 
-    void init(int startX, int startY, int newText, int fSize, Color newColor) {
+    void init(int startX, int startY, int newText, int fSize, Color newColor) 
+    {
         x = startX;
         y = startY;
         text = newText;
@@ -1418,16 +1508,17 @@ public:
         color = newColor;
     }
 
-    void draw() {
+    void draw() 
+    {
         DrawText(text, x, y, fontSize, color);
     }
     
-    void move_right() {
-        //x = x + 1;
+    void move_right() 
+    {
+        x = x + 1;
     }
 };
 
-// --- Raylib Function Prototypes ---
 void InitWindow(int width, int height, int title);
 int WindowShouldClose();
 void BeginDrawing();
@@ -1436,21 +1527,23 @@ void ClearBackground(Color color);
 void DrawText(int text, int posX, int posY, int fontSize, Color color);
 void CloseWindow();
 
-int main() {
+int main() 
+{
     int screenWidth = 800;
     int screenHeight = 600;
 
     Color rayWhite = {245, 245, 245, 255};
     Color maroon = {190, 33, 55, 255};
 
-    struct TextObject myText;
+    TextObject myText;
     // Initialize the object using its public method.
     // Direct access like `myText.x = 140;` would fail because x is private.
     myText.init(140, 275, "Encapsulation!", 20, maroon);
 
     InitWindow(screenWidth, screenHeight, "CTilde with Access Specifiers!");
 
-    while (WindowShouldClose() == 0) {
+    while (WindowShouldClose() == 0) 
+    {
         BeginDrawing();
         ClearBackground(rayWhite);
         

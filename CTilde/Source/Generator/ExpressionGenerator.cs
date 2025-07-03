@@ -9,6 +9,7 @@ public class ExpressionGenerator
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
     private TypeManager TypeManager => _context.TypeManager;
+    private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
     private ProgramNode Program => _context.Program;
     private SymbolTable CurrentSymbols => _context.CurrentSymbols;
     private CompilationUnitNode CurrentCompilationUnit => _context.CurrentCompilationUnit;
@@ -57,7 +58,7 @@ public class ExpressionGenerator
                 }
             case MemberAccessExpressionNode memberAccess:
                 {
-                    var leftType = TypeManager.GetExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                    var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                     string baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
 
                     var structDef = TypeManager.FindStruct(baseStructType) ?? throw new InvalidOperationException($"Could not find struct definition for '{baseStructType}'");
@@ -136,7 +137,7 @@ public class ExpressionGenerator
                     {
                         // Generate L-value address and then load its value
                         GenerateLValueAddress(varExpr); // This will handle the 'this' offset and member offset
-                        var type = TypeManager.GetExpressionType(varExpr, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                        var type = SemanticAnalyzer.AnalyzeExpressionType(varExpr, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                         if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
                         else Builder.AppendInstruction("mov eax, [eax]");
                     }
@@ -155,7 +156,7 @@ public class ExpressionGenerator
                     if (u.Operator.Type == TokenType.Minus) Builder.AppendInstruction("neg eax");
                     else if (u.Operator.Type == TokenType.Star)
                     {
-                        var type = TypeManager.GetExpressionType(u, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                        var type = SemanticAnalyzer.AnalyzeExpressionType(u, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                         if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
                         else Builder.AppendInstruction("mov eax, [eax]");
                     }
@@ -163,7 +164,7 @@ public class ExpressionGenerator
                 break;
             case MemberAccessExpressionNode m:
                 GenerateLValueAddress(m);
-                var memberType = TypeManager.GetExpressionType(m, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                 if (TypeManager.GetSizeOfType(memberType, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
                 else Builder.AppendInstruction("mov eax, [eax]");
                 break;
@@ -191,7 +192,7 @@ public class ExpressionGenerator
                     {
                         targetNameForError = memberTarget.Member.Value;
                         // It's an explicit member access (e.g., 'obj.member = ...')
-                        var ownerType = TypeManager.GetExpressionType(memberTarget.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                        var ownerType = SemanticAnalyzer.AnalyzeExpressionType(memberTarget.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                         string ownerStructFQN = ownerType.TrimEnd('*');
                         isConstAssignment = TypeManager.IsMemberConst(ownerStructFQN, memberTarget.Member.Value);
                     }
@@ -201,7 +202,7 @@ public class ExpressionGenerator
                         throw new InvalidOperationException($"Cannot assign to constant target '{targetNameForError ?? assign.Left.ToString()}'.");
                     }
 
-                    var lValueType = TypeManager.GetExpressionType(assign.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                    var lValueType = SemanticAnalyzer.AnalyzeExpressionType(assign.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                     var isStructAssign = TypeManager.IsStruct(lValueType);
 
                     if (isStructAssign)
@@ -274,7 +275,7 @@ public class ExpressionGenerator
 
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
-            var argType = TypeManager.GetExpressionType(arg, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+            var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
             var isStruct = TypeManager.IsStruct(argType);
 
             if (isStruct)
@@ -297,7 +298,7 @@ public class ExpressionGenerator
 
         if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
         {
-            var leftType = TypeManager.GetExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+            var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
             var (structDef, qualifiedStructName) = TypeManager.GetStructTypeFromFullName(leftType.TrimEnd('*'));
 
             var method = TypeManager.ResolveMethod(structDef, memberAccess.Member.Value);

@@ -8,6 +8,7 @@ public class CodeGenerator
 {
     internal ProgramNode Program { get; }
     internal TypeManager TypeManager { get; }
+    internal SemanticAnalyzer SemanticAnalyzer { get; }
     internal AssemblyBuilder Builder { get; } = new();
 
     private int _labelIdCounter;
@@ -25,6 +26,7 @@ public class CodeGenerator
     {
         Program = program;
         TypeManager = new TypeManager(program);
+        SemanticAnalyzer = new SemanticAnalyzer(TypeManager);
 
         ExpressionGenerator = new ExpressionGenerator(this);
         _statementGenerator = new StatementGenerator(this);

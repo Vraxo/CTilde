@@ -7,22 +7,26 @@ namespace CTilde;
 
 public class Parser
 {
-    private readonly List<Token> _tokens;
-    private int _position;
-    private int _stringLabelCounter;
-    private string? _currentNamespace;
-    private readonly List<ImportDirectiveNode> _imports = new();
+    internal readonly List<Token> _tokens;
+    internal int _position;
+    internal string? _currentNamespace;
+    internal readonly List<ImportDirectiveNode> _imports = new();
+
+    private readonly ExpressionParser _expressionParser;
+    private readonly StatementParser _statementParser;
 
     public Parser(List<Token> tokens)
     {
         _tokens = tokens;
         _position = 0;
+        _expressionParser = new ExpressionParser(this);
+        _statementParser = new StatementParser(this, _expressionParser);
     }
 
-    private Token Current => _position < _tokens.Count ? _tokens[_position] : new(TokenType.Unknown, string.Empty);
-    private Token Peek(int offset) => _position + offset < _tokens.Count ? _tokens[_position + offset] : new(TokenType.Unknown, string.Empty);
+    internal Token Current => _position < _tokens.Count ? _tokens[_position] : new(TokenType.Unknown, string.Empty);
+    internal Token Peek(int offset) => _position + offset < _tokens.Count ? _tokens[_position + offset] : new(TokenType.Unknown, string.Empty);
 
-    private Token Eat(TokenType expectedType)
+    internal Token Eat(TokenType expectedType)
     {
         var currentToken = Current;
         if (currentToken.Type == expectedType)
@@ -32,6 +36,8 @@ public class Parser
         }
         throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type} ('{currentToken.Value}') at position {_position}");
     }
+
+    internal void AdvancePosition(int amount) => _position += amount;
 
     private string MangleOperator(string op)
     {
@@ -298,14 +304,14 @@ public class Parser
             var arguments = new List<ExpressionNode>();
             if (Current.Type != TokenType.RightParen)
             {
-                do { arguments.Add(ParseExpression()); }
+                do { arguments.Add(_expressionParser.ParseExpression()); }
                 while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
             }
             Eat(TokenType.RightParen);
             baseInitializer = new BaseInitializerNode(arguments);
         }
 
-        var body = ParseBlockStatement();
+        var body = _statementParser.ParseBlockStatement();
         return new ConstructorDeclarationNode(ownerStructName, _currentNamespace, access, parameters, baseInitializer, body);
     }
 
@@ -318,7 +324,7 @@ public class Parser
         Eat(TokenType.LeftParen);
         Eat(TokenType.RightParen);
 
-        var body = ParseBlockStatement();
+        var body = _statementParser.ParseBlockStatement();
         return new DestructorDeclarationNode(ownerStructName, _currentNamespace, access, isVirtual, body);
     }
 
@@ -346,7 +352,7 @@ public class Parser
         }
     }
 
-    private (Token type, int pointerLevel) ParseType()
+    internal (Token type, int pointerLevel) ParseType()
     {
         Token typeToken;
         string? namespaceQualifier = null;
@@ -423,7 +429,7 @@ public class Parser
         StatementNode? body = null;
         if (Current.Type == TokenType.LeftBrace)
         {
-            body = ParseBlockStatement();
+            body = _statementParser.ParseBlockStatement();
         }
         else
         {
@@ -431,308 +437,5 @@ public class Parser
         }
 
         return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName, accessLevel, isVirtual, isOverride, namespaceName);
-    }
-
-    private BlockStatementNode ParseBlockStatement()
-    {
-        Eat(TokenType.LeftBrace);
-        var statements = new List<StatementNode>();
-        while (Current.Type != TokenType.RightBrace) statements.Add(ParseStatement());
-        Eat(TokenType.RightBrace);
-        return new BlockStatementNode(statements);
-    }
-
-    private StatementNode ParseStatement()
-    {
-        if (Current.Type == TokenType.Keyword)
-        {
-            switch (Current.Value)
-            {
-                case "return": return ParseReturnStatement();
-                case "if": return ParseIfStatement();
-                case "while": return ParseWhileStatement();
-                case "delete": return ParseDeleteStatement();
-                case "const":
-                case "int":
-                case "char":
-                case "struct":
-                    return ParseDeclarationStatement();
-            }
-        }
-
-        bool isDeclaration = false;
-        if (Current.Type == TokenType.Identifier || (Current.Type == TokenType.Keyword && (Current.Value == "const" || Current.Value == "int" || Current.Value == "char" || Current.Value == "struct")))
-        {
-            int tempPos = _position;
-            try
-            {
-                if (Current.Type == TokenType.Keyword && Current.Value == "const") _position++;
-                ParseType();
-                if (Current.Type == TokenType.Identifier) isDeclaration = true;
-            }
-            finally { _position = tempPos; }
-        }
-
-        if (isDeclaration) return ParseDeclarationStatement();
-        if (Current.Type == TokenType.LeftBrace) return ParseBlockStatement();
-
-        var expression = ParseExpression();
-        Eat(TokenType.Semicolon);
-        return new ExpressionStatementNode(expression);
-    }
-
-    private DeleteStatementNode ParseDeleteStatement()
-    {
-        Eat(TokenType.Keyword); // delete
-        var expr = ParseExpression();
-        Eat(TokenType.Semicolon);
-        return new DeleteStatementNode(expr);
-    }
-
-    private IfStatementNode ParseIfStatement()
-    {
-        Eat(TokenType.Keyword);
-        Eat(TokenType.LeftParen);
-        var condition = ParseExpression();
-        Eat(TokenType.RightParen);
-        var thenBody = ParseStatement();
-        StatementNode? elseBody = null;
-        if (Current.Type == TokenType.Keyword && Current.Value == "else")
-        {
-            Eat(TokenType.Keyword);
-            elseBody = ParseStatement();
-        }
-        return new IfStatementNode(condition, thenBody, elseBody);
-    }
-
-    private StatementNode ParseDeclarationStatement()
-    {
-        bool isConst = false;
-        if (Current.Type == TokenType.Keyword && Current.Value == "const")
-        {
-            isConst = true;
-            Eat(TokenType.Keyword);
-        }
-
-        var (typeToken, pointerLevel) = ParseType();
-        var identifier = Eat(TokenType.Identifier);
-
-        ExpressionNode? initializer = null;
-        List<ExpressionNode>? ctorArgs = null;
-
-        if (Current.Type == TokenType.Assignment)
-        {
-            Eat(TokenType.Assignment);
-            if (Current.Type == TokenType.LeftBrace) initializer = ParseInitializerListExpression();
-            else initializer = ParseExpression();
-        }
-        else if (Current.Type == TokenType.LeftParen)
-        {
-            Eat(TokenType.LeftParen);
-            ctorArgs = new List<ExpressionNode>();
-            if (Current.Type != TokenType.RightParen)
-            {
-                do { ctorArgs.Add(ParseExpression()); }
-                while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
-            }
-            Eat(TokenType.RightParen);
-        }
-        else if (isConst)
-        {
-            throw new InvalidOperationException($"Constant variable '{identifier.Value}' must be initialized.");
-        }
-        Eat(TokenType.Semicolon);
-        return new DeclarationStatementNode(isConst, typeToken, pointerLevel, identifier, initializer, ctorArgs);
-    }
-
-    private ExpressionNode ParseInitializerListExpression()
-    {
-        Eat(TokenType.LeftBrace);
-        var values = new List<ExpressionNode>();
-        if (Current.Type != TokenType.RightBrace)
-        {
-            do { values.Add(ParseExpression()); }
-            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
-        }
-        Eat(TokenType.RightBrace);
-        return new InitializerListExpressionNode(values);
-    }
-
-    private WhileStatementNode ParseWhileStatement()
-    {
-        Eat(TokenType.Keyword);
-        Eat(TokenType.LeftParen);
-        var condition = ParseExpression();
-        Eat(TokenType.RightParen);
-        var body = ParseStatement();
-        return new WhileStatementNode(condition, body);
-    }
-
-    private ReturnStatementNode ParseReturnStatement()
-    {
-        Eat(TokenType.Keyword);
-        ExpressionNode? expression = null;
-        if (Current.Type != TokenType.Semicolon) expression = ParseExpression();
-        Eat(TokenType.Semicolon);
-        return new ReturnStatementNode(expression);
-    }
-
-    private ExpressionNode ParseExpression() => ParseAssignmentExpression();
-
-    private ExpressionNode ParseAssignmentExpression()
-    {
-        var left = ParseEqualityExpression();
-        if (Current.Type == TokenType.Assignment)
-        {
-            Eat(TokenType.Assignment);
-            var right = ParseAssignmentExpression();
-            if (left is VariableExpressionNode or MemberAccessExpressionNode or UnaryExpressionNode) return new AssignmentExpressionNode(left, right);
-            throw new InvalidOperationException($"Invalid assignment target: {left.GetType().Name}");
-        }
-        return left;
-    }
-
-    private ExpressionNode ParseEqualityExpression()
-    {
-        var left = ParseRelationalExpression();
-        while (Current.Type is TokenType.DoubleEquals or TokenType.NotEquals)
-        {
-            var op = Current; _position++;
-            var right = ParseRelationalExpression();
-            left = new BinaryExpressionNode(left, op, right);
-        }
-        return left;
-    }
-
-    private ExpressionNode ParseRelationalExpression()
-    {
-        var left = ParseAdditiveExpression();
-        while (Current.Type is TokenType.LessThan or TokenType.GreaterThan)
-        {
-            var op = Current; _position++;
-            var right = ParseAdditiveExpression();
-            left = new BinaryExpressionNode(left, op, right);
-        }
-        return left;
-    }
-
-    private ExpressionNode ParseAdditiveExpression()
-    {
-        var left = ParseMultiplicativeExpression();
-        while (Current.Type is TokenType.Plus or TokenType.Minus)
-        {
-            var op = Current; _position++;
-            var right = ParseMultiplicativeExpression();
-            left = new BinaryExpressionNode(left, op, right);
-        }
-        return left;
-    }
-
-    private ExpressionNode ParseMultiplicativeExpression()
-    {
-        var left = ParseUnaryExpression();
-        while (Current.Type is TokenType.Star or TokenType.Slash)
-        {
-            var op = Current; _position++;
-            var right = ParseUnaryExpression();
-            left = new BinaryExpressionNode(left, op, right);
-        }
-        return left;
-    }
-
-    private ExpressionNode ParseUnaryExpression()
-    {
-        if (Current.Type == TokenType.Keyword && Current.Value == "new")
-        {
-            return ParseNewExpression();
-        }
-        if (Current.Type is TokenType.Minus or TokenType.Plus or TokenType.Star or TokenType.Ampersand)
-        {
-            var op = Current; _position++;
-            return new UnaryExpressionNode(op, ParseUnaryExpression());
-        }
-        return ParsePostfixExpression();
-    }
-
-    private NewExpressionNode ParseNewExpression()
-    {
-        Eat(TokenType.Keyword); // new
-        var typeToken = Eat(TokenType.Identifier);
-
-        Eat(TokenType.LeftParen);
-        var arguments = new List<ExpressionNode>();
-        if (Current.Type != TokenType.RightParen)
-        {
-            do { arguments.Add(ParseExpression()); }
-            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
-        }
-        Eat(TokenType.RightParen);
-
-        return new NewExpressionNode(typeToken, arguments);
-    }
-
-    private ExpressionNode ParsePostfixExpression()
-    {
-        var expr = ParsePrimaryExpression();
-        while (true)
-        {
-            if (Current.Type == TokenType.LeftParen)
-            {
-                Eat(TokenType.LeftParen);
-                var arguments = new List<ExpressionNode>();
-                if (Current.Type != TokenType.RightParen)
-                {
-                    do { arguments.Add(ParseExpression()); }
-                    while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
-                }
-                Eat(TokenType.RightParen);
-                expr = new CallExpressionNode(expr, arguments);
-            }
-            else if (Current.Type is TokenType.Dot or TokenType.Arrow)
-            {
-                var op = Current; _position++;
-                var member = Eat(TokenType.Identifier);
-                expr = new MemberAccessExpressionNode(expr, op, member);
-            }
-            else if (Current.Type == TokenType.DoubleColon)
-            {
-                Eat(TokenType.DoubleColon);
-                var member = Eat(TokenType.Identifier);
-                expr = new QualifiedAccessExpressionNode(expr, member);
-            }
-            else { break; }
-        }
-        return expr;
-    }
-
-    private ExpressionNode ParsePrimaryExpression()
-    {
-        if (Current.Type == TokenType.IntegerLiteral)
-        {
-            var token = Eat(TokenType.IntegerLiteral);
-            if (int.TryParse(token.Value, out int v)) return new IntegerLiteralNode(v);
-            throw new InvalidOperationException($"Could not parse int: {token.Value}");
-        }
-        if (Current.Type == TokenType.HexLiteral)
-        {
-            var token = Eat(TokenType.HexLiteral);
-            var hex = token.Value.StartsWith("0x") ? token.Value.Substring(2) : token.Value;
-            if (int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int v)) return new IntegerLiteralNode(v);
-            throw new InvalidOperationException($"Could not parse hex: {token.Value}");
-        }
-        if (Current.Type == TokenType.StringLiteral)
-        {
-            var token = Eat(TokenType.StringLiteral);
-            return new StringLiteralNode(token.Value, $"str{_stringLabelCounter++}");
-        }
-        if (Current.Type == TokenType.Identifier) return new VariableExpressionNode(Eat(TokenType.Identifier));
-        if (Current.Type == TokenType.LeftParen)
-        {
-            Eat(TokenType.LeftParen);
-            var expr = ParseExpression();
-            Eat(TokenType.RightParen);
-            return expr;
-        }
-        throw new InvalidOperationException($"Unexpected expression token: {Current.Type}");
     }
 }

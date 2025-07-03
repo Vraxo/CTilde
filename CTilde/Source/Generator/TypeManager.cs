@@ -144,7 +144,16 @@ public class TypeManager
                     resolvedParamType = ResolveTypeName(baseParamType, ctor.Namespace, ctorUnit) + pointerSuffix;
                 }
 
-                if (resolvedParamType != argTypeFqns[i])
+                string argumentType = argTypeFqns[i];
+                bool isMatch = resolvedParamType == argumentType;
+
+                // Allow implicit conversion from int literal to char parameter
+                if (!isMatch && resolvedParamType == "char" && argumentType == "int")
+                {
+                    isMatch = true;
+                }
+
+                if (!isMatch)
                 {
                     allParamsMatch = false;
                     break;

@@ -434,8 +434,11 @@ public class SemanticAnalyzer
     private string AnalyzeCallExpression(CallExpressionNode call, AnalysisContext context, List<Diagnostic> diagnostics)
     {
         FunctionDeclarationNode? func;
+        string funcNameForDiags;
+
         if (call.Callee is MemberAccessExpressionNode callMemberAccess) // Method call: myText.draw()
         {
+            funcNameForDiags = callMemberAccess.Member.Value;
             var ownerTypeName = AnalyzeExpressionType(callMemberAccess.Left, context, diagnostics).TrimEnd('*');
             if (ownerTypeName == "unknown") return "unknown";
 
@@ -472,6 +475,7 @@ public class SemanticAnalyzer
         }
         else // Global or namespaced function call: DrawText(), rl::DrawText()
         {
+            funcNameForDiags = (call.Callee as VariableExpressionNode)?.Identifier.Value ?? "function";
             try
             {
                 func = _functionResolver.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
@@ -483,13 +487,29 @@ public class SemanticAnalyzer
             }
         }
 
+        // ** VALIDATE ARGUMENT COUNT **
+        int expectedArgs = call.Callee is MemberAccessExpressionNode
+            ? func.Parameters.Count - 1 // Don't count implicit 'this'
+            : func.Parameters.Count;
+
+        if (call.Arguments.Count != expectedArgs)
+        {
+            diagnostics.Add(new Diagnostic(
+                context.CompilationUnit.FilePath,
+                $"Wrong number of arguments for call to '{funcNameForDiags}'. Expected {expectedArgs}, but got {call.Arguments.Count}.",
+                AstHelper.GetFirstToken(call).Line,
+                AstHelper.GetFirstToken(call).Column
+            ));
+        }
+
+
         // Analyze arguments for their types
         foreach (var arg in call.Arguments)
         {
             AnalyzeExpressionType(arg, context, diagnostics);
         }
 
-        // TODO: Validate argument count and types against function signature
+        // TODO: Validate argument types against function signature
 
         return AnalyzeFunctionReturnType(func, context);
     }
@@ -524,6 +544,51 @@ public class SemanticAnalyzer
             // Not an enum member, not a function. It's an error.
             diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Qualified access '{qualifier}::{memberName}' cannot be evaluated as a value directly. Only enum members or function calls are supported.", q.Member.Line, q.Member.Column));
             return "unknown";
+        }
+    }
+
+    public void AnalyzeReturnStatement(ReturnStatementNode ret, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var funcReturnType = AnalyzeFunctionReturnType(context.CurrentFunction, context);
+
+        if (ret.Expression == null)
+        {
+            if (funcReturnType != "void")
+            {
+                var token = AstHelper.GetFirstToken(ret);
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Non-void function '{context.CurrentFunction.Name}' must return a value.", token.Line, token.Column));
+            }
+            return;
+        }
+
+        if (funcReturnType == "void")
+        {
+            var token = AstHelper.GetFirstToken(ret);
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot return a value from void function '{context.CurrentFunction.Name}'.", token.Line, token.Column));
+            return;
+        }
+
+        var exprType = AnalyzeExpressionType(ret.Expression, context, diagnostics);
+
+        if (exprType != "unknown" && exprType != funcReturnType)
+        {
+            // Allow int to char conversion
+            bool isIntToCharLiteralConversion = funcReturnType == "char" && exprType == "int" && ret.Expression is IntegerLiteralNode;
+            if (!isIntToCharLiteralConversion)
+            {
+                var token = AstHelper.GetFirstToken(ret.Expression);
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert return type '{exprType}' to '{funcReturnType}'.", token.Line, token.Column));
+            }
+        }
+    }
+
+    public void AnalyzeDeleteStatement(DeleteStatementNode deleteStmt, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var exprType = AnalyzeExpressionType(deleteStmt.Expression, context, diagnostics);
+        if (exprType != "unknown" && !exprType.EndsWith("*"))
+        {
+            var token = AstHelper.GetFirstToken(deleteStmt.Expression);
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"'delete' operator can only be applied to pointers, not type '{exprType}'.", token.Line, token.Column));
         }
     }
 }

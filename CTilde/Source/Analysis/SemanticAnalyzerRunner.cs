@@ -83,7 +83,7 @@ public class SemanticAnalyzerRunner
                 WalkExpression(exprStmt.Expression, context);
                 break;
             case ReturnStatementNode retStmt:
-                if (retStmt.Expression != null) WalkExpression(retStmt.Expression, context);
+                _analyzer.AnalyzeReturnStatement(retStmt, context, Diagnostics);
                 break;
             case IfStatementNode ifStmt:
                 WalkExpression(ifStmt.Condition, context);
@@ -98,7 +98,7 @@ public class SemanticAnalyzerRunner
                 _analyzer.AnalyzeDeclarationStatement(decl, context, Diagnostics);
                 break;
             case DeleteStatementNode deleteStmt:
-                WalkExpression(deleteStmt.Expression, context);
+                _analyzer.AnalyzeDeleteStatement(deleteStmt, context, Diagnostics);
                 break;
         }
     }

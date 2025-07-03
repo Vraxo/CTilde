@@ -22,7 +22,10 @@ public class SymbolTable
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(ctor.Body, allLocalDeclarations);
-        var thisParam = new ParameterNode(new Token(TokenType.Identifier, ctor.OwnerStructName), 1, new Token(TokenType.Identifier, "this"));
+
+        var thisTypeName = ctor.Namespace != null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName;
+        var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName), 1, new Token(TokenType.Identifier, "this"));
+
         var allParams = new List<ParameterNode> { thisParam };
         allParams.AddRange(ctor.Parameters);
         Initialize(allParams, allLocalDeclarations, typeManager, ctor.Namespace, currentUnit);
@@ -33,7 +36,10 @@ public class SymbolTable
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(dtor.Body, allLocalDeclarations);
-        var thisParam = new ParameterNode(new Token(TokenType.Identifier, dtor.OwnerStructName), 1, new Token(TokenType.Identifier, "this"));
+
+        var thisTypeName = dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName;
+        var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName), 1, new Token(TokenType.Identifier, "this"));
+
         Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeManager, dtor.Namespace, currentUnit);
     }
 
@@ -58,12 +64,20 @@ public class SymbolTable
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             string resolvedTypeName;
-            if (param.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase) || (param.Name.Value == "this" && !param.Type.Value.Contains("::")))
+
+            if (param.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
+            {
                 resolvedTypeName = rawTypeName;
-            else if (param.Name.Value == "this" && param.Type.Value.Contains("::"))
+            }
+            else if (param.Type.Value.Contains("::"))
+            {
+                // This correctly handles the pre-qualified 'this' parameter type.
                 resolvedTypeName = rawTypeName;
+            }
             else
+            {
                 resolvedTypeName = typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+            }
 
             _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false);
             currentParamOffset += Math.Max(4, typeManager.GetSizeOfType(resolvedTypeName, currentUnit));

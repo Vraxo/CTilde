@@ -214,19 +214,40 @@ public class TypeManager
     public (StructDefinitionNode Def, string FullName) GetStructTypeFromFullName(string fullName) => (_structs.TryGetValue(fullName, out var def) ? def : throw new InvalidOperationException($"Could not find struct definition for '{fullName}'."), fullName);
     public string GetTypeName(Token type, int pointerLevel) => type.Value + new string('*', pointerLevel);
 
-    public int GetSizeOfType(string typeName, CompilationUnitNode context)
+    public int GetSizeOfType(string typeNameFqn, CompilationUnitNode context)
     {
-        if (typeName.EndsWith("*")) return 4;
-        if (typeName == "int") return 4;
-        if (typeName == "char") return 1;
+        if (typeNameFqn.EndsWith("*")) return 4;
+        if (typeNameFqn == "int") return 4;
+        if (typeNameFqn == "char") return 1;
 
-        if (_structs.TryGetValue(typeName, out var structDef))
+        if (_structs.TryGetValue(typeNameFqn, out var structDef))
         {
-            int size = HasVTable(typeName) ? 4 : 0;
-            size += GetAllMembers(typeName, context).Sum(m => GetSizeOfType(m.type, _structUnitMap[typeName]));
+            int size = 0;
+            if (structDef.BaseStructName != null)
+            {
+                string baseFqn = ResolveTypeName(structDef.BaseStructName, structDef.Namespace, context);
+                size += GetSizeOfType(baseFqn, _structUnitMap[baseFqn]);
+            }
+            else if (HasVTable(typeNameFqn))
+            {
+                size += 4;
+            }
+
+            foreach (var member in structDef.Members)
+            {
+                var ownUnit = _structUnitMap[typeNameFqn];
+                var rawMemberType = GetTypeName(member.Type, member.PointerLevel);
+                string baseMemberName = rawMemberType.TrimEnd('*');
+                string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
+                string resolvedMemberType = member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void") ? rawMemberType : ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
+
+                var memberUnit = IsStruct(resolvedMemberType) ? _structUnitMap[resolvedMemberType.TrimEnd('*')] : ownUnit;
+                size += GetSizeOfType(resolvedMemberType, memberUnit);
+            }
+
             return size;
         }
-        throw new InvalidOperationException($"Unknown type '{typeName}' for size calculation.");
+        throw new InvalidOperationException($"Unknown type '{typeNameFqn}' for size calculation.");
     }
 
     public bool IsStruct(string typeName) => _structs.ContainsKey(typeName.TrimEnd('*'));
@@ -241,25 +262,30 @@ public class TypeManager
     public List<(string name, string type, int offset, bool isConst)> GetAllMembers(string structFqn, CompilationUnitNode context)
     {
         if (!_structs.TryGetValue(structFqn, out var structDef)) throw new InvalidOperationException($"Struct '{structFqn}' not found.");
+
         var allMembers = new List<(string, string, int, bool)>();
-        int currentOffset = HasVTable(structFqn) ? 4 : 0;
+        int currentOffset = 0;
 
         if (structDef.BaseStructName != null)
         {
             string baseFqn = ResolveTypeName(structDef.BaseStructName, structDef.Namespace, _structUnitMap[structFqn]);
-            var baseMembers = GetAllMembers(baseFqn, context);
-            allMembers.AddRange(baseMembers);
-            currentOffset = GetSizeOfType(baseFqn, context);
+            allMembers.AddRange(GetAllMembers(baseFqn, _structUnitMap[baseFqn]));
+            currentOffset = GetSizeOfType(baseFqn, _structUnitMap[baseFqn]);
+        }
+        else if (HasVTable(structFqn))
+        {
+            currentOffset = 4;
         }
 
         foreach (var mem in structDef.Members)
         {
+            var ownUnit = _structUnitMap[structFqn];
             var rawMemberType = GetTypeName(mem.Type, mem.PointerLevel);
             var baseMemberName = rawMemberType.TrimEnd('*');
             var pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
-            var resolvedMemberType = mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void") ? rawMemberType : ResolveTypeName(baseMemberName, structDef.Namespace, _structUnitMap[structFqn]) + pointerSuffix;
+            var resolvedMemberType = mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void") ? rawMemberType : ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
             allMembers.Add((mem.Name.Value, resolvedMemberType, currentOffset, mem.IsConst));
-            currentOffset += GetSizeOfType(resolvedMemberType, _structUnitMap[structFqn]);
+            currentOffset += GetSizeOfType(resolvedMemberType, ownUnit);
         }
         return allMembers;
     }

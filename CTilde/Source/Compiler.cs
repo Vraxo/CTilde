@@ -37,15 +37,6 @@ public class Compiler
             compilationUnits.Add(unit);
         }
 
-        // --- Stop if there are parsing errors ---
-        if (allDiagnostics.Any())
-        {
-            var printer = new DiagnosticPrinter(allDiagnostics, sourceFileCache);
-            printer.Print();
-            Console.WriteLine($"\nCompilation failed with {allDiagnostics.Count} parsing error(s).");
-            return;
-        }
-
         var programNode = new ProgramNode(allImports.DistinctBy(i => i.LibraryName).ToList(), compilationUnits);
 
         // 3. Create analysis services ONCE
@@ -62,12 +53,12 @@ public class Compiler
 
         allDiagnostics.AddRange(runner.Diagnostics);
 
-        // --- Stop if there are semantic errors ---
+        // --- Stop if there are any errors (parsing or semantic) ---
         if (allDiagnostics.Any())
         {
             var printer = new DiagnosticPrinter(allDiagnostics, sourceFileCache);
             printer.Print();
-            Console.WriteLine($"\nCompilation failed with {allDiagnostics.Count} semantic error(s).");
+            Console.WriteLine($"\nCompilation failed with {allDiagnostics.Count} error(s).");
             return;
         }
 

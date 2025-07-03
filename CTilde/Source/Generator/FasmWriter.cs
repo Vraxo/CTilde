@@ -49,10 +49,8 @@ public class FasmWriter
         var libraries = new Dictionary<string, List<string>>
         {
             { "kernel32.dll", new List<string> { "ExitProcess" } },
-            { "msvcrt.dll", new List<string> { "printf", "malloc", "free", "strlen", "strcpy", "memcpy" } }
+            { "msvcrt.dll", new List<string> { "printf", "malloc", "free", "strlen", "strcpy", "memcpy" } } // MODIFIED
         };
-
-        var msvcrtFunctions = new HashSet<string>(libraries["msvcrt.dll"]);
 
         foreach (var import in program.Imports)
         {
@@ -61,11 +59,6 @@ public class FasmWriter
 
         foreach (var funcName in externalFunctions)
         {
-            if (msvcrtFunctions.Contains(funcName))
-            {
-                continue;
-            }
-
             bool found = false;
             foreach (var import in program.Imports)
             {

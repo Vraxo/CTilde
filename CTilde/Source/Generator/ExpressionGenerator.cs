@@ -259,8 +259,7 @@ public class ExpressionGenerator
         {
             var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
             Builder.AppendInstruction($"sub esp, {size}", "Make space for return value");
-            Builder.AppendInstruction("push esp", "Push hidden return value pointer");
-            totalArgSize += 4;
+            Builder.AppendInstruction("mov edi, esp", "Save pointer to return value slot");
         }
 
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
@@ -276,12 +275,18 @@ public class ExpressionGenerator
             Builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
 
+            if (returnsStructByValue)
+            {
+                Builder.AppendInstruction("push edi", "Push hidden return value pointer");
+                totalArgSize += 4;
+            }
+
             if (func.IsVirtual || func.IsOverride)
             {
                 var ownerTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(ma.Left, context).TrimEnd('*');
                 var vtableIndex = VTableManager.GetMethodVTableIndex(ownerTypeFqn, func.Name);
-                int thisPtrOffset = totalArgSize - 4; // 'this' is the last thing pushed before call
-                Builder.AppendInstruction($"mov eax, [esp + {thisPtrOffset}]", "Get 'this' from stack");
+                int thisPtrOnStackOffset = totalArgSize - 4 - (returnsStructByValue ? 4 : 0);
+                Builder.AppendInstruction($"mov eax, [esp + {thisPtrOnStackOffset}]", "Get 'this' from stack");
                 Builder.AppendInstruction("mov eax, [eax]", "Get vtable pointer from object");
                 Builder.AppendInstruction($"mov eax, [eax + {vtableIndex * 4}]", $"Get method address from vtable[{vtableIndex}]");
                 Builder.AppendInstruction("call eax");
@@ -290,6 +295,11 @@ public class ExpressionGenerator
         }
         else
         {
+            if (returnsStructByValue)
+            {
+                Builder.AppendInstruction("push edi", "Push hidden return value pointer");
+                totalArgSize += 4;
+            }
             string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
             if (func.Body == null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
@@ -299,7 +309,7 @@ public class ExpressionGenerator
 
         if (returnsStructByValue)
         {
-            Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
+            Builder.AppendInstruction("mov eax, edi", "Set eax to pointer to returned struct");
         }
     }
 
@@ -320,8 +330,7 @@ public class ExpressionGenerator
             {
                 var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
                 Builder.AppendInstruction($"sub esp, {size}", "Make space for op+ return value");
-                Builder.AppendInstruction("push esp", "Push hidden return value pointer");
-                totalArgSize += 4;
+                Builder.AppendInstruction("mov edi, esp", "Save pointer to return value slot");
             }
 
             totalArgSize += PushArgument(binExpr.Right, context);
@@ -330,12 +339,18 @@ public class ExpressionGenerator
             Builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
 
+            if (returnsStructByValue)
+            {
+                Builder.AppendInstruction("push edi", "Push hidden return value pointer");
+                totalArgSize += 4;
+            }
+
             Builder.AppendInstruction($"call {NameMangler.Mangle(overload)}");
             Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up op+ args");
 
             if (returnsStructByValue)
             {
-                Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
+                Builder.AppendInstruction("mov eax, edi", "Set eax to pointer to returned struct");
             }
         }
         else

@@ -890,7 +890,20 @@ public class DeclarationGenerator
 
     public void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
-        var symbols = new SymbolTable(function, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
+        var tempContext = new AnalysisContext(null, unit, function);
+        var returnTypeFqn = SemanticAnalyzer.AnalyzeFunctionReturnType(function, tempContext);
+        var returnsStructByValue = TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*");
+
+        var parametersWithRetPtr = new List<ParameterNode>(function.Parameters);
+        if (returnsStructByValue)
+        {
+            var retPtrParam = new ParameterNode(new Token(TokenType.Keyword, "void"), 1, new Token(TokenType.Identifier, "__ret_ptr"));
+            parametersWithRetPtr.Add(retPtrParam);
+        }
+
+        var functionForSymbols = function with { Parameters = parametersWithRetPtr };
+        var symbols = new SymbolTable(functionForSymbols, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
+
         var context = new AnalysisContext(symbols, unit, function);
         var destructibleLocals = symbols.GetDestructibleLocals(FunctionResolver);
 
@@ -1799,10 +1812,9 @@ public class StatementGenerator
         var returnTypeFqn = _context.SemanticAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
         if (TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
-            // Handle return by value for structs (RVO)
             if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");
 
-            // Get the address of the return value object
+            // Get the address of the local object being returned (e.g. &result)
             ExpressionGenerator.GenerateExpression(ret.Expression, context);
             Builder.AppendInstruction("mov esi, eax", "Source address for return value");
 
@@ -1810,13 +1822,27 @@ public class StatementGenerator
             context.Symbols.TryGetSymbol("__ret_ptr", out var retPtrOffset, out _, out _);
             Builder.AppendInstruction($"mov edi, [ebp + {retPtrOffset}]", "Destination address for return value");
 
-            // Copy the struct
-            var size = MemoryLayoutManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
-            Builder.AppendInstruction($"push {size}");
-            Builder.AppendInstruction("push esi");
-            Builder.AppendInstruction("push edi");
-            Builder.AppendInstruction("call [memcpy]");
-            Builder.AppendInstruction("add esp, 12");
+            // Find a copy constructor, e.g. string(string*)
+            var copyCtor = FunctionResolver.FindConstructor(returnTypeFqn, new List<string> { returnTypeFqn + "*" });
+
+            if (copyCtor != null)
+            {
+                Builder.AppendInstruction(null, "Calling copy constructor for return value");
+                Builder.AppendInstruction("push esi", "Push source pointer argument");
+                Builder.AppendInstruction("push edi", "Push destination pointer as 'this'");
+                Builder.AppendInstruction($"call {NameMangler.Mangle(copyCtor)}");
+                Builder.AppendInstruction("add esp, 8", "Clean up copy ctor args");
+            }
+            else
+            {
+                // Fallback to memcpy for POD structs without a copy constructor
+                var size = MemoryLayoutManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
+                Builder.AppendInstruction($"push {size}");
+                Builder.AppendInstruction("push esi");
+                Builder.AppendInstruction("push edi");
+                Builder.AppendInstruction("call [memcpy]");
+                Builder.AppendInstruction("add esp, 12");
+            }
         }
         else
         {
@@ -3130,7 +3156,7 @@ int main()
 
     string hello = "Hello ";
     string world = "World!";
-    string message = hello + &world; 
+    string message = hello + world; 
     
     TextObject myText(150, 275, message.c_str(), 40, maroon);
 
@@ -3297,13 +3323,14 @@ enum KeyboardKey
     KEY_DOWN = 264
 };
 
-void InitWindow(int width, int height, char* title); // MODIFIED
+void InitWindow(int width, int height, char* title);
 void SetTargetFPS(int fps);
 int WindowShouldClose();
 void BeginDrawing();
 void EndDrawing();
 void ClearBackground(Color color);
-void DrawText(char* text, int posX, int posY, int fontSize, Color color); // MODIFIED
+void DrawText(char* text, int posX, int posY, int fontSize, Color color);
+void DrawLine(int startPosX, int startPosY, int endPosX, int endPosY, Color color); // NEW
 void CloseWindow();
 int GetFPS();
 int IsKeyDown(int key);
@@ -3350,13 +3377,13 @@ public:
     }
     
     // Concatenation operator
-    string operator+(string* other)
+    string operator+(string other)
     {
-        int new_len = m_length + other->length();
+        int new_len = m_length + other.length();
         char* new_buffer = malloc(new_len + 1);
         
         memcpy(new_buffer, m_data, m_length);
-        memcpy(new_buffer + m_length, other->c_str(), other->length());
+        memcpy(new_buffer + m_length, other.c_str(), other.length());
         
         // Create a new string object from our temporary buffer
         string result(new_buffer);

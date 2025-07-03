@@ -31,7 +31,7 @@ public class ExpressionGenerator
         var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, context);
         GenerateExpression(arg, context); // Result is address (for struct) or value (for primitive) in EAX
 
-        if (TypeManager.IsStruct(argType))
+        if (TypeManager.IsStruct(argType) && !argType.EndsWith("*"))
         {
             int argSize = TypeManager.GetSizeOfType(argType, context.CompilationUnit);
             for (int offset = argSize - 4; offset >= 0; offset -= 4)
@@ -123,7 +123,8 @@ public class ExpressionGenerator
         Builder.AppendInstruction("add esp, 4", "Clean up malloc arg");
         Builder.AppendInstruction("mov edi, eax", "Save new'd pointer in edi");
 
-        var ctor = TypeManager.FindConstructor(typeFqn, n.Arguments.Count) ?? throw new InvalidOperationException($"No matching constructor for 'new {typeFqn}'");
+        var argTypes = n.Arguments.Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, context)).ToList();
+        var ctor = TypeManager.FindConstructor(typeFqn, argTypes) ?? throw new InvalidOperationException($"No matching constructor for 'new {typeFqn}'");
 
         if (TypeManager.HasVTable(typeFqn))
         {
@@ -154,7 +155,7 @@ public class ExpressionGenerator
     {
         if (context.Symbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out string type, out _))
         {
-            if (!type.EndsWith("*") && TypeManager.IsStruct(type)) GenerateLValueAddress(varExpr, context);
+            if (TypeManager.IsStruct(type) && !type.EndsWith("*")) GenerateLValueAddress(varExpr, context);
             else
             {
                 string sign = offset > 0 ? "+" : "";
@@ -203,7 +204,7 @@ public class ExpressionGenerator
     {
         GenerateLValueAddress(m, context);
         var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, context);
-        if (TypeManager.IsStruct(memberType)) return;
+        if (TypeManager.IsStruct(memberType) && !memberType.EndsWith("*")) return;
 
         string instruction = TypeManager.GetSizeOfType(memberType, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
         Builder.AppendInstruction(instruction);
@@ -243,7 +244,7 @@ public class ExpressionGenerator
     private void GenerateCallExpression(CallExpressionNode callExpr, AnalysisContext context)
     {
         var returnType = SemanticAnalyzer.AnalyzeExpressionType(callExpr, context);
-        bool returnsStruct = TypeManager.IsStruct(returnType);
+        bool returnsStruct = TypeManager.IsStruct(returnType) && !returnType.EndsWith("*");
         int totalArgSize = 0;
 
         if (returnsStruct)
@@ -294,6 +295,9 @@ public class ExpressionGenerator
 
         if (returnsStruct)
         {
+            // The result (pointer to the returned struct) is what was on top of the stack before cleanup.
+            // It was pushed as the hidden first argument.
+            // After cleanup, we must retrieve it. It's now pointed to by ESP.
             Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
         }
     }
@@ -305,10 +309,10 @@ public class ExpressionGenerator
         if (TypeManager.IsStruct(leftTypeFqn))
         {
             var opName = $"operator_{MangleOperator(binExpr.Operator.Value)}";
-            var overload = TypeManager.FindMethod(leftTypeFqn, opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
+            var overload = TypeManager.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
 
             var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(overload, context);
-            bool returnsStruct = TypeManager.IsStruct(returnType);
+            bool returnsStruct = TypeManager.IsStruct(returnType) && !returnType.EndsWith("*");
             int totalArgSize = 0;
 
             if (returnsStruct)
@@ -319,9 +323,7 @@ public class ExpressionGenerator
                 totalArgSize += 4;
             }
 
-            GenerateExpression(binExpr.Right, context);
-            Builder.AppendInstruction("push eax", "Push right operand (pointer)");
-            totalArgSize += 4;
+            totalArgSize += PushArgument(binExpr.Right, context);
 
             GenerateLValueAddress(binExpr.Left, context);
             Builder.AppendInstruction("push eax", "Push 'this' pointer");

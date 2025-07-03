@@ -77,44 +77,64 @@ public class StatementGenerator
                 Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of object '{variableName}'");
                 Builder.AppendInstruction($"mov dword [eax], {vtableLabel}", "Set vtable pointer");
             }
-        }
 
-        if (decl.ConstructorArguments != null)
-        {
-            int argCount = decl.ConstructorArguments.Count;
-            var ctor = TypeManager.FindConstructor(varTypeFqn, argCount) ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' with {argCount} arguments.");
-
-            int totalArgSize = 0;
-            foreach (var arg in decl.ConstructorArguments.AsEnumerable().Reverse())
+            if (decl.ConstructorArguments != null) // e.g. string s("hello");
             {
-                totalArgSize += ExpressionGenerator.PushArgument(arg, context);
+                var argTypes = decl.ConstructorArguments
+                    .Select(arg => _context.SemanticAnalyzer.AnalyzeExpressionType(arg, context))
+                    .ToList();
+                var ctor = TypeManager.FindConstructor(varTypeFqn, argTypes) ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' matching signature.");
+
+                int totalArgSize = 0;
+                foreach (var arg in decl.ConstructorArguments.AsEnumerable().Reverse())
+                {
+                    totalArgSize += ExpressionGenerator.PushArgument(arg, context);
+                }
+
+                Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
+                Builder.AppendInstruction("push eax");
+                totalArgSize += 4;
+
+                Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
+                Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
             }
-
-            Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
-            Builder.AppendInstruction("push eax");
-            totalArgSize += 4;
-
-            Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
-            Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
-        }
-        else if (decl.Initializer is InitializerListExpressionNode initList)
-        {
-            var allMembers = TypeManager.GetAllMembers(varTypeFqn, context.CompilationUnit);
-            if (initList.Values.Count > allMembers.Count) throw new InvalidOperationException($"Too many values in initializer list for struct '{varTypeFqn}'.");
-
-            for (int j = 0; j < initList.Values.Count; j++)
+            else if (decl.Initializer != null)
             {
-                var (memberName, memberType, memberOffset, _) = allMembers[j];
-                var valueExpr = initList.Values[j];
-                var memberSize = TypeManager.GetSizeOfType(memberType, context.CompilationUnit);
-                var totalOffset = offset + memberOffset;
+                if (decl.Initializer is InitializerListExpressionNode initList) // e.g. MyStruct s = {1, 2};
+                {
+                    var allMembers = TypeManager.GetAllMembers(varTypeFqn, context.CompilationUnit);
+                    if (initList.Values.Count > allMembers.Count) throw new InvalidOperationException($"Too many values in initializer list for struct '{varTypeFqn}'.");
 
-                ExpressionGenerator.GenerateExpression(valueExpr, context);
-                if (memberSize == 1) Builder.AppendInstruction($"mov byte [ebp + {totalOffset}], al", $"Init member {memberName}");
-                else Builder.AppendInstruction($"mov dword [ebp + {totalOffset}], eax", $"Init member {memberName}");
+                    for (int j = 0; j < initList.Values.Count; j++)
+                    {
+                        var (memberName, memberType, memberOffset, _) = allMembers[j];
+                        var valueExpr = initList.Values[j];
+                        var memberSize = TypeManager.GetSizeOfType(memberType, context.CompilationUnit);
+                        var totalOffset = offset + memberOffset;
+
+                        ExpressionGenerator.GenerateExpression(valueExpr, context);
+                        if (memberSize == 1) Builder.AppendInstruction($"mov byte [ebp + {totalOffset}], al", $"Init member {memberName}");
+                        else Builder.AppendInstruction($"mov dword [ebp + {totalOffset}], eax", $"Init member {memberName}");
+                    }
+                }
+                else // e.g. string s = "hello"; or string s = other_s; (Implicit constructor call)
+                {
+                    string initializerType = _context.SemanticAnalyzer.AnalyzeExpressionType(decl.Initializer, context);
+                    var ctor = TypeManager.FindConstructor(varTypeFqn, new List<string> { initializerType })
+                        ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
+
+                    int totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
+
+                    Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
+                    Builder.AppendInstruction("push eax");
+                    totalArgSize += 4;
+
+                    Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
+                    Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
+                }
             }
         }
-        else if (decl.Initializer != null)
+        else if (decl.Initializer != null) // Primitive types
         {
             ExpressionGenerator.GenerateExpression(decl.Initializer, context);
             if (TypeManager.GetSizeOfType(varTypeFqn, context.CompilationUnit) == 1)
@@ -127,7 +147,7 @@ public class StatementGenerator
     private void GenerateReturn(ReturnStatementNode ret, AnalysisContext context)
     {
         var returnTypeFqn = _context.SemanticAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
-        if (TypeManager.IsStruct(returnTypeFqn))
+        if (TypeManager.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
             // Handle return by value for structs (RVO)
             if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");

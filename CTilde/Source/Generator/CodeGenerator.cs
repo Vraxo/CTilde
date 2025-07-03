@@ -146,8 +146,13 @@ public class CodeGenerator
         if (ctor.Initializer != null)
         {
             var ownerStruct = TypeManager.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
+
+            var argTypes = ctor.Initializer.Arguments
+                .Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, context))
+                .ToList();
             var baseFqn = TypeManager.ResolveTypeName(ownerStruct.BaseStructName!, ownerStruct.Namespace, unit);
-            var baseCtor = TypeManager.FindConstructor(baseFqn, ctor.Initializer.Arguments.Count) ?? throw new InvalidOperationException("Base constructor not found");
+            var baseCtor = TypeManager.FindConstructor(baseFqn, argTypes) ?? throw new InvalidOperationException("Base constructor not found for given argument types.");
+
 
             int totalArgSize = 0;
             foreach (var arg in ctor.Initializer.Arguments.AsEnumerable().Reverse())

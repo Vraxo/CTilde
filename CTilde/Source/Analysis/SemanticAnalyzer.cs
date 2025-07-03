@@ -42,15 +42,27 @@ public class SemanticAnalyzer
     public string AnalyzeFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
     {
         var returnTypeNameRaw = _typeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
+        string resolvedReturnName;
 
         if (func.ReturnType.Type != TokenType.Keyword && !returnTypeNameRaw.StartsWith("void"))
         {
             string baseReturnName = returnTypeNameRaw.TrimEnd('*');
             string pointerSuffix = new string('*', returnTypeNameRaw.Length - baseReturnName.Length);
-            return _typeManager.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + pointerSuffix;
+            resolvedReturnName = _typeManager.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + pointerSuffix;
+        }
+        else
+        {
+            resolvedReturnName = returnTypeNameRaw;
         }
 
-        return returnTypeNameRaw;
+        if (_typeManager.IsStruct(resolvedReturnName) && !resolvedReturnName.EndsWith("*"))
+        {
+            // A function returning a struct by value actually returns a pointer
+            // to a caller-provided location. The type of the expression is a pointer.
+            return resolvedReturnName + "*";
+        }
+
+        return resolvedReturnName;
     }
 
     private string AnalyzeBinaryExpression(BinaryExpressionNode bin, AnalysisContext context)
@@ -132,7 +144,14 @@ public class SemanticAnalyzer
     {
         if (u.Operator.Type == TokenType.Ampersand) // Address-of operator
         {
-            return AnalyzeExpressionType(u.Right, context) + "*";
+            var operandType = AnalyzeExpressionType(u.Right, context);
+            if (operandType.EndsWith("*"))
+            {
+                // Taking address of a pointer (e.g. `string**`)
+                return operandType + "*";
+            }
+            // Taking address of a value type (e.g. `string s; &s;` -> `string*`)
+            return _typeManager.IsStruct(operandType) ? operandType + "*" : operandType;
         }
 
         if (u.Operator.Type == TokenType.Star) // Dereference operator

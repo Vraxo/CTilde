@@ -114,7 +114,49 @@ public class TypeManager
         return structDef.Methods.FirstOrDefault(m => m.Name == methodName);
     }
 
-    public ConstructorDeclarationNode? FindConstructor(string fqn, int argCount) => _structs[fqn].Constructors.FirstOrDefault(c => c.Parameters.Count == argCount);
+    public ConstructorDeclarationNode? FindConstructor(string structFqn, List<string> argTypeFqns)
+    {
+        if (!_structs.TryGetValue(structFqn, out var structDef)) return null;
+
+        var ctorUnit = _structUnitMap[structFqn];
+
+        foreach (var ctor in structDef.Constructors)
+        {
+            if (ctor.Parameters.Count != argTypeFqns.Count) continue;
+
+            bool allParamsMatch = true;
+            for (int i = 0; i < argTypeFqns.Count; i++)
+            {
+                var param = ctor.Parameters[i];
+
+                var rawParamType = GetTypeName(param.Type, param.PointerLevel);
+                var baseParamType = rawParamType.TrimEnd('*');
+                var pointerSuffix = new string('*', rawParamType.Length - baseParamType.Length);
+
+                string resolvedParamType;
+                if (param.Type.Type == TokenType.Keyword || baseParamType.Equals("void", StringComparison.OrdinalIgnoreCase))
+                {
+                    resolvedParamType = rawParamType;
+                }
+                else
+                {
+                    // Resolve the type name in the context of the struct's definition.
+                    resolvedParamType = ResolveTypeName(baseParamType, ctor.Namespace, ctorUnit) + pointerSuffix;
+                }
+
+                if (resolvedParamType != argTypeFqns[i])
+                {
+                    allParamsMatch = false;
+                    break;
+                }
+            }
+
+            if (allParamsMatch) return ctor;
+        }
+
+        return null;
+    }
+
     public DestructorDeclarationNode? FindDestructor(string fqn) => _structs.ContainsKey(fqn) ? _structs[fqn].Destructors.FirstOrDefault() : null;
 
     public bool HasVTable(string structFqn)

@@ -90,8 +90,7 @@ public class DeclarationGenerator
         if (returnsStructByValue)
         {
             var retPtrParam = new ParameterNode(new Token(TokenType.Keyword, "void"), 1, new Token(TokenType.Identifier, "__ret_ptr"));
-            // The hidden return pointer is the first argument in the CDECL-like convention.
-            parametersWithRetPtr.Insert(0, retPtrParam);
+            parametersWithRetPtr.Add(retPtrParam);
         }
 
         var functionForSymbols = function with { Parameters = parametersWithRetPtr };

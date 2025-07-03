@@ -1,7 +1,4 @@
-﻿using System.Collections.Generic;
-using System.Linq;
-
-namespace CTilde;
+﻿namespace CTilde;
 
 public static class NameMangler
 {
@@ -10,23 +7,9 @@ public static class NameMangler
         return MangleName(f.Namespace, f.OwnerStructName, f.Name);
     }
 
-    private static string CreateConstructorSignature(IEnumerable<ParameterNode> parameters)
-    {
-        if (!parameters.Any()) return "void";
-
-        var typeSignatures = parameters.Select(p =>
-        {
-            var rawTypeName = TypeRepository.GetTypeNameFromToken(p.Type, p.PointerLevel);
-            // Sanitize for assembly label
-            return rawTypeName.Replace("::", "_").Replace("*", "p");
-        });
-        return string.Join("_", typeSignatures);
-    }
-
     public static string Mangle(ConstructorDeclarationNode c)
     {
-        var signature = CreateConstructorSignature(c.Parameters);
-        return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor_{signature}");
+        return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor{c.Parameters.Count}");
     }
 
     public static string Mangle(DestructorDeclarationNode d)

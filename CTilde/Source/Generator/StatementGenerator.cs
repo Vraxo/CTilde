@@ -122,38 +122,10 @@ public class StatementGenerator
                 else // e.g. string s = "hello"; or string s = other_s; (Implicit constructor call)
                 {
                     string initializerType = _context.SemanticAnalyzer.AnalyzeExpressionType(decl.Initializer, context);
-                    var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType });
+                    var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType })
+                        ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
 
-                    bool takeAddressOfInitializer = false;
-                    if (ctor == null && TypeRepository.IsStruct(initializerType))
-                    {
-                        // Try to find a copy constructor that takes a pointer, e.g. string(string*)
-                        ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType + "*" });
-                        if (ctor != null)
-                        {
-                            takeAddressOfInitializer = true;
-                        }
-                    }
-
-                    if (ctor == null)
-                    {
-                        throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
-                    }
-
-                    int totalArgSize;
-                    if (takeAddressOfInitializer)
-                    {
-                        // The initializer expression (e.g., an operator+ call or another variable) 
-                        // returns a struct. GenerateExpression correctly places the address of this 
-                        // struct (whether a temporary or existing var) into EAX.
-                        ExpressionGenerator.GenerateExpression(decl.Initializer, context);
-                        Builder.AppendInstruction("push eax");
-                        totalArgSize = 4;
-                    }
-                    else
-                    {
-                        totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
-                    }
+                    int totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
 
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
                     Builder.AppendInstruction("push eax");

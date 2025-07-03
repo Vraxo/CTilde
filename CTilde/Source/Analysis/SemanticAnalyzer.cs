@@ -52,6 +52,13 @@ public class SemanticAnalyzer
             resolvedReturnName = returnTypeNameRaw;
         }
 
+        if (_typeRepository.IsStruct(resolvedReturnName) && !resolvedReturnName.EndsWith("*"))
+        {
+            // A function returning a struct by value actually returns a pointer
+            // to a caller-provided location. The type of the expression is a pointer.
+            return resolvedReturnName + "*";
+        }
+
         return resolvedReturnName;
     }
 

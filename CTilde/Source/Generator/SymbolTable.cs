@@ -10,15 +10,15 @@ public class SymbolTable
     public int TotalLocalSize { get; private set; }
 
     // Constructor for Functions/Methods
-    public SymbolTable(FunctionDeclarationNode function, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
+    public SymbolTable(FunctionDeclarationNode function, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(function.Body, allLocalDeclarations);
-        Initialize(function.Parameters, allLocalDeclarations, typeManager, memoryLayoutManager, function.Namespace, currentUnit);
+        Initialize(function.Parameters, allLocalDeclarations, typeResolver, memoryLayoutManager, function.Namespace, currentUnit);
     }
 
     // Constructor for Constructors
-    public SymbolTable(ConstructorDeclarationNode ctor, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
+    public SymbolTable(ConstructorDeclarationNode ctor, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(ctor.Body, allLocalDeclarations);
@@ -28,11 +28,11 @@ public class SymbolTable
 
         var allParams = new List<ParameterNode> { thisParam };
         allParams.AddRange(ctor.Parameters);
-        Initialize(allParams, allLocalDeclarations, typeManager, memoryLayoutManager, ctor.Namespace, currentUnit);
+        Initialize(allParams, allLocalDeclarations, typeResolver, memoryLayoutManager, ctor.Namespace, currentUnit);
     }
 
     // Constructor for Destructors
-    public SymbolTable(DestructorDeclarationNode dtor, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
+    public SymbolTable(DestructorDeclarationNode dtor, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(dtor.Body, allLocalDeclarations);
@@ -40,27 +40,27 @@ public class SymbolTable
         var thisTypeName = dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName;
         var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName), 1, new Token(TokenType.Identifier, "this"));
 
-        Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeManager, memoryLayoutManager, dtor.Namespace, currentUnit);
+        Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeResolver, memoryLayoutManager, dtor.Namespace, currentUnit);
     }
 
-    private void Initialize(List<ParameterNode> parameters, List<DeclarationStatementNode> localDeclarations, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, string? currentNamespace, CompilationUnitNode currentUnit)
+    private void Initialize(List<ParameterNode> parameters, List<DeclarationStatementNode> localDeclarations, TypeResolver typeResolver, MemoryLayoutManager memoryLayoutManager, string? currentNamespace, CompilationUnitNode currentUnit)
     {
         TotalLocalSize = 0;
         foreach (var d in localDeclarations)
         {
-            var rawTypeName = TypeManager.GetTypeName(d.Type, d.PointerLevel);
+            var rawTypeName = TypeRepository.GetTypeNameFromToken(d.Type, d.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             var resolvedTypeName = d.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
                 ? rawTypeName
-                : typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+                : typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
             TotalLocalSize += memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
         }
 
         int currentParamOffset = 8; // EBP + 8 is first parameter
         foreach (var param in parameters)
         {
-            var rawTypeName = TypeManager.GetTypeName(param.Type, param.PointerLevel);
+            var rawTypeName = TypeRepository.GetTypeNameFromToken(param.Type, param.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             string resolvedTypeName;
@@ -76,7 +76,7 @@ public class SymbolTable
             }
             else
             {
-                resolvedTypeName = typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
             }
 
             _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false);
@@ -86,12 +86,12 @@ public class SymbolTable
         int currentLocalOffset = 0;
         foreach (var decl in localDeclarations)
         {
-            var rawTypeName = TypeManager.GetTypeName(decl.Type, decl.PointerLevel);
+            var rawTypeName = TypeRepository.GetTypeNameFromToken(decl.Type, decl.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             var resolvedTypeName = decl.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
                 ? rawTypeName
-                : typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+                : typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
 
             int size = memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;
@@ -110,12 +110,12 @@ public class SymbolTable
         else if (node is WhileStatementNode whileStmt) CollectDeclarations(whileStmt.Body, declarations);
     }
 
-    public List<(string Name, int Offset, string TypeFqn)> GetDestructibleLocals(TypeManager typeManager)
+    public List<(string Name, int Offset, string TypeFqn)> GetDestructibleLocals(FunctionResolver functionResolver)
     {
         var result = new List<(string, int, string)>();
         foreach (var (name, (offset, type, _)) in _symbols)
         {
-            if (offset < 0 && typeManager.FindDestructor(type) != null) // Locals have negative offset
+            if (offset < 0 && functionResolver.FindDestructor(type) != null) // Locals have negative offset
             {
                 result.Add((name, offset, type));
             }
@@ -138,7 +138,7 @@ public class SymbolTable
 
     public string GetSymbolType(string name)
     {
-        return _symbols.TryGetValue(name, out var symbol) 
+        return _symbols.TryGetValue(name, out var symbol)
             ? symbol.Type
             : throw new InvalidOperationException($"Symbol '{name}' not found in current scope.");
     }

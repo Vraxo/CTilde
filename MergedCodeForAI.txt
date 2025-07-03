@@ -468,8 +468,9 @@ public class CodeGenerator
     private readonly Dictionary<string, string> _stringLiterals = new();
     internal HashSet<string> ExternalFunctions { get; } = new();
 
-    private readonly StatementGenerator _statementGenerator;
+    internal StatementGenerator StatementGenerator { get; }
     internal ExpressionGenerator ExpressionGenerator { get; }
+    private readonly DeclarationGenerator _declarationGenerator;
 
     public CodeGenerator(ProgramNode program)
     {
@@ -479,7 +480,8 @@ public class CodeGenerator
         SemanticAnalyzer = new SemanticAnalyzer(TypeManager, MemoryLayoutManager);
 
         ExpressionGenerator = new ExpressionGenerator(this);
-        _statementGenerator = new StatementGenerator(this);
+        StatementGenerator = new StatementGenerator(this);
+        _declarationGenerator = new DeclarationGenerator(this);
     }
 
     public string Generate()
@@ -505,7 +507,7 @@ public class CodeGenerator
         {
             foreach (var function in unit.Functions.Where(f => f.Body != null))
             {
-                GenerateFunction(function, unit, null);
+                _declarationGenerator.GenerateFunction(function, unit, null);
                 Builder.AppendBlankLine();
             }
 
@@ -513,17 +515,17 @@ public class CodeGenerator
             {
                 foreach (var method in s.Methods.Where(m => m.Body != null))
                 {
-                    GenerateFunction(method, unit, s);
+                    _declarationGenerator.GenerateFunction(method, unit, s);
                     Builder.AppendBlankLine();
                 }
                 foreach (var ctor in s.Constructors)
                 {
-                    GenerateConstructor(ctor, unit);
+                    _declarationGenerator.GenerateConstructor(ctor, unit);
                     Builder.AppendBlankLine();
                 }
                 foreach (var dtor in s.Destructors)
                 {
-                    GenerateDestructor(dtor, unit);
+                    _declarationGenerator.GenerateDestructor(dtor, unit);
                     Builder.AppendBlankLine();
                 }
             }
@@ -582,8 +584,28 @@ public class CodeGenerator
             }
         }
     }
+}
+</file>
 
-    private void GenerateConstructor(ConstructorDeclarationNode ctor, CompilationUnitNode unit)
+<file path="Generator\DeclarationGenerator.cs">
+namespace CTilde;
+
+public class DeclarationGenerator
+{
+    private readonly CodeGenerator _context;
+    private AssemblyBuilder Builder => _context.Builder;
+    private TypeManager TypeManager => _context.TypeManager;
+    private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
+    private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
+    private StatementGenerator StatementGenerator => _context.StatementGenerator;
+    private ExpressionGenerator ExpressionGenerator => _context.ExpressionGenerator;
+
+    public DeclarationGenerator(CodeGenerator context)
+    {
+        _context = context;
+    }
+
+    public void GenerateConstructor(ConstructorDeclarationNode ctor, CompilationUnitNode unit)
     {
         var symbols = new SymbolTable(ctor, TypeManager, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis, preventing NullReferenceException.
@@ -624,11 +646,11 @@ public class CodeGenerator
             Builder.AppendBlankLine();
         }
 
-        _statementGenerator.GenerateStatement(ctor.Body, context);
+        StatementGenerator.GenerateStatement(ctor.Body, context);
         GenerateEpilogue(new List<(string, int, string)>());
     }
 
-    private void GenerateDestructor(DestructorDeclarationNode dtor, CompilationUnitNode unit)
+    public void GenerateDestructor(DestructorDeclarationNode dtor, CompilationUnitNode unit)
     {
         var symbols = new SymbolTable(dtor, TypeManager, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis.
@@ -641,11 +663,11 @@ public class CodeGenerator
 
         Builder.AppendLabel(NameMangler.Mangle(dtor));
         GeneratePrologue(symbols);
-        _statementGenerator.GenerateStatement(dtor.Body, context);
+        StatementGenerator.GenerateStatement(dtor.Body, context);
         GenerateEpilogue(new List<(string, int, string)>());
     }
 
-    private void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
+    public void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
         var symbols = new SymbolTable(function, TypeManager, MemoryLayoutManager, unit);
         var context = new AnalysisContext(symbols, unit, function);
@@ -656,7 +678,7 @@ public class CodeGenerator
         Builder.AppendLabel(mangledName);
         GeneratePrologue(symbols);
 
-        if (function.Body != null) _statementGenerator.GenerateStatement(function.Body, context);
+        if (function.Body != null) StatementGenerator.GenerateStatement(function.Body, context);
 
         GenerateEpilogue(destructibleLocals);
     }

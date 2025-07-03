@@ -5,11 +5,15 @@ namespace CTilde;
 
 public class MemoryLayoutManager
 {
-    private readonly TypeManager _typeManager;
+    private readonly TypeRepository _typeRepository;
+    private readonly TypeResolver _typeResolver;
+    private readonly VTableManager _vtableManager;
 
-    public MemoryLayoutManager(TypeManager typeManager)
+    public MemoryLayoutManager(TypeRepository typeRepository, TypeResolver typeResolver, VTableManager vtableManager)
     {
-        _typeManager = typeManager;
+        _typeRepository = typeRepository;
+        _typeResolver = typeResolver;
+        _vtableManager = vtableManager;
     }
 
     public int GetSizeOfType(string typeNameFqn, CompilationUnitNode context)
@@ -18,33 +22,33 @@ public class MemoryLayoutManager
         if (typeNameFqn == "int") return 4;
         if (typeNameFqn == "char") return 1;
 
-        if (_typeManager.FindStruct(typeNameFqn) is { } structDef)
+        if (_typeRepository.FindStruct(typeNameFqn) is { } structDef)
         {
             int size = 0;
-            var structUnit = _typeManager.GetCompilationUnitForStruct(typeNameFqn);
+            var structUnit = _typeRepository.GetCompilationUnitForStruct(typeNameFqn);
             if (structDef.BaseStructName != null)
             {
-                string baseFqn = _typeManager.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
-                var baseUnit = _typeManager.GetCompilationUnitForStruct(baseFqn);
+                string baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+                var baseUnit = _typeRepository.GetCompilationUnitForStruct(baseFqn);
                 size += GetSizeOfType(baseFqn, baseUnit);
             }
-            else if (_typeManager.HasVTable(typeNameFqn))
+            else if (_vtableManager.HasVTable(typeNameFqn))
             {
                 size += 4; // vtable pointer
             }
 
             foreach (var member in structDef.Members)
             {
-                var rawMemberType = TypeManager.GetTypeName(member.Type, member.PointerLevel);
+                var rawMemberType = TypeRepository.GetTypeNameFromToken(member.Type, member.PointerLevel);
                 string baseMemberName = rawMemberType.TrimEnd('*');
                 string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
 
                 string resolvedMemberType = (member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void"))
                     ? rawMemberType
-                    : _typeManager.ResolveTypeName(baseMemberName, structDef.Namespace, structUnit) + pointerSuffix;
+                    : _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, structUnit) + pointerSuffix;
 
-                var memberUnit = _typeManager.IsStruct(resolvedMemberType)
-                    ? _typeManager.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
+                var memberUnit = _typeRepository.IsStruct(resolvedMemberType)
+                    ? _typeRepository.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
                     : structUnit;
                 size += GetSizeOfType(resolvedMemberType, memberUnit);
             }
@@ -62,38 +66,38 @@ public class MemoryLayoutManager
 
     public List<(string name, string type, int offset, bool isConst)> GetAllMembers(string structFqn, CompilationUnitNode context)
     {
-        if (_typeManager.FindStruct(structFqn) is not { } structDef) throw new System.InvalidOperationException($"Struct '{structFqn}' not found.");
+        if (_typeRepository.FindStruct(structFqn) is not { } structDef) throw new System.InvalidOperationException($"Struct '{structFqn}' not found.");
 
         var allMembers = new List<(string, string, int, bool)>();
         int currentOffset = 0;
 
         if (structDef.BaseStructName != null)
         {
-            var structUnit = _typeManager.GetCompilationUnitForStruct(structFqn);
-            string baseFqn = _typeManager.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
-            var baseUnit = _typeManager.GetCompilationUnitForStruct(baseFqn);
+            var structUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
+            string baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+            var baseUnit = _typeRepository.GetCompilationUnitForStruct(baseFqn);
             allMembers.AddRange(GetAllMembers(baseFqn, baseUnit));
             currentOffset = GetSizeOfType(baseFqn, baseUnit);
         }
-        else if (_typeManager.HasVTable(structFqn))
+        else if (_vtableManager.HasVTable(structFqn))
         {
             currentOffset = 4; // vtable pointer
         }
 
         foreach (var mem in structDef.Members)
         {
-            var ownUnit = _typeManager.GetCompilationUnitForStruct(structFqn);
-            var rawMemberType = TypeManager.GetTypeName(mem.Type, mem.PointerLevel);
+            var ownUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
+            var rawMemberType = TypeRepository.GetTypeNameFromToken(mem.Type, mem.PointerLevel);
             var baseMemberName = rawMemberType.TrimEnd('*');
             var pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
             var resolvedMemberType = (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void"))
                 ? rawMemberType
-                : _typeManager.ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
+                : _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
 
             allMembers.Add((mem.Name.Value, resolvedMemberType, currentOffset, mem.IsConst));
 
-            var memberUnit = _typeManager.IsStruct(resolvedMemberType)
-                ? _typeManager.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
+            var memberUnit = _typeRepository.IsStruct(resolvedMemberType)
+                ? _typeRepository.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
                 : ownUnit;
             currentOffset += GetSizeOfType(resolvedMemberType, memberUnit);
         }

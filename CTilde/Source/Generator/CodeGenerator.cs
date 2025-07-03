@@ -8,6 +8,7 @@ public class CodeGenerator
 {
     internal ProgramNode Program { get; }
     internal TypeManager TypeManager { get; }
+    internal MemoryLayoutManager MemoryLayoutManager { get; }
     internal SemanticAnalyzer SemanticAnalyzer { get; }
     internal AssemblyBuilder Builder { get; } = new();
 
@@ -22,7 +23,8 @@ public class CodeGenerator
     {
         Program = program;
         TypeManager = new TypeManager(program);
-        SemanticAnalyzer = new SemanticAnalyzer(TypeManager);
+        MemoryLayoutManager = new MemoryLayoutManager(TypeManager);
+        SemanticAnalyzer = new SemanticAnalyzer(TypeManager, MemoryLayoutManager);
 
         ExpressionGenerator = new ExpressionGenerator(this);
         _statementGenerator = new StatementGenerator(this);
@@ -88,14 +90,14 @@ public class CodeGenerator
             var structFqn = TypeManager.GetFullyQualifiedName(s);
             if (TypeManager.HasVTable(structFqn))
             {
-                Builder.AppendLabel(TypeManager.GetVTableLabel(s));
+                Builder.AppendLabel(NameMangler.GetVTableLabel(s));
                 var vtable = TypeManager.GetVTable(structFqn);
                 foreach (var entry in vtable)
                 {
                     var mangledName = entry switch
                     {
-                        FunctionDeclarationNode f => TypeManager.Mangle(f),
-                        DestructorDeclarationNode d => TypeManager.Mangle(d),
+                        FunctionDeclarationNode f => NameMangler.Mangle(f),
+                        DestructorDeclarationNode d => NameMangler.Mangle(d),
                         _ => throw new InvalidOperationException("Invalid vtable entry type")
                     };
                     Builder.AppendInstruction($"dd {mangledName}");
@@ -131,7 +133,7 @@ public class CodeGenerator
 
     private void GenerateConstructor(ConstructorDeclarationNode ctor, CompilationUnitNode unit)
     {
-        var symbols = new SymbolTable(ctor, TypeManager, unit);
+        var symbols = new SymbolTable(ctor, TypeManager, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis, preventing NullReferenceException.
         var dummyFunctionForContext = new FunctionDeclarationNode(
             new Token(TokenType.Keyword, "void"), 0, ctor.OwnerStructName,
@@ -140,7 +142,7 @@ public class CodeGenerator
         );
         var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
 
-        Builder.AppendLabel(TypeManager.Mangle(ctor));
+        Builder.AppendLabel(NameMangler.Mangle(ctor));
         GeneratePrologue(symbols);
 
         if (ctor.Initializer != null)
@@ -165,7 +167,7 @@ public class CodeGenerator
             Builder.AppendInstruction("push eax", "Push 'this' for base ctor");
             totalArgSize += 4;
 
-            Builder.AppendInstruction($"call {TypeManager.Mangle(baseCtor)}");
+            Builder.AppendInstruction($"call {NameMangler.Mangle(baseCtor)}");
             Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up base ctor args");
             Builder.AppendBlankLine();
         }
@@ -176,7 +178,7 @@ public class CodeGenerator
 
     private void GenerateDestructor(DestructorDeclarationNode dtor, CompilationUnitNode unit)
     {
-        var symbols = new SymbolTable(dtor, TypeManager, unit);
+        var symbols = new SymbolTable(dtor, TypeManager, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis.
         var dummyFunctionForContext = new FunctionDeclarationNode(
             new Token(TokenType.Keyword, "void"), 0, dtor.OwnerStructName,
@@ -185,7 +187,7 @@ public class CodeGenerator
         );
         var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
 
-        Builder.AppendLabel(TypeManager.Mangle(dtor));
+        Builder.AppendLabel(NameMangler.Mangle(dtor));
         GeneratePrologue(symbols);
         _statementGenerator.GenerateStatement(dtor.Body, context);
         GenerateEpilogue(new List<(string, int, string)>());
@@ -193,11 +195,11 @@ public class CodeGenerator
 
     private void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
-        var symbols = new SymbolTable(function, TypeManager, unit);
+        var symbols = new SymbolTable(function, TypeManager, MemoryLayoutManager, unit);
         var context = new AnalysisContext(symbols, unit, function);
         var destructibleLocals = symbols.GetDestructibleLocals(TypeManager);
 
-        string mangledName = function.Name == "main" ? "_main" : TypeManager.Mangle(function);
+        string mangledName = function.Name == "main" ? "_main" : NameMangler.Mangle(function);
 
         Builder.AppendLabel(mangledName);
         GeneratePrologue(symbols);
@@ -246,7 +248,7 @@ public class CodeGenerator
                     }
                     else
                     {
-                        Builder.AppendInstruction($"call {TypeManager.Mangle(dtor)}");
+                        Builder.AppendInstruction($"call {NameMangler.Mangle(dtor)}");
                     }
                     Builder.AppendInstruction("add esp, 4", "Clean up 'this'");
                 }

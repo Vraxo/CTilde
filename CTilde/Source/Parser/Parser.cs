@@ -39,15 +39,6 @@ public class Parser
 
     internal void AdvancePosition(int amount) => _position += amount;
 
-    private string MangleOperator(string op)
-    {
-        return op switch
-        {
-            "+" => "plus",
-            _ => throw new NotImplementedException($"Operator mangling for '{op}' is not implemented.")
-        };
-    }
-
     public List<ImportDirectiveNode> GetImports() => _imports;
 
     public CompilationUnitNode Parse(string filePath)
@@ -262,7 +253,7 @@ public class Parser
                 Eat(TokenType.Keyword); // operator
                 var opToken = Current;
                 _position++;
-                name = new Token(TokenType.Identifier, $"operator_{MangleOperator(opToken.Value)}");
+                name = new Token(TokenType.Identifier, $"operator_{NameMangler.MangleOperator(opToken.Value)}");
             }
             else
             {

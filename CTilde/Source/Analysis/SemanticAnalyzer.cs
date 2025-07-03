@@ -6,19 +6,12 @@ namespace CTilde;
 public class SemanticAnalyzer
 {
     private readonly TypeManager _typeManager;
+    private readonly MemoryLayoutManager _memoryLayoutManager;
 
-    public SemanticAnalyzer(TypeManager typeManager)
+    public SemanticAnalyzer(TypeManager typeManager, MemoryLayoutManager memoryLayoutManager)
     {
         _typeManager = typeManager;
-    }
-
-    private string MangleOperator(string op)
-    {
-        return op switch
-        {
-            "+" => "plus",
-            _ => throw new NotImplementedException($"Operator mangling for '{op}' is not implemented.")
-        };
+        _memoryLayoutManager = memoryLayoutManager;
     }
 
     public string AnalyzeExpressionType(ExpressionNode expr, AnalysisContext context)
@@ -41,7 +34,7 @@ public class SemanticAnalyzer
 
     public string AnalyzeFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
     {
-        var returnTypeNameRaw = _typeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
+        var returnTypeNameRaw = TypeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
         string resolvedReturnName;
 
         if (func.ReturnType.Type != TokenType.Keyword && !returnTypeNameRaw.StartsWith("void"))
@@ -73,7 +66,7 @@ public class SemanticAnalyzer
         {
             try
             {
-                var opName = $"operator_{MangleOperator(bin.Operator.Value)}";
+                var opName = $"operator_{NameMangler.MangleOperator(bin.Operator.Value)}";
                 var overload = _typeManager.FindMethod(leftTypeFqn, opName);
 
                 if (overload != null)
@@ -123,7 +116,7 @@ public class SemanticAnalyzer
                     ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}"
                     : context.CurrentFunction.OwnerStructName;
 
-                (_, string memberTypeResolved) = _typeManager.GetMemberInfo(ownerStructFqn, v.Identifier.Value, context.CompilationUnit);
+                (_, string memberTypeResolved) = _memoryLayoutManager.GetMemberInfo(ownerStructFqn, v.Identifier.Value, context.CompilationUnit);
                 return memberTypeResolved;
             }
             catch (InvalidOperationException) { /* Fall through to the final error */ }
@@ -136,7 +129,7 @@ public class SemanticAnalyzer
     {
         var leftType = AnalyzeExpressionType(ma.Left, context);
         string baseStructType = leftType.TrimEnd('*');
-        var (_, resolvedMemberType) = _typeManager.GetMemberInfo(baseStructType, ma.Member.Value, context.CompilationUnit);
+        var (_, resolvedMemberType) = _memoryLayoutManager.GetMemberInfo(baseStructType, ma.Member.Value, context.CompilationUnit);
         return resolvedMemberType;
     }
 

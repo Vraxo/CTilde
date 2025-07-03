@@ -10,15 +10,15 @@ public class SymbolTable
     public int TotalLocalSize { get; private set; }
 
     // Constructor for Functions/Methods
-    public SymbolTable(FunctionDeclarationNode function, TypeManager typeManager, CompilationUnitNode currentUnit)
+    public SymbolTable(FunctionDeclarationNode function, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(function.Body, allLocalDeclarations);
-        Initialize(function.Parameters, allLocalDeclarations, typeManager, function.Namespace, currentUnit);
+        Initialize(function.Parameters, allLocalDeclarations, typeManager, memoryLayoutManager, function.Namespace, currentUnit);
     }
 
     // Constructor for Constructors
-    public SymbolTable(ConstructorDeclarationNode ctor, TypeManager typeManager, CompilationUnitNode currentUnit)
+    public SymbolTable(ConstructorDeclarationNode ctor, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(ctor.Body, allLocalDeclarations);
@@ -28,11 +28,11 @@ public class SymbolTable
 
         var allParams = new List<ParameterNode> { thisParam };
         allParams.AddRange(ctor.Parameters);
-        Initialize(allParams, allLocalDeclarations, typeManager, ctor.Namespace, currentUnit);
+        Initialize(allParams, allLocalDeclarations, typeManager, memoryLayoutManager, ctor.Namespace, currentUnit);
     }
 
     // Constructor for Destructors
-    public SymbolTable(DestructorDeclarationNode dtor, TypeManager typeManager, CompilationUnitNode currentUnit)
+    public SymbolTable(DestructorDeclarationNode dtor, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(dtor.Body, allLocalDeclarations);
@@ -40,27 +40,27 @@ public class SymbolTable
         var thisTypeName = dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName;
         var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName), 1, new Token(TokenType.Identifier, "this"));
 
-        Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeManager, dtor.Namespace, currentUnit);
+        Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeManager, memoryLayoutManager, dtor.Namespace, currentUnit);
     }
 
-    private void Initialize(List<ParameterNode> parameters, List<DeclarationStatementNode> localDeclarations, TypeManager typeManager, string? currentNamespace, CompilationUnitNode currentUnit)
+    private void Initialize(List<ParameterNode> parameters, List<DeclarationStatementNode> localDeclarations, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, string? currentNamespace, CompilationUnitNode currentUnit)
     {
         TotalLocalSize = 0;
         foreach (var d in localDeclarations)
         {
-            var rawTypeName = typeManager.GetTypeName(d.Type, d.PointerLevel);
+            var rawTypeName = TypeManager.GetTypeName(d.Type, d.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             var resolvedTypeName = d.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
                 ? rawTypeName
                 : typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
-            TotalLocalSize += typeManager.GetSizeOfType(resolvedTypeName, currentUnit);
+            TotalLocalSize += memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
         }
 
         int currentParamOffset = 8; // EBP + 8 is first parameter
         foreach (var param in parameters)
         {
-            var rawTypeName = typeManager.GetTypeName(param.Type, param.PointerLevel);
+            var rawTypeName = TypeManager.GetTypeName(param.Type, param.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             string resolvedTypeName;
@@ -80,24 +80,26 @@ public class SymbolTable
             }
 
             _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false);
-            currentParamOffset += Math.Max(4, typeManager.GetSizeOfType(resolvedTypeName, currentUnit));
+            currentParamOffset += Math.Max(4, memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit));
         }
 
         int currentLocalOffset = 0;
         foreach (var decl in localDeclarations)
         {
-            var rawTypeName = typeManager.GetTypeName(decl.Type, decl.PointerLevel);
+            var rawTypeName = TypeManager.GetTypeName(decl.Type, decl.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             var resolvedTypeName = decl.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
                 ? rawTypeName
                 : typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
 
-            int size = typeManager.GetSizeOfType(resolvedTypeName, currentUnit);
+            int size = memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;
             _symbols[decl.Identifier.Value] = (currentLocalOffset, resolvedTypeName, decl.IsConst);
         }
     }
+
+
 
     private void CollectDeclarations(AstNode? node, List<DeclarationStatementNode> declarations)
     {
@@ -134,5 +136,10 @@ public class SymbolTable
         return false;
     }
 
-    public string GetSymbolType(string name) => _symbols.TryGetValue(name, out var symbol) ? symbol.Type : throw new InvalidOperationException($"Symbol '{name}' not found in current scope.");
+    public string GetSymbolType(string name)
+    {
+        return _symbols.TryGetValue(name, out var symbol) 
+            ? symbol.Type
+            : throw new InvalidOperationException($"Symbol '{name}' not found in current scope.");
+    }
 }

@@ -9,21 +9,13 @@ public class ExpressionGenerator
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
     private TypeManager TypeManager => _context.TypeManager;
+    private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
     private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
     private HashSet<string> ExternalFunctions => _context.ExternalFunctions;
 
     public ExpressionGenerator(CodeGenerator context)
     {
         _context = context;
-    }
-
-    private string MangleOperator(string op)
-    {
-        return op switch
-        {
-            "+" => "plus",
-            _ => throw new NotImplementedException($"Operator mangling for '{op}' is not implemented.")
-        };
     }
 
     public int PushArgument(ExpressionNode arg, AnalysisContext context)
@@ -33,7 +25,7 @@ public class ExpressionGenerator
 
         if (TypeManager.IsStruct(argType) && !argType.EndsWith("*"))
         {
-            int argSize = TypeManager.GetSizeOfType(argType, context.CompilationUnit);
+            int argSize = MemoryLayoutManager.GetSizeOfType(argType, context.CompilationUnit);
             for (int offset = argSize - 4; offset >= 0; offset -= 4)
             {
                 Builder.AppendInstruction($"push dword [eax + {offset}]");
@@ -72,7 +64,7 @@ public class ExpressionGenerator
             try
             {
                 string ownerStructFqn = context.CurrentFunction.Namespace != null ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}" : context.CurrentFunction.OwnerStructName;
-                var (memberOffset, _) = TypeManager.GetMemberInfo(ownerStructFqn, varExpr.Identifier.Value, context.CompilationUnit);
+                var (memberOffset, _) = MemoryLayoutManager.GetMemberInfo(ownerStructFqn, varExpr.Identifier.Value, context.CompilationUnit);
                 context.Symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
                 Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
                 if (memberOffset > 0) Builder.AppendInstruction($"add eax, {memberOffset}", $"Offset for implicit this->{varExpr.Identifier.Value}");
@@ -87,7 +79,7 @@ public class ExpressionGenerator
     {
         var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context);
         string baseStructType = leftType.TrimEnd('*');
-        var (memberOffset, _) = TypeManager.GetMemberInfo(baseStructType, memberAccess.Member.Value, context.CompilationUnit);
+        var (memberOffset, _) = MemoryLayoutManager.GetMemberInfo(baseStructType, memberAccess.Member.Value, context.CompilationUnit);
 
         if (memberAccess.Operator.Type == TokenType.Dot) GenerateLValueAddress(memberAccess.Left, context);
         else GenerateExpression(memberAccess.Left, context);
@@ -116,7 +108,7 @@ public class ExpressionGenerator
     private void GenerateNewExpression(NewExpressionNode n, AnalysisContext context)
     {
         var typeFqn = TypeManager.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
-        var size = TypeManager.GetSizeOfType(typeFqn, context.CompilationUnit);
+        var size = MemoryLayoutManager.GetSizeOfType(typeFqn, context.CompilationUnit);
 
         Builder.AppendInstruction($"push {size}", "Push size for malloc");
         Builder.AppendInstruction("call [malloc]");
@@ -129,7 +121,7 @@ public class ExpressionGenerator
         if (TypeManager.HasVTable(typeFqn))
         {
             var structDef = TypeManager.FindStruct(typeFqn);
-            var vtableLabel = TypeManager.GetVTableLabel(structDef);
+            var vtableLabel = NameMangler.GetVTableLabel(structDef);
             Builder.AppendInstruction($"mov dword [edi], {vtableLabel}", "Set vtable pointer on heap object");
         }
 
@@ -142,7 +134,7 @@ public class ExpressionGenerator
         Builder.AppendInstruction("push edi", "Push 'this' pointer for constructor");
         totalArgSize += 4;
 
-        Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
+        Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
         Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
 
         Builder.AppendInstruction("mov eax, edi", "Return pointer to new object in eax");
@@ -159,7 +151,7 @@ public class ExpressionGenerator
             else
             {
                 string sign = offset > 0 ? "+" : "";
-                string instruction = TypeManager.GetSizeOfType(type, context.CompilationUnit) == 1 ? "movzx eax, byte" : "mov eax,";
+                string instruction = MemoryLayoutManager.GetSizeOfType(type, context.CompilationUnit) == 1 ? "movzx eax, byte" : "mov eax,";
                 Builder.AppendInstruction($"{instruction} [ebp {sign} {offset}]", $"Load value of {varExpr.Identifier.Value}");
             }
             return;
@@ -194,7 +186,7 @@ public class ExpressionGenerator
             case TokenType.Minus: Builder.AppendInstruction("neg eax"); break;
             case TokenType.Star:
                 var type = SemanticAnalyzer.AnalyzeExpressionType(u, context);
-                string instruction = TypeManager.GetSizeOfType(type, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
+                string instruction = MemoryLayoutManager.GetSizeOfType(type, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
                 Builder.AppendInstruction(instruction);
                 break;
         }
@@ -206,7 +198,7 @@ public class ExpressionGenerator
         var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, context);
         if (TypeManager.IsStruct(memberType) && !memberType.EndsWith("*")) return;
 
-        string instruction = TypeManager.GetSizeOfType(memberType, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
+        string instruction = MemoryLayoutManager.GetSizeOfType(memberType, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
         Builder.AppendInstruction(instruction);
     }
 
@@ -222,7 +214,7 @@ public class ExpressionGenerator
             GenerateLValueAddress(assign.Left, context);
             Builder.AppendInstruction("mov edi, eax", "Pop destination into EDI");
             Builder.AppendInstruction("pop esi", "Pop source into ESI");
-            int size = TypeManager.GetSizeOfType(lValueType, context.CompilationUnit);
+            int size = MemoryLayoutManager.GetSizeOfType(lValueType, context.CompilationUnit);
             Builder.AppendInstruction($"push {size}");
             Builder.AppendInstruction("push esi");
             Builder.AppendInstruction("push edi");
@@ -235,7 +227,7 @@ public class ExpressionGenerator
             Builder.AppendInstruction("push eax", "Push value");
             GenerateLValueAddress(assign.Left, context);
             Builder.AppendInstruction("pop ecx", "Pop value into ECX");
-            string instruction = TypeManager.GetSizeOfType(lValueType, context.CompilationUnit) == 1 ? "mov [eax], cl" : "mov [eax], ecx";
+            string instruction = MemoryLayoutManager.GetSizeOfType(lValueType, context.CompilationUnit) == 1 ? "mov [eax], cl" : "mov [eax], ecx";
             Builder.AppendInstruction(instruction, "Assign value");
         }
         if (!isStructAssign) Builder.AppendInstruction("mov eax, ecx");
@@ -249,7 +241,7 @@ public class ExpressionGenerator
 
         if (returnsStruct)
         {
-            var size = TypeManager.GetSizeOfType(returnType, context.CompilationUnit);
+            var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
             Builder.AppendInstruction($"sub esp, {size}", "Make space for return value");
             Builder.AppendInstruction("push esp", "Push hidden return value pointer");
             totalArgSize += 4;
@@ -281,12 +273,12 @@ public class ExpressionGenerator
                 Builder.AppendInstruction($"mov eax, [eax + {vtableIndex * 4}]", $"Get method address from vtable[{vtableIndex}]");
                 Builder.AppendInstruction("call eax");
             }
-            else { Builder.AppendInstruction($"call {TypeManager.Mangle(method)}"); }
+            else { Builder.AppendInstruction($"call {NameMangler.Mangle(method)}"); }
         }
         else
         {
             var func = TypeManager.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
-            string calleeTarget = func.Body == null ? $"[{func.Name}]" : TypeManager.Mangle(func);
+            string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
             if (func.Body == null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
         }
@@ -308,7 +300,7 @@ public class ExpressionGenerator
 
         if (TypeManager.IsStruct(leftTypeFqn))
         {
-            var opName = $"operator_{MangleOperator(binExpr.Operator.Value)}";
+            var opName = $"operator_{NameMangler.MangleOperator(binExpr.Operator.Value)}";
             var overload = TypeManager.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
 
             var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(overload, context);
@@ -317,7 +309,7 @@ public class ExpressionGenerator
 
             if (returnsStruct)
             {
-                var size = TypeManager.GetSizeOfType(returnType, context.CompilationUnit);
+                var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
                 Builder.AppendInstruction($"sub esp, {size}", "Make space for op+ return value");
                 Builder.AppendInstruction("push esp", "Push hidden return value pointer");
                 totalArgSize += 4;
@@ -329,7 +321,7 @@ public class ExpressionGenerator
             Builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
 
-            Builder.AppendInstruction($"call {TypeManager.Mangle(overload)}");
+            Builder.AppendInstruction($"call {NameMangler.Mangle(overload)}");
             Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up op+ args");
 
             if (returnsStruct)
@@ -382,7 +374,7 @@ public class ExpressionGenerator
         }
 
         var func = TypeManager.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
-        string calleeTarget = func.Body == null ? $"[{func.Name}]" : TypeManager.Mangle(func);
+        string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
         if (func.Body == null) ExternalFunctions.Add(func.Name);
         Builder.AppendInstruction($"mov eax, {calleeTarget}");
     }

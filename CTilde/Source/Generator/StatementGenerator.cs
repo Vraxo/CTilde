@@ -8,6 +8,7 @@ public class StatementGenerator
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
     private TypeManager TypeManager => _context.TypeManager;
+    private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
     private ExpressionGenerator ExpressionGenerator => _context.ExpressionGenerator;
 
     public StatementGenerator(CodeGenerator context)
@@ -52,7 +53,7 @@ public class StatementGenerator
             }
             else
             {
-                Builder.AppendInstruction($"call {TypeManager.Mangle(dtor)}");
+                Builder.AppendInstruction($"call {NameMangler.Mangle(dtor)}");
             }
         }
 
@@ -73,7 +74,7 @@ public class StatementGenerator
             var structDef = TypeManager.FindStruct(varTypeFqn);
             if (TypeManager.HasVTable(varTypeFqn))
             {
-                var vtableLabel = TypeManager.GetVTableLabel(structDef);
+                var vtableLabel = NameMangler.GetVTableLabel(structDef);
                 Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of object '{variableName}'");
                 Builder.AppendInstruction($"mov dword [eax], {vtableLabel}", "Set vtable pointer");
             }
@@ -95,21 +96,21 @@ public class StatementGenerator
                 Builder.AppendInstruction("push eax");
                 totalArgSize += 4;
 
-                Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
+                Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
                 Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
             }
             else if (decl.Initializer != null)
             {
                 if (decl.Initializer is InitializerListExpressionNode initList) // e.g. MyStruct s = {1, 2};
                 {
-                    var allMembers = TypeManager.GetAllMembers(varTypeFqn, context.CompilationUnit);
+                    var allMembers = MemoryLayoutManager.GetAllMembers(varTypeFqn, context.CompilationUnit);
                     if (initList.Values.Count > allMembers.Count) throw new InvalidOperationException($"Too many values in initializer list for struct '{varTypeFqn}'.");
 
                     for (int j = 0; j < initList.Values.Count; j++)
                     {
                         var (memberName, memberType, memberOffset, _) = allMembers[j];
                         var valueExpr = initList.Values[j];
-                        var memberSize = TypeManager.GetSizeOfType(memberType, context.CompilationUnit);
+                        var memberSize = MemoryLayoutManager.GetSizeOfType(memberType, context.CompilationUnit);
                         var totalOffset = offset + memberOffset;
 
                         ExpressionGenerator.GenerateExpression(valueExpr, context);
@@ -129,7 +130,7 @@ public class StatementGenerator
                     Builder.AppendInstruction("push eax");
                     totalArgSize += 4;
 
-                    Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
+                    Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
                     Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
                 }
             }
@@ -137,7 +138,7 @@ public class StatementGenerator
         else if (decl.Initializer != null) // Primitive types
         {
             ExpressionGenerator.GenerateExpression(decl.Initializer, context);
-            if (TypeManager.GetSizeOfType(varTypeFqn, context.CompilationUnit) == 1)
+            if (MemoryLayoutManager.GetSizeOfType(varTypeFqn, context.CompilationUnit) == 1)
                 Builder.AppendInstruction($"mov byte [ebp + {offset}], al", $"Initialize {variableName}");
             else
                 Builder.AppendInstruction($"mov dword [ebp + {offset}], eax", $"Initialize {variableName}");
@@ -161,7 +162,7 @@ public class StatementGenerator
             Builder.AppendInstruction($"mov edi, [ebp + {retPtrOffset}]", "Destination address for return value");
 
             // Copy the struct
-            var size = TypeManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
+            var size = MemoryLayoutManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
             Builder.AppendInstruction($"push {size}");
             Builder.AppendInstruction("push esi");
             Builder.AppendInstruction("push edi");

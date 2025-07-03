@@ -23,7 +23,7 @@ public class DeclarationGenerator
         var symbols = new SymbolTable(ctor, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis, preventing NullReferenceException.
         var dummyFunctionForContext = new FunctionDeclarationNode(
-            new Token(TokenType.Keyword, "void"), 0, ctor.OwnerStructName,
+            new Token(TokenType.Keyword, "void", -1, -1), 0, ctor.OwnerStructName,
             ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
             false, false, ctor.Namespace
         );
@@ -68,7 +68,7 @@ public class DeclarationGenerator
         var symbols = new SymbolTable(dtor, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis.
         var dummyFunctionForContext = new FunctionDeclarationNode(
-            new Token(TokenType.Keyword, "void"), 0, dtor.OwnerStructName,
+            new Token(TokenType.Keyword, "void", -1, -1), 0, dtor.OwnerStructName,
             new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
             dtor.IsVirtual, false, dtor.Namespace
         );
@@ -89,7 +89,7 @@ public class DeclarationGenerator
         var parametersWithRetPtr = new List<ParameterNode>(function.Parameters);
         if (returnsStructByValue)
         {
-            var retPtrParam = new ParameterNode(new Token(TokenType.Keyword, "void"), 1, new Token(TokenType.Identifier, "__ret_ptr"));
+            var retPtrParam = new ParameterNode(new Token(TokenType.Keyword, "void", -1, -1), 1, new Token(TokenType.Identifier, "__ret_ptr", -1, -1));
             parametersWithRetPtr.Add(retPtrParam);
         }
 

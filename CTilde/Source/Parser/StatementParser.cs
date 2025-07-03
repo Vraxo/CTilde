@@ -18,7 +18,10 @@ internal class StatementParser
     {
         _parser.Eat(TokenType.LeftBrace);
         var statements = new List<StatementNode>();
-        while (_parser.Current.Type != TokenType.RightBrace) statements.Add(ParseStatement());
+        while (_parser.Current.Type != TokenType.RightBrace && _parser.Current.Type != TokenType.Unknown)
+        {
+            statements.Add(ParseStatement());
+        }
         _parser.Eat(TokenType.RightBrace);
         return new BlockStatementNode(statements);
     }
@@ -41,6 +44,7 @@ internal class StatementParser
             }
         }
 
+        // Lookahead to distinguish between a declaration and an expression statement
         bool isDeclaration = false;
         if (_parser.Current.Type == TokenType.Identifier || (_parser.Current.Type == TokenType.Keyword && (_parser.Current.Value == "const" || _parser.Current.Value == "int" || _parser.Current.Value == "char" || _parser.Current.Value == "struct")))
         {
@@ -51,7 +55,15 @@ internal class StatementParser
                 _parser.ParseType();
                 if (_parser.Current.Type == TokenType.Identifier) isDeclaration = true;
             }
-            finally { _parser._position = tempPos; }
+            catch
+            {
+                // Lookahead failed, assume not a declaration
+                isDeclaration = false;
+            }
+            finally
+            {
+                _parser._position = tempPos;
+            }
         }
 
         if (isDeclaration) return ParseDeclarationStatement();
@@ -120,7 +132,7 @@ internal class StatementParser
         }
         else if (isConst)
         {
-            throw new InvalidOperationException($"Constant variable '{identifier.Value}' must be initialized.");
+            _parser.ReportError($"Constant variable '{identifier.Value}' must be initialized.", identifier);
         }
         _parser.Eat(TokenType.Semicolon);
         return new DeclarationStatementNode(isConst, typeToken, pointerLevel, identifier, initializer, ctorArgs);

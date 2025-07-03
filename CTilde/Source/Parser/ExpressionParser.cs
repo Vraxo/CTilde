@@ -34,10 +34,12 @@ internal class ExpressionParser
         var left = ParseEqualityExpression();
         if (_parser.Current.Type == TokenType.Assignment)
         {
-            _parser.Eat(TokenType.Assignment);
+            var operatorToken = _parser.Eat(TokenType.Assignment);
             var right = ParseAssignmentExpression();
             if (left is VariableExpressionNode or MemberAccessExpressionNode or UnaryExpressionNode) return new AssignmentExpressionNode(left, right);
-            throw new InvalidOperationException($"Invalid assignment target: {left.GetType().Name}");
+
+            _parser.ReportError($"The left-hand side of an assignment must be a variable, property or indexer.", operatorToken);
+            return left; // Return the invalid left-hand side to allow parsing to continue.
         }
         return left;
     }
@@ -157,32 +159,39 @@ internal class ExpressionParser
 
     private ExpressionNode ParsePrimaryExpression()
     {
-        if (_parser.Current.Type == TokenType.IntegerLiteral)
+        var token = _parser.Current;
+        switch (token.Type)
         {
-            var token = _parser.Eat(TokenType.IntegerLiteral);
-            if (int.TryParse(token.Value, out int v)) return new IntegerLiteralNode(v);
-            throw new InvalidOperationException($"Could not parse int: {token.Value}");
+            case TokenType.IntegerLiteral:
+                _parser.Eat(TokenType.IntegerLiteral);
+                if (int.TryParse(token.Value, out int v)) return new IntegerLiteralNode(v);
+                _parser.ReportError($"Could not parse int: {token.Value}", token);
+                return new IntegerLiteralNode(0);
+
+            case TokenType.HexLiteral:
+                _parser.Eat(TokenType.HexLiteral);
+                var hex = token.Value.StartsWith("0x") ? token.Value.Substring(2) : token.Value;
+                if (int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int vHex)) return new IntegerLiteralNode(vHex);
+                _parser.ReportError($"Could not parse hex: {token.Value}", token);
+                return new IntegerLiteralNode(0);
+
+            case TokenType.StringLiteral:
+                _parser.Eat(TokenType.StringLiteral);
+                return new StringLiteralNode(token.Value, $"str{_stringLabelCounter++}");
+
+            case TokenType.Identifier:
+                return new VariableExpressionNode(_parser.Eat(TokenType.Identifier));
+
+            case TokenType.LeftParen:
+                _parser.Eat(TokenType.LeftParen);
+                var expr = ParseExpression();
+                _parser.Eat(TokenType.RightParen);
+                return expr;
         }
-        if (_parser.Current.Type == TokenType.HexLiteral)
-        {
-            var token = _parser.Eat(TokenType.HexLiteral);
-            var hex = token.Value.StartsWith("0x") ? token.Value.Substring(2) : token.Value;
-            if (int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int v)) return new IntegerLiteralNode(v);
-            throw new InvalidOperationException($"Could not parse hex: {token.Value}");
-        }
-        if (_parser.Current.Type == TokenType.StringLiteral)
-        {
-            var token = _parser.Eat(TokenType.StringLiteral);
-            return new StringLiteralNode(token.Value, $"str{_stringLabelCounter++}");
-        }
-        if (_parser.Current.Type == TokenType.Identifier) return new VariableExpressionNode(_parser.Eat(TokenType.Identifier));
-        if (_parser.Current.Type == TokenType.LeftParen)
-        {
-            _parser.Eat(TokenType.LeftParen);
-            var expr = ParseExpression();
-            _parser.Eat(TokenType.RightParen);
-            return expr;
-        }
-        throw new InvalidOperationException($"Unexpected expression token: {_parser.Current.Type}");
+
+        _parser.ReportError($"Unexpected token in expression: '{token.Type}'", token);
+        // Advance past the bad token to prevent an infinite loop and return a dummy node.
+        _parser.AdvancePosition(1);
+        return new IntegerLiteralNode(0);
     }
 }

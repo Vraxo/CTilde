@@ -1857,18 +1857,19 @@ public class StatementGenerator
                         throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
                     }
 
-                    ExpressionGenerator.GenerateExpression(decl.Initializer, context);
                     int totalArgSize;
-
-                    if (takeAddressOfInitializer || (TypeRepository.IsStruct(initializerType) && !initializerType.EndsWith("*")))
+                    if (takeAddressOfInitializer)
                     {
-                        Builder.AppendInstruction("push eax"); // Push address of initializer struct
+                        // We need the address of the initializer object. `GenerateExpression` on a struct-type expression gives its address.
+                        ExpressionGenerator.GenerateExpression(decl.Initializer, context);
+                        Builder.AppendInstruction("push eax", "Push pointer to initializer object for copy ctor");
                         totalArgSize = 4;
                     }
                     else
                     {
-                        // PushArgument will have already pushed the value
-                        totalArgSize = MemoryLayoutManager.GetSizeOfType(initializerType, context.CompilationUnit);
+                        // The constructor takes the initializer by value (either a primitive/pointer, or a struct).
+                        // PushArgument handles both cases correctly (pushing value, or member-wise copy).
+                        totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
                     }
 
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
@@ -3243,7 +3244,7 @@ public class Tokenizer
 #import "raylib.dll"
 #import "msvcrt.dll"
 #include "raylib.c"
-//#include "string.c"
+#include "string.c"
 #include "position.c"
 #include "text_object.c"
 
@@ -3263,9 +3264,9 @@ int main()
     rl::InitWindow(screenWidth, screenHeight, "Operator Overloading!");
     rl::SetTargetFPS(60);
 
-    //string hello = "Hello ";
-    //string world = "World!";
-    //string message = hello + &world; 
+    string hello = "Hello ";
+    string world = "World!";
+    string message = hello + &world; 
     
     TextObject myText(150, 275, "GO FUCK YOURSELF", 40, maroon);
 
@@ -3525,17 +3526,16 @@ struct TextObject : Position
 {
 private:
     int speed; 
-    char* m_text;
+    string* m_text;
 
 public:
     int fontSize;
     Color color;
 
-    TextObject(int startX, int startY, char* literal, int fSize, Color newColor) // MODIFIED
+    TextObject(int startX, int startY, char* literal, int fSize, Color newColor)
         : Position(startX, startY)
     {
-        //m_text = new string(literal); 
-        m_text = literal;
+        m_text = new string(literal);
         fontSize = fSize;
         color = newColor;
         speed = 100; 
@@ -3548,7 +3548,7 @@ public:
 
     void draw() 
     {
-        DrawText(m_text, x, y, fontSize, color);
+        DrawText(m_text->c_str(), x, y, fontSize, color);
     }
     
     void move_right(int deltaTime) 

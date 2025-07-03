@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using CTilde.Diagnostics;
 
 namespace CTilde;
 
@@ -11,6 +12,9 @@ public class Parser
     internal int _position;
     internal string? _currentNamespace;
     internal readonly List<ImportDirectiveNode> _imports = new();
+    private string _filePath = "";
+
+    public List<Diagnostic> Diagnostics { get; } = new();
 
     private readonly ExpressionParser _expressionParser;
     private readonly StatementParser _statementParser;
@@ -23,8 +27,13 @@ public class Parser
         _statementParser = new StatementParser(this, _expressionParser);
     }
 
-    internal Token Current => _position < _tokens.Count ? _tokens[_position] : new(TokenType.Unknown, string.Empty);
-    internal Token Peek(int offset) => _position + offset < _tokens.Count ? _tokens[_position + offset] : new(TokenType.Unknown, string.Empty);
+    internal Token Current => _position < _tokens.Count ? _tokens[_position] : _tokens[^1];
+    internal Token Peek(int offset) => _position + offset < _tokens.Count ? _tokens[_position + offset] : _tokens[^1];
+
+    internal void ReportError(string message, Token token)
+    {
+        Diagnostics.Add(new Diagnostic(_filePath, message, token.Line, token.Column));
+    }
 
     internal Token Eat(TokenType expectedType)
     {
@@ -34,7 +43,9 @@ public class Parser
             _position++;
             return currentToken;
         }
-        throw new InvalidOperationException($"Expected token {expectedType} but got {currentToken.Type} ('{currentToken.Value}') at position {_position}");
+
+        ReportError($"Expected token '{expectedType}' but got '{currentToken.Type}' ('{currentToken.Value}')", currentToken);
+        return new Token(expectedType, string.Empty, currentToken.Line, currentToken.Column); // Return a dummy token
     }
 
     internal void AdvancePosition(int amount) => _position += amount;
@@ -43,6 +54,7 @@ public class Parser
 
     public CompilationUnitNode Parse(string filePath)
     {
+        _filePath = filePath;
         var usings = new List<UsingDirectiveNode>();
         var structs = new List<StructDefinitionNode>();
         var functions = new List<FunctionDeclarationNode>();
@@ -50,41 +62,55 @@ public class Parser
 
         while (Current.Type != TokenType.Unknown)
         {
-            if (Current.Type == TokenType.Hash)
+            try
             {
-                var hashKeyword = Peek(1);
-                if (hashKeyword.Type == TokenType.Identifier && hashKeyword.Value == "import")
+                if (Current.Type == TokenType.Hash)
                 {
-                    _imports.Add(ParseImportDirective());
+                    var hashKeyword = Peek(1);
+                    if (hashKeyword.Type == TokenType.Identifier && hashKeyword.Value == "import")
+                    {
+                        _imports.Add(ParseImportDirective());
+                    }
+                    else if (hashKeyword.Type == TokenType.Identifier && hashKeyword.Value == "include")
+                    {
+                        ParseIncludeDirective(); // Handle and skip #include
+                    }
+                    else
+                    {
+                        ReportError($"Unexpected directive after '#': '{hashKeyword.Value}'", hashKeyword);
+                        AdvancePosition(2); // Skip '#' and the bad identifier
+                    }
                 }
-                else if (hashKeyword.Type == TokenType.Identifier && hashKeyword.Value == "include")
+                else if (Current.Type == TokenType.Keyword && Current.Value == "using")
                 {
-                    ParseIncludeDirective(); // Handle and skip #include
+                    usings.Add(ParseUsingDirective());
+                }
+                else if (Current.Type == TokenType.Keyword && Current.Value == "namespace")
+                {
+                    ParseNamespaceDirective();
+                }
+                else if (Current.Type == TokenType.Keyword && Current.Value == "struct")
+                {
+                    structs.Add(ParseStructDefinition());
+                }
+                else if (Current.Type == TokenType.Keyword && Current.Value == "enum")
+                {
+                    enums.Add(ParseEnumDefinition());
                 }
                 else
                 {
-                    throw new InvalidOperationException($"Unexpected directive after #: '{hashKeyword.Value}'");
+                    functions.Add(ParseGlobalFunction());
                 }
             }
-            else if (Current.Type == TokenType.Keyword && Current.Value == "using")
+            catch (Exception) // Catch potential cascading failures from bad tokens
             {
-                usings.Add(ParseUsingDirective());
-            }
-            else if (Current.Type == TokenType.Keyword && Current.Value == "namespace")
-            {
-                ParseNamespaceDirective();
-            }
-            else if (Current.Type == TokenType.Keyword && Current.Value == "struct")
-            {
-                structs.Add(ParseStructDefinition());
-            }
-            else if (Current.Type == TokenType.Keyword && Current.Value == "enum")
-            {
-                enums.Add(ParseEnumDefinition());
-            }
-            else
-            {
-                functions.Add(ParseGlobalFunction());
+                // Synchronize to the next likely statement start to continue parsing
+                while (Current.Type != TokenType.Semicolon && Current.Type != TokenType.RightBrace && Current.Type != TokenType.Unknown)
+                {
+                    AdvancePosition(1);
+                }
+                // Also consume the synchronizing token
+                if (Current.Type != TokenType.Unknown) AdvancePosition(1);
             }
         }
 
@@ -148,7 +174,7 @@ public class Parser
         var members = new List<EnumMemberNode>();
         int currentValue = 0; // Default enum value starts at 0 and increments
 
-        while (Current.Type != TokenType.RightBrace)
+        while (Current.Type != TokenType.RightBrace && Current.Type != TokenType.Unknown)
         {
             var memberName = Eat(TokenType.Identifier);
             if (Current.Type == TokenType.Assignment)
@@ -157,7 +183,7 @@ public class Parser
                 var valueToken = Eat(TokenType.IntegerLiteral);
                 if (!int.TryParse(valueToken.Value, out currentValue))
                 {
-                    throw new InvalidOperationException($"Invalid integer value for enum member '{memberName.Value}': '{valueToken.Value}'");
+                    ReportError($"Invalid integer value for enum member '{memberName.Value}': '{valueToken.Value}'", valueToken);
                 }
             }
             members.Add(new EnumMemberNode(memberName, currentValue));
@@ -169,7 +195,8 @@ public class Parser
             }
             else if (Current.Type != TokenType.RightBrace)
             {
-                throw new InvalidOperationException($"Expected ',' or '}}' after enum member '{memberName.Value}'");
+                ReportError($"Expected ',' or '}}' after enum member '{memberName.Value}'", Current);
+                break;
             }
         }
 
@@ -199,7 +226,7 @@ public class Parser
 
         var currentAccess = AccessSpecifier.Private;
 
-        while (Current.Type != TokenType.RightBrace)
+        while (Current.Type != TokenType.RightBrace && Current.Type != TokenType.Unknown)
         {
             if (Current.Type == TokenType.Keyword && (Current.Value == "public" || Current.Value == "private"))
             {
@@ -212,6 +239,7 @@ public class Parser
             bool isConst = false;
             bool isVirtual = false;
             bool isOverride = false;
+            var startToken = Current;
 
             if (Current.Type == TokenType.Keyword && Current.Value == "const")
             {
@@ -230,7 +258,7 @@ public class Parser
                 Eat(TokenType.Keyword);
             }
 
-            if (isVirtual && isOverride) throw new InvalidOperationException("A method cannot be both 'virtual' and 'override'.");
+            if (isVirtual && isOverride) ReportError("A method cannot be both 'virtual' and 'override'.", startToken);
 
             if (Current.Type == TokenType.Tilde)
             {
@@ -240,7 +268,7 @@ public class Parser
 
             if (Current.Type == TokenType.Identifier && Current.Value == structName.Value && Peek(1).Type == TokenType.LeftParen)
             {
-                if (isVirtual || isOverride || isConst) throw new InvalidOperationException("Constructors cannot be marked 'virtual', 'override', or 'const'.");
+                if (isVirtual || isOverride || isConst) ReportError("Constructors cannot be marked 'virtual', 'override', or 'const'.", startToken);
                 constructors.Add(ParseConstructor(structName.Value, baseStructName, currentAccess));
                 continue;
             }
@@ -253,7 +281,7 @@ public class Parser
                 Eat(TokenType.Keyword); // operator
                 var opToken = Current;
                 _position++;
-                name = new Token(TokenType.Identifier, $"operator_{NameMangler.MangleOperator(opToken.Value)}");
+                name = new Token(TokenType.Identifier, $"operator_{NameMangler.MangleOperator(opToken.Value)}", opToken.Line, opToken.Column);
             }
             else
             {
@@ -267,7 +295,7 @@ public class Parser
             }
             else
             {
-                if (isVirtual || isOverride) throw new InvalidOperationException("Only methods can be marked 'virtual' or 'override'.");
+                if (isVirtual || isOverride) ReportError("Only methods can be marked 'virtual' or 'override'.", startToken);
                 members.Add(new MemberVariableNode(isConst, type, pointerLevel, name, currentAccess));
                 Eat(TokenType.Semicolon);
             }
@@ -280,16 +308,16 @@ public class Parser
 
     private ConstructorDeclarationNode ParseConstructor(string ownerStructName, string? baseStructName, AccessSpecifier access)
     {
-        Eat(TokenType.Identifier);
+        var nameToken = Eat(TokenType.Identifier);
         var parameters = ParseParameterList(false);
 
         BaseInitializerNode? baseInitializer = null;
         if (Current.Type == TokenType.Colon)
         {
-            if (baseStructName == null) throw new InvalidOperationException($"Struct '{ownerStructName}' cannot have a base initializer because it does not inherit from another struct.");
+            if (baseStructName == null) ReportError($"Struct '{ownerStructName}' cannot have a base initializer because it does not inherit from another struct.", nameToken);
             Eat(TokenType.Colon);
             var baseName = Eat(TokenType.Identifier);
-            if (baseName.Value != baseStructName) throw new InvalidOperationException($"Base initializer name '{baseName.Value}' does not match the base struct name '{baseStructName}'.");
+            if (baseName.Value != baseStructName) ReportError($"Base initializer name '{baseName.Value}' does not match the base struct name '{baseStructName}'.", baseName);
 
             Eat(TokenType.LeftParen);
             var arguments = new List<ExpressionNode>();
@@ -310,7 +338,7 @@ public class Parser
     {
         Eat(TokenType.Tilde);
         var name = Eat(TokenType.Identifier);
-        if (name.Value != ownerStructName) throw new InvalidOperationException($"Destructor name '~{name.Value}' must match struct name '{ownerStructName}'.");
+        if (name.Value != ownerStructName) ReportError($"Destructor name '~{name.Value}' must match struct name '{ownerStructName}'.", name);
 
         Eat(TokenType.LeftParen);
         Eat(TokenType.RightParen);
@@ -369,7 +397,7 @@ public class Parser
         {
             if (namespaceQualifier != null)
             {
-                typeToken = new Token(typeToken.Type, $"{namespaceQualifier}::{typeToken.Value}");
+                typeToken = new Token(typeToken.Type, $"{namespaceQualifier}::{typeToken.Value}", typeToken.Line, typeToken.Column);
             }
         }
 
@@ -413,7 +441,9 @@ public class Parser
         if (isMethod && ownerStructName != null)
         {
             var thisTypeTokenValue = namespaceName != null ? $"{namespaceName}::{ownerStructName}" : ownerStructName;
-            var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeTokenValue), 1, new Token(TokenType.Identifier, "this"));
+            var thisType = new Token(TokenType.Identifier, thisTypeTokenValue, -1, -1); // Location doesn't matter for this internal param
+            var thisName = new Token(TokenType.Identifier, "this", -1, -1);
+            var thisParam = new ParameterNode(thisType, 1, thisName);
             parameters.Insert(0, thisParam);
         }
 

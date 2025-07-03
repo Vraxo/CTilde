@@ -169,7 +169,7 @@ public class ExpressionGenerator
 
         if (context.CurrentFunction?.OwnerStructName != null)
         {
-            var thisMemberAccess = new MemberAccessExpressionNode(new VariableExpressionNode(new Token(TokenType.Identifier, "this")), new Token(TokenType.Arrow, "->"), varExpr.Identifier) { Parent = varExpr.Parent };
+            var thisMemberAccess = new MemberAccessExpressionNode(new VariableExpressionNode(new Token(TokenType.Identifier, "this", -1, -1)), new Token(TokenType.Arrow, "->", -1, -1), varExpr.Identifier) { Parent = varExpr.Parent };
             GenerateMemberAccessExpression(thisMemberAccess, context);
             return;
         }

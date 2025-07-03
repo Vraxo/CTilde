@@ -24,7 +24,7 @@ public class SymbolTable
         CollectDeclarations(ctor.Body, allLocalDeclarations);
 
         var thisTypeName = ctor.Namespace != null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName;
-        var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName), 1, new Token(TokenType.Identifier, "this"));
+        var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName, -1, -1), 1, new Token(TokenType.Identifier, "this", -1, -1));
 
         var allParams = new List<ParameterNode> { thisParam };
         allParams.AddRange(ctor.Parameters);
@@ -38,7 +38,7 @@ public class SymbolTable
         CollectDeclarations(dtor.Body, allLocalDeclarations);
 
         var thisTypeName = dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName;
-        var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName), 1, new Token(TokenType.Identifier, "this"));
+        var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName, -1, -1), 1, new Token(TokenType.Identifier, "this", -1, -1));
 
         Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeResolver, memoryLayoutManager, dtor.Namespace, currentUnit);
     }

@@ -58,8 +58,9 @@ public class Tokenizer
         "enum",
         "virtual",
         "override",
-        "new",      // NEW
-        "delete"    // NEW
+        "new",
+        "delete",
+        "operator" // NEW
     ];
 
     public static List<Token> Tokenize(string input)

@@ -104,6 +104,16 @@ public class TypeManager
     }
 
     public FunctionDeclarationNode ResolveMethod(StructDefinitionNode owner, string name) => owner.Methods.FirstOrDefault(m => m.Name == name) ?? throw new InvalidOperationException($"Method '{name}' not found on struct '{owner.Name}'");
+
+    public FunctionDeclarationNode? FindMethod(string structFqn, string methodName)
+    {
+        if (!_structs.TryGetValue(structFqn, out var structDef))
+        {
+            return null;
+        }
+        return structDef.Methods.FirstOrDefault(m => m.Name == methodName);
+    }
+
     public ConstructorDeclarationNode? FindConstructor(string fqn, int argCount) => _structs[fqn].Constructors.FirstOrDefault(c => c.Parameters.Count == argCount);
     public DestructorDeclarationNode? FindDestructor(string fqn) => _structs.ContainsKey(fqn) ? _structs[fqn].Destructors.FirstOrDefault() : null;
 

@@ -22,11 +22,45 @@ public class SemanticAnalyzer
             AssignmentExpressionNode a => AnalyzeExpressionType(a.Left, context), // Type of assignment is type of l-value
             MemberAccessExpressionNode ma => AnalyzeMemberAccessExpression(ma, context),
             UnaryExpressionNode u => AnalyzeUnaryExpression(u, context),
-            CallExpressionNode c => AnalyzeCallExpression(c, context),
+            CallExpressionNode c => AnalyzeCallExpression(c, context), // MODIFIED
             QualifiedAccessExpressionNode q => AnalyzeQualifiedAccessExpression(q, context),
-            BinaryExpressionNode => "int", // All binary operations currently result in an integer
+            NewExpressionNode n => AnalyzeNewExpression(n, context),
+            BinaryExpressionNode bin => AnalyzeBinaryExpression(bin, context),
             _ => throw new NotImplementedException($"AnalyzeExpressionType not implemented for {expr.GetType().Name}")
         };
+    }
+
+    public string AnalyzeFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
+    {
+        var returnTypeNameRaw = _typeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
+
+        if (func.ReturnType.Type != TokenType.Keyword && !returnTypeNameRaw.StartsWith("void"))
+        {
+            string baseReturnName = returnTypeNameRaw.TrimEnd('*');
+            string pointerSuffix = new string('*', returnTypeNameRaw.Length - baseReturnName.Length);
+            return _typeManager.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + pointerSuffix;
+        }
+
+        return returnTypeNameRaw;
+    }
+
+    private string AnalyzeBinaryExpression(BinaryExpressionNode bin, AnalysisContext context)
+    {
+        var leftTypeFqn = AnalyzeExpressionType(bin.Left, context);
+        var overload = _typeManager.FindMethod(leftTypeFqn, $"operator{bin.Operator.Value}");
+
+        if (overload != null)
+        {
+            return AnalyzeFunctionReturnType(overload, context);
+        }
+        return "int"; // Default for primitive binary ops
+    }
+
+    private string AnalyzeNewExpression(NewExpressionNode n, AnalysisContext context)
+    {
+        // A new expression always returns a pointer to the type.
+        var typeName = _typeManager.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        return typeName + "*";
     }
 
     private string AnalyzeVariableExpression(VariableExpressionNode v, AnalysisContext context)
@@ -105,17 +139,7 @@ public class SemanticAnalyzer
             func = _typeManager.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
         }
 
-        string returnTypeNameRaw = _typeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
-
-        // If the return type is not a primitive keyword (and not void), it's a UDT that needs full resolution.
-        if (func.ReturnType.Type != TokenType.Keyword && !returnTypeNameRaw.StartsWith("void"))
-        {
-            string baseReturnName = returnTypeNameRaw.TrimEnd('*');
-            string returnPointerSuffix = new('*', returnTypeNameRaw.Length - baseReturnName.Length);
-            return _typeManager.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + returnPointerSuffix;
-        }
-
-        return returnTypeNameRaw;
+        return AnalyzeFunctionReturnType(func, context);
     }
 
     private string ResolveQualifier(ExpressionNode expr)

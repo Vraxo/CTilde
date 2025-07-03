@@ -126,9 +126,35 @@ public class StatementGenerator
 
     private void GenerateReturn(ReturnStatementNode ret, AnalysisContext context)
     {
-        if (ret.Expression != null) ExpressionGenerator.GenerateExpression(ret.Expression, context);
-        // NOTE: The actual return instruction is now handled by the epilogue generation in CodeGenerator
-        // to ensure destructors are called first.
+        var returnTypeFqn = _context.SemanticAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
+        if (TypeManager.IsStruct(returnTypeFqn))
+        {
+            // Handle return by value for structs (RVO)
+            if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");
+
+            // Get the address of the return value object
+            ExpressionGenerator.GenerateExpression(ret.Expression, context);
+            Builder.AppendInstruction("mov esi, eax", "Source address for return value");
+
+            // Get the hidden pointer to the destination (passed by the caller)
+            context.Symbols.TryGetSymbol("__ret_ptr", out var retPtrOffset, out _, out _);
+            Builder.AppendInstruction($"mov edi, [ebp + {retPtrOffset}]", "Destination address for return value");
+
+            // Copy the struct
+            var size = TypeManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
+            Builder.AppendInstruction($"push {size}");
+            Builder.AppendInstruction("push esi");
+            Builder.AppendInstruction("push edi");
+            Builder.AppendInstruction("call [memcpy]");
+            Builder.AppendInstruction("add esp, 12");
+        }
+        else
+        {
+            // Handle return for primitive types
+            if (ret.Expression != null) ExpressionGenerator.GenerateExpression(ret.Expression, context);
+        }
+
+        // The actual `ret` instruction is in the epilogue to ensure destructors are called.
     }
 
     private void GenerateWhile(WhileStatementNode w, AnalysisContext context)

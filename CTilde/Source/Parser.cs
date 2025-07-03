@@ -240,7 +240,19 @@ public class Parser
             }
 
             var (type, pointerLevel) = ParseType();
-            var name = Eat(TokenType.Identifier);
+
+            Token name;
+            if (Current.Type == TokenType.Keyword && Current.Value == "operator")
+            {
+                Eat(TokenType.Keyword); // operator
+                var opToken = Current;
+                _position++;
+                name = new Token(TokenType.Identifier, $"operator{opToken.Value}");
+            }
+            else
+            {
+                name = Eat(TokenType.Identifier);
+            }
 
             if (Current.Type == TokenType.LeftParen)
             {
@@ -430,7 +442,7 @@ public class Parser
                 case "return": return ParseReturnStatement();
                 case "if": return ParseIfStatement();
                 case "while": return ParseWhileStatement();
-                case "delete": return ParseDeleteStatement(); // NEW
+                case "delete": return ParseDeleteStatement();
                 case "const":
                 case "int":
                 case "char":

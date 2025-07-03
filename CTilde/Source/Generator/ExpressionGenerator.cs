@@ -213,13 +213,11 @@ public class ExpressionGenerator
             Builder.AppendInstruction("mov edi, eax", "Pop destination into EDI");
             Builder.AppendInstruction("pop esi", "Pop source into ESI");
             int size = TypeManager.GetSizeOfType(lValueType, context.CompilationUnit);
-            Builder.AppendInstruction($"mov ecx, {size / 4}");
-            Builder.AppendInstruction("rep movsd");
-            if (size % 4 > 0)
-            {
-                Builder.AppendInstruction($"mov ecx, {size % 4}");
-                Builder.AppendInstruction("rep movsb");
-            }
+            Builder.AppendInstruction($"push {size}");
+            Builder.AppendInstruction("push esi");
+            Builder.AppendInstruction("push edi");
+            Builder.AppendInstruction("call [memcpy]");
+            Builder.AppendInstruction("add esp, 12");
         }
         else
         {
@@ -235,7 +233,18 @@ public class ExpressionGenerator
 
     private void GenerateCallExpression(CallExpressionNode callExpr, AnalysisContext context)
     {
+        var returnType = SemanticAnalyzer.AnalyzeExpressionType(callExpr, context);
+        bool returnsStruct = TypeManager.IsStruct(returnType);
         int totalArgSize = 0;
+
+        if (returnsStruct)
+        {
+            var size = TypeManager.GetSizeOfType(returnType, context.CompilationUnit);
+            Builder.AppendInstruction($"sub esp, {size}", "Make space for return value");
+            Builder.AppendInstruction("push esp", "Push hidden return value pointer");
+            totalArgSize += 4;
+        }
+
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
             totalArgSize += PushArgument(arg, context);
@@ -256,7 +265,8 @@ public class ExpressionGenerator
             if (method.IsVirtual || method.IsOverride)
             {
                 var vtableIndex = TypeManager.GetMethodVTableIndex(ownerTypeFqn, method.Name);
-                Builder.AppendInstruction("mov eax, [esp]", "Get 'this' from stack without popping");
+                int thisPtrOffset = totalArgSize - 4; // 'this' is the last thing pushed before call
+                Builder.AppendInstruction($"mov eax, [esp + {thisPtrOffset}]", "Get 'this' from stack");
                 Builder.AppendInstruction("mov eax, [eax]", "Get vtable pointer from object");
                 Builder.AppendInstruction($"mov eax, [eax + {vtableIndex * 4}]", $"Get method address from vtable[{vtableIndex}]");
                 Builder.AppendInstruction("call eax");
@@ -270,27 +280,51 @@ public class ExpressionGenerator
             if (func.Body == null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
         }
-        if (totalArgSize > 0) Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
+
+        Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
+
+        if (returnsStruct)
+        {
+            Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
+        }
     }
 
     private void GenerateBinaryExpression(BinaryExpressionNode binExpr, AnalysisContext context)
     {
-        GenerateExpression(binExpr.Right, context);
-        Builder.AppendInstruction("push eax");
-        GenerateExpression(binExpr.Left, context);
-        Builder.AppendInstruction("pop ecx");
+        var leftTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(binExpr.Left, context);
 
-        switch (binExpr.Operator.Type)
+        var opName = $"operator{binExpr.Operator.Value}";
+        var overload = TypeManager.FindMethod(leftTypeFqn, opName);
+
+        if (overload != null)
         {
-            case TokenType.Plus: Builder.AppendInstruction("add eax, ecx"); break;
-            case TokenType.Minus: Builder.AppendInstruction("sub eax, ecx"); break;
-            case TokenType.Star: Builder.AppendInstruction("imul eax, ecx"); break;
-            case TokenType.Slash: Builder.AppendInstruction("cdq"); Builder.AppendInstruction("idiv ecx"); break;
-            case TokenType.DoubleEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("sete al"); Builder.AppendInstruction("movzx eax, al"); break;
-            case TokenType.NotEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setne al"); Builder.AppendInstruction("movzx eax, al"); break;
-            case TokenType.LessThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setl al"); Builder.AppendInstruction("movzx eax, al"); break;
-            case TokenType.GreaterThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setg al"); Builder.AppendInstruction("movzx eax, al"); break;
-            default: throw new NotImplementedException($"Op: {binExpr.Operator.Type}");
+            // The argument to the operator should be a pointer to the right-hand side.
+            var argExpr = new UnaryExpressionNode(new Token(TokenType.Ampersand, "&"), binExpr.Right);
+
+            GenerateCallExpression(new CallExpressionNode(
+                new MemberAccessExpressionNode(binExpr.Left, new Token(TokenType.Dot, "."), new Token(TokenType.Identifier, opName)),
+                new List<ExpressionNode> { argExpr }
+            ), context);
+        }
+        else
+        {
+            GenerateExpression(binExpr.Right, context);
+            Builder.AppendInstruction("push eax");
+            GenerateExpression(binExpr.Left, context);
+            Builder.AppendInstruction("pop ecx");
+
+            switch (binExpr.Operator.Type)
+            {
+                case TokenType.Plus: Builder.AppendInstruction("add eax, ecx"); break;
+                case TokenType.Minus: Builder.AppendInstruction("sub eax, ecx"); break;
+                case TokenType.Star: Builder.AppendInstruction("imul eax, ecx"); break;
+                case TokenType.Slash: Builder.AppendInstruction("cdq"); Builder.AppendInstruction("idiv ecx"); break;
+                case TokenType.DoubleEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("sete al"); Builder.AppendInstruction("movzx eax, al"); break;
+                case TokenType.NotEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setne al"); Builder.AppendInstruction("movzx eax, al"); break;
+                case TokenType.LessThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setl al"); Builder.AppendInstruction("movzx eax, al"); break;
+                case TokenType.GreaterThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setg al"); Builder.AppendInstruction("movzx eax, al"); break;
+                default: throw new NotImplementedException($"Op: {binExpr.Operator.Type}");
+            }
         }
     }
 

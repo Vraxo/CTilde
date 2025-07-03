@@ -196,19 +196,12 @@ namespace CTilde;
 public class SemanticAnalyzer
 {
     private readonly TypeManager _typeManager;
+    private readonly MemoryLayoutManager _memoryLayoutManager;
 
-    public SemanticAnalyzer(TypeManager typeManager)
+    public SemanticAnalyzer(TypeManager typeManager, MemoryLayoutManager memoryLayoutManager)
     {
         _typeManager = typeManager;
-    }
-
-    private string MangleOperator(string op)
-    {
-        return op switch
-        {
-            "+" => "plus",
-            _ => throw new NotImplementedException($"Operator mangling for '{op}' is not implemented.")
-        };
+        _memoryLayoutManager = memoryLayoutManager;
     }
 
     public string AnalyzeExpressionType(ExpressionNode expr, AnalysisContext context)
@@ -231,7 +224,7 @@ public class SemanticAnalyzer
 
     public string AnalyzeFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
     {
-        var returnTypeNameRaw = _typeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
+        var returnTypeNameRaw = TypeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
         string resolvedReturnName;
 
         if (func.ReturnType.Type != TokenType.Keyword && !returnTypeNameRaw.StartsWith("void"))
@@ -263,7 +256,7 @@ public class SemanticAnalyzer
         {
             try
             {
-                var opName = $"operator_{MangleOperator(bin.Operator.Value)}";
+                var opName = $"operator_{NameMangler.MangleOperator(bin.Operator.Value)}";
                 var overload = _typeManager.FindMethod(leftTypeFqn, opName);
 
                 if (overload != null)
@@ -313,7 +306,7 @@ public class SemanticAnalyzer
                     ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}"
                     : context.CurrentFunction.OwnerStructName;
 
-                (_, string memberTypeResolved) = _typeManager.GetMemberInfo(ownerStructFqn, v.Identifier.Value, context.CompilationUnit);
+                (_, string memberTypeResolved) = _memoryLayoutManager.GetMemberInfo(ownerStructFqn, v.Identifier.Value, context.CompilationUnit);
                 return memberTypeResolved;
             }
             catch (InvalidOperationException) { /* Fall through to the final error */ }
@@ -326,7 +319,7 @@ public class SemanticAnalyzer
     {
         var leftType = AnalyzeExpressionType(ma.Left, context);
         string baseStructType = leftType.TrimEnd('*');
-        var (_, resolvedMemberType) = _typeManager.GetMemberInfo(baseStructType, ma.Member.Value, context.CompilationUnit);
+        var (_, resolvedMemberType) = _memoryLayoutManager.GetMemberInfo(baseStructType, ma.Member.Value, context.CompilationUnit);
         return resolvedMemberType;
     }
 
@@ -467,6 +460,7 @@ public class CodeGenerator
 {
     internal ProgramNode Program { get; }
     internal TypeManager TypeManager { get; }
+    internal MemoryLayoutManager MemoryLayoutManager { get; }
     internal SemanticAnalyzer SemanticAnalyzer { get; }
     internal AssemblyBuilder Builder { get; } = new();
 
@@ -481,7 +475,8 @@ public class CodeGenerator
     {
         Program = program;
         TypeManager = new TypeManager(program);
-        SemanticAnalyzer = new SemanticAnalyzer(TypeManager);
+        MemoryLayoutManager = new MemoryLayoutManager(TypeManager);
+        SemanticAnalyzer = new SemanticAnalyzer(TypeManager, MemoryLayoutManager);
 
         ExpressionGenerator = new ExpressionGenerator(this);
         _statementGenerator = new StatementGenerator(this);
@@ -547,14 +542,14 @@ public class CodeGenerator
             var structFqn = TypeManager.GetFullyQualifiedName(s);
             if (TypeManager.HasVTable(structFqn))
             {
-                Builder.AppendLabel(TypeManager.GetVTableLabel(s));
+                Builder.AppendLabel(NameMangler.GetVTableLabel(s));
                 var vtable = TypeManager.GetVTable(structFqn);
                 foreach (var entry in vtable)
                 {
                     var mangledName = entry switch
                     {
-                        FunctionDeclarationNode f => TypeManager.Mangle(f),
-                        DestructorDeclarationNode d => TypeManager.Mangle(d),
+                        FunctionDeclarationNode f => NameMangler.Mangle(f),
+                        DestructorDeclarationNode d => NameMangler.Mangle(d),
                         _ => throw new InvalidOperationException("Invalid vtable entry type")
                     };
                     Builder.AppendInstruction($"dd {mangledName}");
@@ -590,7 +585,7 @@ public class CodeGenerator
 
     private void GenerateConstructor(ConstructorDeclarationNode ctor, CompilationUnitNode unit)
     {
-        var symbols = new SymbolTable(ctor, TypeManager, unit);
+        var symbols = new SymbolTable(ctor, TypeManager, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis, preventing NullReferenceException.
         var dummyFunctionForContext = new FunctionDeclarationNode(
             new Token(TokenType.Keyword, "void"), 0, ctor.OwnerStructName,
@@ -599,7 +594,7 @@ public class CodeGenerator
         );
         var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
 
-        Builder.AppendLabel(TypeManager.Mangle(ctor));
+        Builder.AppendLabel(NameMangler.Mangle(ctor));
         GeneratePrologue(symbols);
 
         if (ctor.Initializer != null)
@@ -624,7 +619,7 @@ public class CodeGenerator
             Builder.AppendInstruction("push eax", "Push 'this' for base ctor");
             totalArgSize += 4;
 
-            Builder.AppendInstruction($"call {TypeManager.Mangle(baseCtor)}");
+            Builder.AppendInstruction($"call {NameMangler.Mangle(baseCtor)}");
             Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up base ctor args");
             Builder.AppendBlankLine();
         }
@@ -635,7 +630,7 @@ public class CodeGenerator
 
     private void GenerateDestructor(DestructorDeclarationNode dtor, CompilationUnitNode unit)
     {
-        var symbols = new SymbolTable(dtor, TypeManager, unit);
+        var symbols = new SymbolTable(dtor, TypeManager, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis.
         var dummyFunctionForContext = new FunctionDeclarationNode(
             new Token(TokenType.Keyword, "void"), 0, dtor.OwnerStructName,
@@ -644,7 +639,7 @@ public class CodeGenerator
         );
         var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
 
-        Builder.AppendLabel(TypeManager.Mangle(dtor));
+        Builder.AppendLabel(NameMangler.Mangle(dtor));
         GeneratePrologue(symbols);
         _statementGenerator.GenerateStatement(dtor.Body, context);
         GenerateEpilogue(new List<(string, int, string)>());
@@ -652,11 +647,11 @@ public class CodeGenerator
 
     private void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
-        var symbols = new SymbolTable(function, TypeManager, unit);
+        var symbols = new SymbolTable(function, TypeManager, MemoryLayoutManager, unit);
         var context = new AnalysisContext(symbols, unit, function);
         var destructibleLocals = symbols.GetDestructibleLocals(TypeManager);
 
-        string mangledName = function.Name == "main" ? "_main" : TypeManager.Mangle(function);
+        string mangledName = function.Name == "main" ? "_main" : NameMangler.Mangle(function);
 
         Builder.AppendLabel(mangledName);
         GeneratePrologue(symbols);
@@ -705,7 +700,7 @@ public class CodeGenerator
                     }
                     else
                     {
-                        Builder.AppendInstruction($"call {TypeManager.Mangle(dtor)}");
+                        Builder.AppendInstruction($"call {NameMangler.Mangle(dtor)}");
                     }
                     Builder.AppendInstruction("add esp, 4", "Clean up 'this'");
                 }
@@ -735,21 +730,13 @@ public class ExpressionGenerator
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
     private TypeManager TypeManager => _context.TypeManager;
+    private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
     private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
     private HashSet<string> ExternalFunctions => _context.ExternalFunctions;
 
     public ExpressionGenerator(CodeGenerator context)
     {
         _context = context;
-    }
-
-    private string MangleOperator(string op)
-    {
-        return op switch
-        {
-            "+" => "plus",
-            _ => throw new NotImplementedException($"Operator mangling for '{op}' is not implemented.")
-        };
     }
 
     public int PushArgument(ExpressionNode arg, AnalysisContext context)
@@ -759,7 +746,7 @@ public class ExpressionGenerator
 
         if (TypeManager.IsStruct(argType) && !argType.EndsWith("*"))
         {
-            int argSize = TypeManager.GetSizeOfType(argType, context.CompilationUnit);
+            int argSize = MemoryLayoutManager.GetSizeOfType(argType, context.CompilationUnit);
             for (int offset = argSize - 4; offset >= 0; offset -= 4)
             {
                 Builder.AppendInstruction($"push dword [eax + {offset}]");
@@ -798,7 +785,7 @@ public class ExpressionGenerator
             try
             {
                 string ownerStructFqn = context.CurrentFunction.Namespace != null ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}" : context.CurrentFunction.OwnerStructName;
-                var (memberOffset, _) = TypeManager.GetMemberInfo(ownerStructFqn, varExpr.Identifier.Value, context.CompilationUnit);
+                var (memberOffset, _) = MemoryLayoutManager.GetMemberInfo(ownerStructFqn, varExpr.Identifier.Value, context.CompilationUnit);
                 context.Symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
                 Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
                 if (memberOffset > 0) Builder.AppendInstruction($"add eax, {memberOffset}", $"Offset for implicit this->{varExpr.Identifier.Value}");
@@ -813,7 +800,7 @@ public class ExpressionGenerator
     {
         var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context);
         string baseStructType = leftType.TrimEnd('*');
-        var (memberOffset, _) = TypeManager.GetMemberInfo(baseStructType, memberAccess.Member.Value, context.CompilationUnit);
+        var (memberOffset, _) = MemoryLayoutManager.GetMemberInfo(baseStructType, memberAccess.Member.Value, context.CompilationUnit);
 
         if (memberAccess.Operator.Type == TokenType.Dot) GenerateLValueAddress(memberAccess.Left, context);
         else GenerateExpression(memberAccess.Left, context);
@@ -842,7 +829,7 @@ public class ExpressionGenerator
     private void GenerateNewExpression(NewExpressionNode n, AnalysisContext context)
     {
         var typeFqn = TypeManager.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
-        var size = TypeManager.GetSizeOfType(typeFqn, context.CompilationUnit);
+        var size = MemoryLayoutManager.GetSizeOfType(typeFqn, context.CompilationUnit);
 
         Builder.AppendInstruction($"push {size}", "Push size for malloc");
         Builder.AppendInstruction("call [malloc]");
@@ -855,7 +842,7 @@ public class ExpressionGenerator
         if (TypeManager.HasVTable(typeFqn))
         {
             var structDef = TypeManager.FindStruct(typeFqn);
-            var vtableLabel = TypeManager.GetVTableLabel(structDef);
+            var vtableLabel = NameMangler.GetVTableLabel(structDef);
             Builder.AppendInstruction($"mov dword [edi], {vtableLabel}", "Set vtable pointer on heap object");
         }
 
@@ -868,7 +855,7 @@ public class ExpressionGenerator
         Builder.AppendInstruction("push edi", "Push 'this' pointer for constructor");
         totalArgSize += 4;
 
-        Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
+        Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
         Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
 
         Builder.AppendInstruction("mov eax, edi", "Return pointer to new object in eax");
@@ -885,7 +872,7 @@ public class ExpressionGenerator
             else
             {
                 string sign = offset > 0 ? "+" : "";
-                string instruction = TypeManager.GetSizeOfType(type, context.CompilationUnit) == 1 ? "movzx eax, byte" : "mov eax,";
+                string instruction = MemoryLayoutManager.GetSizeOfType(type, context.CompilationUnit) == 1 ? "movzx eax, byte" : "mov eax,";
                 Builder.AppendInstruction($"{instruction} [ebp {sign} {offset}]", $"Load value of {varExpr.Identifier.Value}");
             }
             return;
@@ -920,7 +907,7 @@ public class ExpressionGenerator
             case TokenType.Minus: Builder.AppendInstruction("neg eax"); break;
             case TokenType.Star:
                 var type = SemanticAnalyzer.AnalyzeExpressionType(u, context);
-                string instruction = TypeManager.GetSizeOfType(type, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
+                string instruction = MemoryLayoutManager.GetSizeOfType(type, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
                 Builder.AppendInstruction(instruction);
                 break;
         }
@@ -932,7 +919,7 @@ public class ExpressionGenerator
         var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, context);
         if (TypeManager.IsStruct(memberType) && !memberType.EndsWith("*")) return;
 
-        string instruction = TypeManager.GetSizeOfType(memberType, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
+        string instruction = MemoryLayoutManager.GetSizeOfType(memberType, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
         Builder.AppendInstruction(instruction);
     }
 
@@ -948,7 +935,7 @@ public class ExpressionGenerator
             GenerateLValueAddress(assign.Left, context);
             Builder.AppendInstruction("mov edi, eax", "Pop destination into EDI");
             Builder.AppendInstruction("pop esi", "Pop source into ESI");
-            int size = TypeManager.GetSizeOfType(lValueType, context.CompilationUnit);
+            int size = MemoryLayoutManager.GetSizeOfType(lValueType, context.CompilationUnit);
             Builder.AppendInstruction($"push {size}");
             Builder.AppendInstruction("push esi");
             Builder.AppendInstruction("push edi");
@@ -961,7 +948,7 @@ public class ExpressionGenerator
             Builder.AppendInstruction("push eax", "Push value");
             GenerateLValueAddress(assign.Left, context);
             Builder.AppendInstruction("pop ecx", "Pop value into ECX");
-            string instruction = TypeManager.GetSizeOfType(lValueType, context.CompilationUnit) == 1 ? "mov [eax], cl" : "mov [eax], ecx";
+            string instruction = MemoryLayoutManager.GetSizeOfType(lValueType, context.CompilationUnit) == 1 ? "mov [eax], cl" : "mov [eax], ecx";
             Builder.AppendInstruction(instruction, "Assign value");
         }
         if (!isStructAssign) Builder.AppendInstruction("mov eax, ecx");
@@ -975,7 +962,7 @@ public class ExpressionGenerator
 
         if (returnsStruct)
         {
-            var size = TypeManager.GetSizeOfType(returnType, context.CompilationUnit);
+            var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
             Builder.AppendInstruction($"sub esp, {size}", "Make space for return value");
             Builder.AppendInstruction("push esp", "Push hidden return value pointer");
             totalArgSize += 4;
@@ -1007,12 +994,12 @@ public class ExpressionGenerator
                 Builder.AppendInstruction($"mov eax, [eax + {vtableIndex * 4}]", $"Get method address from vtable[{vtableIndex}]");
                 Builder.AppendInstruction("call eax");
             }
-            else { Builder.AppendInstruction($"call {TypeManager.Mangle(method)}"); }
+            else { Builder.AppendInstruction($"call {NameMangler.Mangle(method)}"); }
         }
         else
         {
             var func = TypeManager.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
-            string calleeTarget = func.Body == null ? $"[{func.Name}]" : TypeManager.Mangle(func);
+            string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
             if (func.Body == null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
         }
@@ -1034,7 +1021,7 @@ public class ExpressionGenerator
 
         if (TypeManager.IsStruct(leftTypeFqn))
         {
-            var opName = $"operator_{MangleOperator(binExpr.Operator.Value)}";
+            var opName = $"operator_{NameMangler.MangleOperator(binExpr.Operator.Value)}";
             var overload = TypeManager.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
 
             var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(overload, context);
@@ -1043,7 +1030,7 @@ public class ExpressionGenerator
 
             if (returnsStruct)
             {
-                var size = TypeManager.GetSizeOfType(returnType, context.CompilationUnit);
+                var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
                 Builder.AppendInstruction($"sub esp, {size}", "Make space for op+ return value");
                 Builder.AppendInstruction("push esp", "Push hidden return value pointer");
                 totalArgSize += 4;
@@ -1055,7 +1042,7 @@ public class ExpressionGenerator
             Builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
 
-            Builder.AppendInstruction($"call {TypeManager.Mangle(overload)}");
+            Builder.AppendInstruction($"call {NameMangler.Mangle(overload)}");
             Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up op+ args");
 
             if (returnsStruct)
@@ -1108,7 +1095,7 @@ public class ExpressionGenerator
         }
 
         var func = TypeManager.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
-        string calleeTarget = func.Body == null ? $"[{func.Name}]" : TypeManager.Mangle(func);
+        string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
         if (func.Body == null) ExternalFunctions.Add(func.Name);
         Builder.AppendInstruction($"mov eax, {calleeTarget}");
     }
@@ -1235,6 +1222,152 @@ public class FasmWriter
 }
 </file>
 
+<file path="Generator\MemoryLayoutManager.cs">
+using System.Collections.Generic;
+using System.Linq;
+
+namespace CTilde;
+
+public class MemoryLayoutManager
+{
+    private readonly TypeManager _typeManager;
+
+    public MemoryLayoutManager(TypeManager typeManager)
+    {
+        _typeManager = typeManager;
+    }
+
+    public int GetSizeOfType(string typeNameFqn, CompilationUnitNode context)
+    {
+        if (typeNameFqn.EndsWith("*")) return 4;
+        if (typeNameFqn == "int") return 4;
+        if (typeNameFqn == "char") return 1;
+
+        if (_typeManager.FindStruct(typeNameFqn) is { } structDef)
+        {
+            int size = 0;
+            var structUnit = _typeManager.GetCompilationUnitForStruct(typeNameFqn);
+            if (structDef.BaseStructName != null)
+            {
+                string baseFqn = _typeManager.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+                var baseUnit = _typeManager.GetCompilationUnitForStruct(baseFqn);
+                size += GetSizeOfType(baseFqn, baseUnit);
+            }
+            else if (_typeManager.HasVTable(typeNameFqn))
+            {
+                size += 4; // vtable pointer
+            }
+
+            foreach (var member in structDef.Members)
+            {
+                var rawMemberType = TypeManager.GetTypeName(member.Type, member.PointerLevel);
+                string baseMemberName = rawMemberType.TrimEnd('*');
+                string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
+
+                string resolvedMemberType = (member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void"))
+                    ? rawMemberType
+                    : _typeManager.ResolveTypeName(baseMemberName, structDef.Namespace, structUnit) + pointerSuffix;
+
+                var memberUnit = _typeManager.IsStruct(resolvedMemberType)
+                    ? _typeManager.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
+                    : structUnit;
+                size += GetSizeOfType(resolvedMemberType, memberUnit);
+            }
+            return size;
+        }
+        throw new System.InvalidOperationException($"Unknown type '{typeNameFqn}' for size calculation.");
+    }
+
+    public (int offset, string type) GetMemberInfo(string structName, string memberName, CompilationUnitNode context)
+    {
+        var member = GetAllMembers(structName, context).FirstOrDefault(m => m.name == memberName);
+        if (member == default) throw new System.InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
+        return (member.offset, member.type);
+    }
+
+    public List<(string name, string type, int offset, bool isConst)> GetAllMembers(string structFqn, CompilationUnitNode context)
+    {
+        if (_typeManager.FindStruct(structFqn) is not { } structDef) throw new System.InvalidOperationException($"Struct '{structFqn}' not found.");
+
+        var allMembers = new List<(string, string, int, bool)>();
+        int currentOffset = 0;
+
+        if (structDef.BaseStructName != null)
+        {
+            var structUnit = _typeManager.GetCompilationUnitForStruct(structFqn);
+            string baseFqn = _typeManager.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+            var baseUnit = _typeManager.GetCompilationUnitForStruct(baseFqn);
+            allMembers.AddRange(GetAllMembers(baseFqn, baseUnit));
+            currentOffset = GetSizeOfType(baseFqn, baseUnit);
+        }
+        else if (_typeManager.HasVTable(structFqn))
+        {
+            currentOffset = 4; // vtable pointer
+        }
+
+        foreach (var mem in structDef.Members)
+        {
+            var ownUnit = _typeManager.GetCompilationUnitForStruct(structFqn);
+            var rawMemberType = TypeManager.GetTypeName(mem.Type, mem.PointerLevel);
+            var baseMemberName = rawMemberType.TrimEnd('*');
+            var pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
+            var resolvedMemberType = (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void"))
+                ? rawMemberType
+                : _typeManager.ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
+
+            allMembers.Add((mem.Name.Value, resolvedMemberType, currentOffset, mem.IsConst));
+
+            var memberUnit = _typeManager.IsStruct(resolvedMemberType)
+                ? _typeManager.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
+                : ownUnit;
+            currentOffset += GetSizeOfType(resolvedMemberType, memberUnit);
+        }
+        return allMembers;
+    }
+}
+</file>
+
+<file path="Generator\NameMangler.cs">
+namespace CTilde;
+
+public static class NameMangler
+{
+    public static string Mangle(FunctionDeclarationNode f)
+    {
+        return MangleName(f.Namespace, f.OwnerStructName, f.Name);
+    }
+
+    public static string Mangle(ConstructorDeclarationNode c)
+    {
+        return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor{c.Parameters.Count}");
+    }
+
+    public static string Mangle(DestructorDeclarationNode d)
+    {
+        return MangleName(d.Namespace, d.OwnerStructName, $"{d.OwnerStructName}_dtor");
+    }
+
+    public static string GetVTableLabel(StructDefinitionNode s)
+    {
+        return $"_vtable_{s.Namespace?.Replace("::", "_")}_{s.Name}".Replace("__", "_");
+    }
+
+    public static string MangleOperator(string op)
+    {
+        return op switch
+        {
+            "+" => "plus",
+            _ => throw new System.NotImplementedException($"Operator mangling for '{op}' is not implemented.")
+        };
+    }
+
+    private static string MangleName(string? ns, string? owner, string name)
+    {
+        return $"_{ns?.Replace("::", "_")}_{owner}_{name}".Replace("___", "_").Replace("__", "_");
+    }
+}
+</file>
+
 <file path="Generator\StatementGenerator.cs">
 using System;
 using System.Linq;
@@ -1246,6 +1379,7 @@ public class StatementGenerator
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
     private TypeManager TypeManager => _context.TypeManager;
+    private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
     private ExpressionGenerator ExpressionGenerator => _context.ExpressionGenerator;
 
     public StatementGenerator(CodeGenerator context)
@@ -1290,7 +1424,7 @@ public class StatementGenerator
             }
             else
             {
-                Builder.AppendInstruction($"call {TypeManager.Mangle(dtor)}");
+                Builder.AppendInstruction($"call {NameMangler.Mangle(dtor)}");
             }
         }
 
@@ -1311,7 +1445,7 @@ public class StatementGenerator
             var structDef = TypeManager.FindStruct(varTypeFqn);
             if (TypeManager.HasVTable(varTypeFqn))
             {
-                var vtableLabel = TypeManager.GetVTableLabel(structDef);
+                var vtableLabel = NameMangler.GetVTableLabel(structDef);
                 Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of object '{variableName}'");
                 Builder.AppendInstruction($"mov dword [eax], {vtableLabel}", "Set vtable pointer");
             }
@@ -1333,21 +1467,21 @@ public class StatementGenerator
                 Builder.AppendInstruction("push eax");
                 totalArgSize += 4;
 
-                Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
+                Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
                 Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
             }
             else if (decl.Initializer != null)
             {
                 if (decl.Initializer is InitializerListExpressionNode initList) // e.g. MyStruct s = {1, 2};
                 {
-                    var allMembers = TypeManager.GetAllMembers(varTypeFqn, context.CompilationUnit);
+                    var allMembers = MemoryLayoutManager.GetAllMembers(varTypeFqn, context.CompilationUnit);
                     if (initList.Values.Count > allMembers.Count) throw new InvalidOperationException($"Too many values in initializer list for struct '{varTypeFqn}'.");
 
                     for (int j = 0; j < initList.Values.Count; j++)
                     {
                         var (memberName, memberType, memberOffset, _) = allMembers[j];
                         var valueExpr = initList.Values[j];
-                        var memberSize = TypeManager.GetSizeOfType(memberType, context.CompilationUnit);
+                        var memberSize = MemoryLayoutManager.GetSizeOfType(memberType, context.CompilationUnit);
                         var totalOffset = offset + memberOffset;
 
                         ExpressionGenerator.GenerateExpression(valueExpr, context);
@@ -1367,7 +1501,7 @@ public class StatementGenerator
                     Builder.AppendInstruction("push eax");
                     totalArgSize += 4;
 
-                    Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
+                    Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
                     Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
                 }
             }
@@ -1375,7 +1509,7 @@ public class StatementGenerator
         else if (decl.Initializer != null) // Primitive types
         {
             ExpressionGenerator.GenerateExpression(decl.Initializer, context);
-            if (TypeManager.GetSizeOfType(varTypeFqn, context.CompilationUnit) == 1)
+            if (MemoryLayoutManager.GetSizeOfType(varTypeFqn, context.CompilationUnit) == 1)
                 Builder.AppendInstruction($"mov byte [ebp + {offset}], al", $"Initialize {variableName}");
             else
                 Builder.AppendInstruction($"mov dword [ebp + {offset}], eax", $"Initialize {variableName}");
@@ -1399,7 +1533,7 @@ public class StatementGenerator
             Builder.AppendInstruction($"mov edi, [ebp + {retPtrOffset}]", "Destination address for return value");
 
             // Copy the struct
-            var size = TypeManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
+            var size = MemoryLayoutManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
             Builder.AppendInstruction($"push {size}");
             Builder.AppendInstruction("push esi");
             Builder.AppendInstruction("push edi");
@@ -1458,15 +1592,15 @@ public class SymbolTable
     public int TotalLocalSize { get; private set; }
 
     // Constructor for Functions/Methods
-    public SymbolTable(FunctionDeclarationNode function, TypeManager typeManager, CompilationUnitNode currentUnit)
+    public SymbolTable(FunctionDeclarationNode function, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(function.Body, allLocalDeclarations);
-        Initialize(function.Parameters, allLocalDeclarations, typeManager, function.Namespace, currentUnit);
+        Initialize(function.Parameters, allLocalDeclarations, typeManager, memoryLayoutManager, function.Namespace, currentUnit);
     }
 
     // Constructor for Constructors
-    public SymbolTable(ConstructorDeclarationNode ctor, TypeManager typeManager, CompilationUnitNode currentUnit)
+    public SymbolTable(ConstructorDeclarationNode ctor, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(ctor.Body, allLocalDeclarations);
@@ -1476,11 +1610,11 @@ public class SymbolTable
 
         var allParams = new List<ParameterNode> { thisParam };
         allParams.AddRange(ctor.Parameters);
-        Initialize(allParams, allLocalDeclarations, typeManager, ctor.Namespace, currentUnit);
+        Initialize(allParams, allLocalDeclarations, typeManager, memoryLayoutManager, ctor.Namespace, currentUnit);
     }
 
     // Constructor for Destructors
-    public SymbolTable(DestructorDeclarationNode dtor, TypeManager typeManager, CompilationUnitNode currentUnit)
+    public SymbolTable(DestructorDeclarationNode dtor, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(dtor.Body, allLocalDeclarations);
@@ -1488,27 +1622,27 @@ public class SymbolTable
         var thisTypeName = dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName;
         var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName), 1, new Token(TokenType.Identifier, "this"));
 
-        Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeManager, dtor.Namespace, currentUnit);
+        Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeManager, memoryLayoutManager, dtor.Namespace, currentUnit);
     }
 
-    private void Initialize(List<ParameterNode> parameters, List<DeclarationStatementNode> localDeclarations, TypeManager typeManager, string? currentNamespace, CompilationUnitNode currentUnit)
+    private void Initialize(List<ParameterNode> parameters, List<DeclarationStatementNode> localDeclarations, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, string? currentNamespace, CompilationUnitNode currentUnit)
     {
         TotalLocalSize = 0;
         foreach (var d in localDeclarations)
         {
-            var rawTypeName = typeManager.GetTypeName(d.Type, d.PointerLevel);
+            var rawTypeName = TypeManager.GetTypeName(d.Type, d.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             var resolvedTypeName = d.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
                 ? rawTypeName
                 : typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
-            TotalLocalSize += typeManager.GetSizeOfType(resolvedTypeName, currentUnit);
+            TotalLocalSize += memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
         }
 
         int currentParamOffset = 8; // EBP + 8 is first parameter
         foreach (var param in parameters)
         {
-            var rawTypeName = typeManager.GetTypeName(param.Type, param.PointerLevel);
+            var rawTypeName = TypeManager.GetTypeName(param.Type, param.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             string resolvedTypeName;
@@ -1528,24 +1662,26 @@ public class SymbolTable
             }
 
             _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false);
-            currentParamOffset += Math.Max(4, typeManager.GetSizeOfType(resolvedTypeName, currentUnit));
+            currentParamOffset += Math.Max(4, memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit));
         }
 
         int currentLocalOffset = 0;
         foreach (var decl in localDeclarations)
         {
-            var rawTypeName = typeManager.GetTypeName(decl.Type, decl.PointerLevel);
+            var rawTypeName = TypeManager.GetTypeName(decl.Type, decl.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             var resolvedTypeName = decl.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
                 ? rawTypeName
                 : typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
 
-            int size = typeManager.GetSizeOfType(resolvedTypeName, currentUnit);
+            int size = memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;
             _symbols[decl.Identifier.Value] = (currentLocalOffset, resolvedTypeName, decl.IsConst);
         }
     }
+
+
 
     private void CollectDeclarations(AstNode? node, List<DeclarationStatementNode> declarations)
     {
@@ -1582,7 +1718,12 @@ public class SymbolTable
         return false;
     }
 
-    public string GetSymbolType(string name) => _symbols.TryGetValue(name, out var symbol) ? symbol.Type : throw new InvalidOperationException($"Symbol '{name}' not found in current scope.");
+    public string GetSymbolType(string name)
+    {
+        return _symbols.TryGetValue(name, out var symbol) 
+            ? symbol.Type
+            : throw new InvalidOperationException($"Symbol '{name}' not found in current scope.");
+    }
 }
 </file>
 
@@ -1618,11 +1759,6 @@ public class TypeManager
     }
 
     public string GetFullyQualifiedName(StructDefinitionNode s) => s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name;
-    private string MangleName(string? ns, string? owner, string name) => $"_{ns?.Replace("::", "_")}_{owner}_{name}".Replace("___", "_").Replace("__", "_");
-    public string Mangle(FunctionDeclarationNode f) => MangleName(f.Namespace, f.OwnerStructName, f.Name);
-    public string Mangle(ConstructorDeclarationNode c) => MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor{c.Parameters.Count}");
-    public string Mangle(DestructorDeclarationNode d) => MangleName(d.Namespace, d.OwnerStructName, $"{d.OwnerStructName}_dtor");
-    public string GetVTableLabel(StructDefinitionNode s) => $"_vtable_{s.Namespace?.Replace("::", "_")}_{s.Name}".Replace("__", "_");
 
     private string ResolveQualifier(ExpressionNode expr) => expr switch
     {
@@ -1861,83 +1997,24 @@ public class TypeManager
         return null;
     }
 
-    public (StructDefinitionNode Def, string FullName) GetStructTypeFromFullName(string fullName) => (_structs.TryGetValue(fullName, out var def) ? def : throw new InvalidOperationException($"Could not find struct definition for '{fullName}'."), fullName);
-    public string GetTypeName(Token type, int pointerLevel) => type.Value + new string('*', pointerLevel);
-
-    public int GetSizeOfType(string typeNameFqn, CompilationUnitNode context)
+    public (StructDefinitionNode Def, string FullName) GetStructTypeFromFullName(string fullName)
     {
-        if (typeNameFqn.EndsWith("*")) return 4;
-        if (typeNameFqn == "int") return 4;
-        if (typeNameFqn == "char") return 1;
-
-        if (_structs.TryGetValue(typeNameFqn, out var structDef))
-        {
-            int size = 0;
-            if (structDef.BaseStructName != null)
-            {
-                string baseFqn = ResolveTypeName(structDef.BaseStructName, structDef.Namespace, context);
-                size += GetSizeOfType(baseFqn, _structUnitMap[baseFqn]);
-            }
-            else if (HasVTable(typeNameFqn))
-            {
-                size += 4;
-            }
-
-            foreach (var member in structDef.Members)
-            {
-                var ownUnit = _structUnitMap[typeNameFqn];
-                var rawMemberType = GetTypeName(member.Type, member.PointerLevel);
-                string baseMemberName = rawMemberType.TrimEnd('*');
-                string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
-                string resolvedMemberType = member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void") ? rawMemberType : ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
-
-                var memberUnit = IsStruct(resolvedMemberType) ? _structUnitMap[resolvedMemberType.TrimEnd('*')] : ownUnit;
-                size += GetSizeOfType(resolvedMemberType, memberUnit);
-            }
-
-            return size;
-        }
-        throw new InvalidOperationException($"Unknown type '{typeNameFqn}' for size calculation.");
+        return (_structs.TryGetValue(fullName, out var def) ? def : throw new InvalidOperationException($"Could not find struct definition for '{fullName}'."), fullName);
     }
 
-    public bool IsStruct(string typeName) => _structs.ContainsKey(typeName.TrimEnd('*'));
-
-    public (int offset, string type) GetMemberInfo(string structName, string memberName, CompilationUnitNode context)
+    public static string GetTypeName(Token type, int pointerLevel)
     {
-        var member = GetAllMembers(structName, context).FirstOrDefault(m => m.name == memberName);
-        if (member == default) throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
-        return (member.offset, member.type);
+        return type.Value + new string('*', pointerLevel);
     }
 
-    public List<(string name, string type, int offset, bool isConst)> GetAllMembers(string structFqn, CompilationUnitNode context)
+    public CompilationUnitNode GetCompilationUnitForStruct(string structFqn)
     {
-        if (!_structs.TryGetValue(structFqn, out var structDef)) throw new InvalidOperationException($"Struct '{structFqn}' not found.");
+        return _structUnitMap[structFqn];
+    }
 
-        var allMembers = new List<(string, string, int, bool)>();
-        int currentOffset = 0;
-
-        if (structDef.BaseStructName != null)
-        {
-            string baseFqn = ResolveTypeName(structDef.BaseStructName, structDef.Namespace, _structUnitMap[structFqn]);
-            allMembers.AddRange(GetAllMembers(baseFqn, _structUnitMap[baseFqn]));
-            currentOffset = GetSizeOfType(baseFqn, _structUnitMap[baseFqn]);
-        }
-        else if (HasVTable(structFqn))
-        {
-            currentOffset = 4;
-        }
-
-        foreach (var mem in structDef.Members)
-        {
-            var ownUnit = _structUnitMap[structFqn];
-            var rawMemberType = GetTypeName(mem.Type, mem.PointerLevel);
-            var baseMemberName = rawMemberType.TrimEnd('*');
-            var pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
-            var resolvedMemberType = mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void") ? rawMemberType : ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
-            allMembers.Add((mem.Name.Value, resolvedMemberType, currentOffset, mem.IsConst));
-            currentOffset += GetSizeOfType(resolvedMemberType, ownUnit);
-        }
-        return allMembers;
+    public bool IsStruct(string typeName)
+    {
+        return _structs.ContainsKey(typeName.TrimEnd('*'));
     }
 }
 </file>
@@ -2175,15 +2252,6 @@ public class Parser
 
     internal void AdvancePosition(int amount) => _position += amount;
 
-    private string MangleOperator(string op)
-    {
-        return op switch
-        {
-            "+" => "plus",
-            _ => throw new NotImplementedException($"Operator mangling for '{op}' is not implemented.")
-        };
-    }
-
     public List<ImportDirectiveNode> GetImports() => _imports;
 
     public CompilationUnitNode Parse(string filePath)
@@ -2398,7 +2466,7 @@ public class Parser
                 Eat(TokenType.Keyword); // operator
                 var opToken = Current;
                 _position++;
-                name = new Token(TokenType.Identifier, $"operator_{MangleOperator(opToken.Value)}");
+                name = new Token(TokenType.Identifier, $"operator_{NameMangler.MangleOperator(opToken.Value)}");
             }
             else
             {

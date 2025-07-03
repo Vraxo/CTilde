@@ -18,10 +18,6 @@ public class CodeGenerator
     private readonly StatementGenerator _statementGenerator;
     internal ExpressionGenerator ExpressionGenerator { get; }
 
-    internal SymbolTable CurrentSymbols { get; set; } = null!;
-    internal CompilationUnitNode CurrentCompilationUnit { get; set; } = null!;
-    internal FunctionDeclarationNode CurrentFunction { get; set; } = null!; // New property
-
     public CodeGenerator(ProgramNode program)
     {
         Program = program;
@@ -50,11 +46,9 @@ public class CodeGenerator
 
         foreach (var unit in Program.CompilationUnits)
         {
-            CurrentCompilationUnit = unit;
             foreach (var function in unit.Functions.Where(f => f.Body != null))
             {
-                CurrentFunction = function; // Set current function
-                GenerateFunction(function);
+                GenerateFunction(function, unit);
                 Builder.AppendBlankLine();
             }
         }
@@ -91,9 +85,10 @@ public class CodeGenerator
         }
     }
 
-    private void GenerateFunction(FunctionDeclarationNode function)
+    private void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit)
     {
-        CurrentSymbols = new SymbolTable(function, TypeManager, CurrentCompilationUnit);
+        var symbols = new SymbolTable(function, TypeManager, unit);
+        var context = new AnalysisContext(symbols, unit, function);
 
         string mangledName;
         if (function.Name == "main")
@@ -117,7 +112,7 @@ public class CodeGenerator
         Builder.AppendInstruction("push edi");
         Builder.AppendBlankLine();
 
-        int totalLocalSize = CurrentSymbols.TotalLocalSize;
+        int totalLocalSize = symbols.TotalLocalSize;
         if (totalLocalSize > 0)
         {
             Builder.AppendInstruction($"sub esp, {totalLocalSize}", "Allocate space for all local variables");
@@ -125,7 +120,7 @@ public class CodeGenerator
 
         if (function.Body != null)
         {
-            _statementGenerator.GenerateStatement(function.Body);
+            _statementGenerator.GenerateStatement(function.Body, context);
         }
 
         Builder.AppendBlankLine();

@@ -10,9 +10,6 @@ public class ExpressionGenerator
     private AssemblyBuilder Builder => _context.Builder;
     private TypeManager TypeManager => _context.TypeManager;
     private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
-    private SymbolTable CurrentSymbols => _context.CurrentSymbols;
-    private CompilationUnitNode CurrentCompilationUnit => _context.CurrentCompilationUnit;
-    private FunctionDeclarationNode CurrentFunction => _context.CurrentFunction;
     private HashSet<string> ExternalFunctions => _context.ExternalFunctions;
 
     public ExpressionGenerator(CodeGenerator context)
@@ -20,35 +17,30 @@ public class ExpressionGenerator
         _context = context;
     }
 
-    private AnalysisContext CreateAnalysisContext()
-    {
-        return new AnalysisContext(CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
-    }
-
     // L-Value Generation (Address-Of)
-    public void GenerateLValueAddress(ExpressionNode expression)
+    public void GenerateLValueAddress(ExpressionNode expression, AnalysisContext context)
     {
         switch (expression)
         {
             case VariableExpressionNode varExpr:
-                GenerateLValueForVariable(varExpr);
+                GenerateLValueForVariable(varExpr, context);
                 break;
             case MemberAccessExpressionNode memberAccess:
-                GenerateLValueForMemberAccess(memberAccess);
+                GenerateLValueForMemberAccess(memberAccess, context);
                 break;
             case UnaryExpressionNode u when u.Operator.Type == TokenType.Star:
                 // The address of a dereference is the value of the pointer expression itself.
-                GenerateExpression(u.Right);
+                GenerateExpression(u.Right, context);
                 break;
             default:
                 throw new InvalidOperationException($"Expression '{expression.GetType().Name}' is not a valid L-value.");
         }
     }
 
-    private void GenerateLValueForVariable(VariableExpressionNode varExpr)
+    private void GenerateLValueForVariable(VariableExpressionNode varExpr, AnalysisContext context)
     {
         // Case 1: Local variable or parameter
-        if (CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out var offset, out _, out _))
+        if (context.Symbols.TryGetSymbol(varExpr.Identifier.Value, out var offset, out _, out _))
         {
             string sign = offset > 0 ? "+" : ""; // Params are positive, locals are negative
             Builder.AppendInstruction($"lea eax, [ebp {sign} {offset}]", $"Get address of var/param {varExpr.Identifier.Value}");
@@ -56,13 +48,13 @@ public class ExpressionGenerator
         }
 
         // Case 2: Implicit 'this->member' inside a method
-        if (CurrentFunction.OwnerStructName != null)
+        if (context.CurrentFunction.OwnerStructName != null)
         {
             try
             {
-                var (Def, FullName) = TypeManager.GetStructTypeFromUnqualifiedName(CurrentFunction.OwnerStructName, CurrentFunction.Namespace);
-                var (memberOffset, _) = TypeManager.GetMemberInfo(FullName, varExpr.Identifier.Value, CurrentCompilationUnit);
-                CurrentSymbols.TryGetSymbol("this", out var thisOffset, out _, out _);
+                var (Def, FullName) = TypeManager.GetStructTypeFromUnqualifiedName(context.CurrentFunction.OwnerStructName, context.CurrentFunction.Namespace);
+                var (memberOffset, _) = TypeManager.GetMemberInfo(FullName, varExpr.Identifier.Value, context.CompilationUnit);
+                context.Symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
 
                 Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
                 if (memberOffset > 0)
@@ -77,23 +69,22 @@ public class ExpressionGenerator
         throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
     }
 
-    private void GenerateLValueForMemberAccess(MemberAccessExpressionNode memberAccess)
+    private void GenerateLValueForMemberAccess(MemberAccessExpressionNode memberAccess, AnalysisContext context)
     {
-        var analysisContext = CreateAnalysisContext();
-        var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, analysisContext);
+        var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context);
         string baseStructType = leftType.TrimEnd('*');
 
-        var (memberOffset, _) = TypeManager.GetMemberInfo(baseStructType, memberAccess.Member.Value, CurrentCompilationUnit);
+        var (memberOffset, _) = TypeManager.GetMemberInfo(baseStructType, memberAccess.Member.Value, context.CompilationUnit);
 
         // For `obj.member`, get the address of `obj` first.
         if (memberAccess.Operator.Type == TokenType.Dot)
         {
-            GenerateLValueAddress(memberAccess.Left);
+            GenerateLValueAddress(memberAccess.Left, context);
         }
         // For `ptr->member`, get the value of `ptr` first.
         else
         {
-            GenerateExpression(memberAccess.Left);
+            GenerateExpression(memberAccess.Left, context);
         }
 
         if (memberOffset > 0)
@@ -103,7 +94,7 @@ public class ExpressionGenerator
     }
 
     // R-Value Generation (Value-Of)
-    public void GenerateExpression(ExpressionNode expression)
+    public void GenerateExpression(ExpressionNode expression, AnalysisContext context)
     {
         switch (expression)
         {
@@ -114,25 +105,25 @@ public class ExpressionGenerator
                 GenerateStringLiteral(str);
                 break;
             case VariableExpressionNode varExpr:
-                GenerateVariableExpression(varExpr);
+                GenerateVariableExpression(varExpr, context);
                 break;
             case UnaryExpressionNode u:
-                GenerateUnaryExpression(u);
+                GenerateUnaryExpression(u, context);
                 break;
             case MemberAccessExpressionNode m:
-                GenerateMemberAccessExpression(m);
+                GenerateMemberAccessExpression(m, context);
                 break;
             case AssignmentExpressionNode assign:
-                GenerateAssignmentExpression(assign);
+                GenerateAssignmentExpression(assign, context);
                 break;
             case BinaryExpressionNode binExpr:
-                GenerateBinaryExpression(binExpr);
+                GenerateBinaryExpression(binExpr, context);
                 break;
             case CallExpressionNode callExpr:
-                GenerateCallExpression(callExpr);
+                GenerateCallExpression(callExpr, context);
                 break;
             case QualifiedAccessExpressionNode qNode:
-                GenerateQualifiedAccessExpression(qNode);
+                GenerateQualifiedAccessExpression(qNode, context);
                 break;
             default:
                 throw new NotImplementedException($"Expr: {expression.GetType().Name}");
@@ -149,21 +140,21 @@ public class ExpressionGenerator
         Builder.AppendInstruction($"mov eax, {str.Label}");
     }
 
-    private void GenerateVariableExpression(VariableExpressionNode varExpr)
+    private void GenerateVariableExpression(VariableExpressionNode varExpr, AnalysisContext context)
     {
         // Case 1: Local variable or parameter
-        if (CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out string symbolResolvedType, out _))
+        if (context.Symbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out string symbolResolvedType, out _))
         {
-            if (TypeManager.IsStruct(symbolResolvedType))
+            // If the variable is a struct value type (not a pointer), its "value" is its address.
+            if (!symbolResolvedType.EndsWith("*") && TypeManager.IsStruct(symbolResolvedType))
             {
-                // For structs, "value" is its address (L-Value)
-                GenerateLValueAddress(varExpr);
+                GenerateLValueAddress(varExpr, context);
             }
             else
             {
-                // For primitives/pointers, load the value from memory
+                // For primitives and pointers, load the value from its memory location.
                 string sign = offset > 0 ? "+" : "";
-                if (TypeManager.GetSizeOfType(symbolResolvedType, CurrentCompilationUnit) == 1)
+                if (TypeManager.GetSizeOfType(symbolResolvedType, context.CompilationUnit) == 1)
                     Builder.AppendInstruction($"movzx eax, byte [ebp {sign} {offset}]", $"Load value of {varExpr.Identifier.Value}");
                 else
                     Builder.AppendInstruction($"mov eax, [ebp {sign} {offset}]", $"Load value of {varExpr.Identifier.Value}");
@@ -172,7 +163,7 @@ public class ExpressionGenerator
         }
 
         // Case 2: Unqualified enum member (e.g., `KEY_D`)
-        var enumValue = TypeManager.ResolveUnqualifiedEnumMember(varExpr.Identifier.Value, CurrentCompilationUnit, CurrentFunction.Namespace);
+        var enumValue = TypeManager.ResolveUnqualifiedEnumMember(varExpr.Identifier.Value, context.CompilationUnit, context.CurrentFunction.Namespace);
         if (enumValue.HasValue)
         {
             Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {varExpr.Identifier.Value}");
@@ -180,26 +171,30 @@ public class ExpressionGenerator
         }
 
         // Case 3: Implicit 'this->member'
-        if (CurrentFunction.OwnerStructName != null)
+        if (context.CurrentFunction.OwnerStructName != null)
         {
-            GenerateMemberAccessExpression(new MemberAccessExpressionNode(new VariableExpressionNode(new Token(TokenType.Identifier, "this")), new Token(TokenType.Arrow, "->"), varExpr.Identifier));
+            var thisMemberAccess = new MemberAccessExpressionNode(new VariableExpressionNode(new Token(TokenType.Identifier, "this")), new Token(TokenType.Arrow, "->"), varExpr.Identifier)
+            {
+                Parent = varExpr.Parent
+            };
+            GenerateMemberAccessExpression(thisMemberAccess, context);
             return;
         }
 
         throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'.");
     }
 
-    private void GenerateUnaryExpression(UnaryExpressionNode u)
+    private void GenerateUnaryExpression(UnaryExpressionNode u, AnalysisContext context)
     {
         // Address-of operator
         if (u.Operator.Type == TokenType.Ampersand)
         {
-            GenerateLValueAddress(u.Right);
+            GenerateLValueAddress(u.Right, context);
             return;
         }
 
         // Regular value expression for the operand
-        GenerateExpression(u.Right);
+        GenerateExpression(u.Right, context);
 
         switch (u.Operator.Type)
         {
@@ -207,9 +202,8 @@ public class ExpressionGenerator
                 Builder.AppendInstruction("neg eax");
                 break;
             case TokenType.Star: // Dereference
-                var analysisContext = CreateAnalysisContext();
-                var type = SemanticAnalyzer.AnalyzeExpressionType(u, analysisContext);
-                if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1)
+                var type = SemanticAnalyzer.AnalyzeExpressionType(u, context);
+                if (TypeManager.GetSizeOfType(type, context.CompilationUnit) == 1)
                     Builder.AppendInstruction("movzx eax, byte [eax]");
                 else
                     Builder.AppendInstruction("mov eax, [eax]");
@@ -217,18 +211,17 @@ public class ExpressionGenerator
         }
     }
 
-    private void GenerateMemberAccessExpression(MemberAccessExpressionNode m)
+    private void GenerateMemberAccessExpression(MemberAccessExpressionNode m, AnalysisContext context)
     {
-        var analysisContext = CreateAnalysisContext();
-        GenerateLValueAddress(m); // Get address of member
-        var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, analysisContext);
+        GenerateLValueAddress(m, context); // Get address of member
+        var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, context);
 
         // Load value from the address in EAX
         if (TypeManager.IsStruct(memberType))
         {
             // For struct members, the "value" is its address, which is already in EAX. Do nothing.
         }
-        else if (TypeManager.GetSizeOfType(memberType, CurrentCompilationUnit) == 1)
+        else if (TypeManager.GetSizeOfType(memberType, context.CompilationUnit) == 1)
         {
             Builder.AppendInstruction("movzx eax, byte [eax]");
         }
@@ -238,24 +231,23 @@ public class ExpressionGenerator
         }
     }
 
-    private void GenerateAssignmentExpression(AssignmentExpressionNode assign)
+    private void GenerateAssignmentExpression(AssignmentExpressionNode assign, AnalysisContext context)
     {
-        var analysisContext = CreateAnalysisContext();
-        string lValueType = SemanticAnalyzer.AnalyzeExpressionType(assign.Left, analysisContext);
+        string lValueType = SemanticAnalyzer.AnalyzeExpressionType(assign.Left, context);
         bool isStructAssign = TypeManager.IsStruct(lValueType);
 
         if (isStructAssign)
         {
             // Right-hand side (source address)
-            GenerateExpression(assign.Right);
+            GenerateExpression(assign.Right, context);
             Builder.AppendInstruction("push eax", "Push source address");
 
             // Left-hand side (destination address)
-            GenerateLValueAddress(assign.Left);
+            GenerateLValueAddress(assign.Left, context);
             Builder.AppendInstruction("mov edi, eax", "Pop destination into EDI"); // Dest
             Builder.AppendInstruction("pop esi", "Pop source into ESI"); // Source
 
-            int size = TypeManager.GetSizeOfType(lValueType, CurrentCompilationUnit);
+            int size = TypeManager.GetSizeOfType(lValueType, context.CompilationUnit);
             Builder.AppendInstruction($"mov ecx, {size / 4}");
             Builder.AppendInstruction("rep movsd");
             if (size % 4 > 0)
@@ -267,14 +259,14 @@ public class ExpressionGenerator
         else
         {
             // Right-hand side (value)
-            GenerateExpression(assign.Right);
+            GenerateExpression(assign.Right, context);
             Builder.AppendInstruction("push eax", "Push value");
 
             // Left-hand side (address)
-            GenerateLValueAddress(assign.Left);
+            GenerateLValueAddress(assign.Left, context);
             Builder.AppendInstruction("pop ecx", "Pop value into ECX");
 
-            if (TypeManager.GetSizeOfType(lValueType, CurrentCompilationUnit) == 1)
+            if (TypeManager.GetSizeOfType(lValueType, context.CompilationUnit) == 1)
                 Builder.AppendInstruction("mov [eax], cl", "Assign byte");
             else
                 Builder.AppendInstruction("mov [eax], ecx", "Assign dword");
@@ -287,22 +279,21 @@ public class ExpressionGenerator
         }
     }
 
-    private void GenerateCallExpression(CallExpressionNode callExpr)
+    private void GenerateCallExpression(CallExpressionNode callExpr, AnalysisContext context)
     {
-        var analysisContext = CreateAnalysisContext();
         int totalArgSize = 0;
 
         // Push arguments onto the stack in reverse order
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
-            var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, analysisContext);
+            var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, context);
             var isStruct = TypeManager.IsStruct(argType);
 
-            GenerateExpression(arg); // Result is address (for struct) or value (for primitive) in EAX
+            GenerateExpression(arg, context); // Result is address (for struct) or value (for primitive) in EAX
 
             if (isStruct)
             {
-                int argSize = TypeManager.GetSizeOfType(argType, CurrentCompilationUnit);
+                int argSize = TypeManager.GetSizeOfType(argType, context.CompilationUnit);
                 for (int offset = argSize - 4; offset >= 0; offset -= 4)
                 {
                     Builder.AppendInstruction($"push dword [eax + {offset}]");
@@ -319,12 +310,12 @@ public class ExpressionGenerator
         string calleeTarget;
         if (callExpr.Callee is MemberAccessExpressionNode memberAccess) // Method call
         {
-            var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, analysisContext);
+            var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context);
             var (structDef, _) = TypeManager.GetStructTypeFromFullName(leftType.TrimEnd('*'));
             var method = TypeManager.ResolveMethod(structDef, memberAccess.Member.Value);
 
             // Push `this` pointer
-            GenerateLValueAddress(memberAccess.Left);
+            GenerateLValueAddress(memberAccess.Left, context);
             Builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
 
@@ -333,7 +324,7 @@ public class ExpressionGenerator
         }
         else // Global/namespaced function call
         {
-            var func = TypeManager.ResolveFunctionCall(callExpr.Callee, CurrentCompilationUnit, CurrentFunction);
+            var func = TypeManager.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
             if (func.Body == null)
             {
                 ExternalFunctions.Add(func.Name);
@@ -354,11 +345,11 @@ public class ExpressionGenerator
         }
     }
 
-    private void GenerateBinaryExpression(BinaryExpressionNode binExpr)
+    private void GenerateBinaryExpression(BinaryExpressionNode binExpr, AnalysisContext context)
     {
-        GenerateExpression(binExpr.Right);
+        GenerateExpression(binExpr.Right, context);
         Builder.AppendInstruction("push eax");
-        GenerateExpression(binExpr.Left);
+        GenerateExpression(binExpr.Left, context);
         Builder.AppendInstruction("pop ecx");
 
         switch (binExpr.Operator.Type)
@@ -375,10 +366,10 @@ public class ExpressionGenerator
         }
     }
 
-    private void GenerateQualifiedAccessExpression(QualifiedAccessExpressionNode qNode)
+    private void GenerateQualifiedAccessExpression(QualifiedAccessExpressionNode qNode, AnalysisContext context)
     {
         // Case 1: Enum member access (e.g. `rl::KEY_D`)
-        string? enumTypeFQN = TypeManager.ResolveEnumTypeName(qNode.Namespace.Value, CurrentFunction.Namespace, CurrentCompilationUnit);
+        string? enumTypeFQN = TypeManager.ResolveEnumTypeName(qNode.Namespace.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
         if (enumTypeFQN != null)
         {
             var enumValue = TypeManager.GetEnumValue(enumTypeFQN, qNode.Member.Value);
@@ -390,7 +381,7 @@ public class ExpressionGenerator
         }
 
         // Case 2: Qualified function name (e.g. `rl::DrawText`)
-        var func = TypeManager.ResolveFunctionCall(qNode, CurrentCompilationUnit, CurrentFunction);
+        var func = TypeManager.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
         if (func.Body == null)
         {
             ExternalFunctions.Add(func.Name);

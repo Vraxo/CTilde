@@ -21,6 +21,11 @@ public class ExpressionGenerator
         _context = context;
     }
 
+    private AnalysisContext CreateAnalysisContext()
+    {
+        return new AnalysisContext(CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+    }
+
     public void GenerateLValueAddress(ExpressionNode expression)
     {
         switch (expression)
@@ -58,7 +63,8 @@ public class ExpressionGenerator
                 }
             case MemberAccessExpressionNode memberAccess:
                 {
-                    var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                    var analysisContext = CreateAnalysisContext();
+                    var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, analysisContext);
                     string baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
 
                     var structDef = TypeManager.FindStruct(baseStructType) ?? throw new InvalidOperationException($"Could not find struct definition for '{baseStructType}'");
@@ -103,73 +109,83 @@ public class ExpressionGenerator
             case IntegerLiteralNode literal: Builder.AppendInstruction($"mov eax, {literal.Value}"); break;
             case StringLiteralNode str: Builder.AppendInstruction($"mov eax, {str.Label}"); break;
             case VariableExpressionNode varExpr:
-                if (CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out string symbolResolvedType, out _))
                 {
-                    // It's a parameter or local variable
-                    if (TypeManager.IsStruct(symbolResolvedType))
+                    if (CurrentSymbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out string symbolResolvedType, out _))
                     {
-                        // If it's a struct, we push its address into EAX (L-value).
-                        // This assumes struct values are typically used as pointers/addresses for assignments/passing.
-                        string sign = offset > 0 ? "+" : ""; // offset is positive for parameters, negative for local variables
-                        Builder.AppendInstruction($"lea eax, [ebp {sign} {offset}]", $"Get address of var/param {varExpr.Identifier.Value}");
-                    }
-                    else
-                    {
-                        // Primitive type or pointer
-                        string sign = offset > 0 ? "+" : "";
-                        if (TypeManager.GetSizeOfType(symbolResolvedType, CurrentCompilationUnit) == 1)
-                            Builder.AppendInstruction($"movzx eax, byte [ebp {sign} {offset}]", $"Load value of {varExpr.Identifier.Value}");
+                        // It's a parameter or local variable
+                        if (TypeManager.IsStruct(symbolResolvedType))
+                        {
+                            // If it's a struct, we push its address into EAX (L-value).
+                            // This assumes struct values are typically used as pointers/addresses for assignments/passing.
+                            string sign = offset > 0 ? "+" : ""; // offset is positive for parameters, negative for local variables
+                            Builder.AppendInstruction($"lea eax, [ebp {sign} {offset}]", $"Get address of var/param {varExpr.Identifier.Value}");
+                        }
                         else
-                            Builder.AppendInstruction($"mov eax, [ebp {sign} {offset}]", $"Load value of {varExpr.Identifier.Value}");
-                    }
-                }
-                else
-                {
-                    // Not a local variable or parameter.
-                    // Check if it's an unqualified enum member (like KEY_D)
-                    var enumValue = TypeManager.ResolveUnqualifiedEnumMember(varExpr.Identifier.Value, CurrentCompilationUnit, CurrentFunction.Namespace);
-                    if (enumValue.HasValue)
-                    {
-                        Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {varExpr.Identifier.Value}");
-                    }
-                    // Else if inside a method, it could be an implicit 'this->member'
-                    else if (CurrentFunction.OwnerStructName != null)
-                    {
-                        // Generate L-value address and then load its value
-                        GenerateLValueAddress(varExpr); // This will handle the 'this' offset and member offset
-                        var type = SemanticAnalyzer.AnalyzeExpressionType(varExpr, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
-                        if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
-                        else Builder.AppendInstruction("mov eax, [eax]");
+                        {
+                            // Primitive type or pointer
+                            string sign = offset > 0 ? "+" : "";
+                            if (TypeManager.GetSizeOfType(symbolResolvedType, CurrentCompilationUnit) == 1)
+                                Builder.AppendInstruction($"movzx eax, byte [ebp {sign} {offset}]", $"Load value of {varExpr.Identifier.Value}");
+                            else
+                                Builder.AppendInstruction($"mov eax, [ebp {sign} {offset}]", $"Load value of {varExpr.Identifier.Value}");
+                        }
                     }
                     else
                     {
-                        // Truly undefined variable
-                        throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'.");
+                        // Not a local variable or parameter.
+                        // Check if it's an unqualified enum member (like KEY_D)
+                        var enumValue = TypeManager.ResolveUnqualifiedEnumMember(varExpr.Identifier.Value, CurrentCompilationUnit, CurrentFunction.Namespace);
+                        if (enumValue.HasValue)
+                        {
+                            Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {varExpr.Identifier.Value}");
+                        }
+                        // Else if inside a method, it could be an implicit 'this->member'
+                        else if (CurrentFunction.OwnerStructName != null)
+                        {
+                            var analysisContext = CreateAnalysisContext();
+                            // Generate L-value address and then load its value
+                            GenerateLValueAddress(varExpr); // This will handle the 'this' offset and member offset
+                            var type = SemanticAnalyzer.AnalyzeExpressionType(varExpr, analysisContext);
+                            if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
+                            else Builder.AppendInstruction("mov eax, [eax]");
+                        }
+                        else
+                        {
+                            // Truly undefined variable
+                            throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'.");
+                        }
                     }
+                    break;
                 }
-                break;
             case UnaryExpressionNode u:
-                if (u.Operator.Type == TokenType.Ampersand) GenerateLValueAddress(u.Right);
-                else
                 {
-                    GenerateExpression(u.Right);
-                    if (u.Operator.Type == TokenType.Minus) Builder.AppendInstruction("neg eax");
-                    else if (u.Operator.Type == TokenType.Star)
+                    if (u.Operator.Type == TokenType.Ampersand) GenerateLValueAddress(u.Right);
+                    else
                     {
-                        var type = SemanticAnalyzer.AnalyzeExpressionType(u, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
-                        if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
-                        else Builder.AppendInstruction("mov eax, [eax]");
+                        GenerateExpression(u.Right);
+                        if (u.Operator.Type == TokenType.Minus) Builder.AppendInstruction("neg eax");
+                        else if (u.Operator.Type == TokenType.Star)
+                        {
+                            var analysisContext = CreateAnalysisContext();
+                            var type = SemanticAnalyzer.AnalyzeExpressionType(u, analysisContext);
+                            if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
+                            else Builder.AppendInstruction("mov eax, [eax]");
+                        }
                     }
+                    break;
                 }
-                break;
             case MemberAccessExpressionNode m:
-                GenerateLValueAddress(m);
-                var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
-                if (TypeManager.GetSizeOfType(memberType, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
-                else Builder.AppendInstruction("mov eax, [eax]");
-                break;
+                {
+                    var analysisContext = CreateAnalysisContext();
+                    GenerateLValueAddress(m);
+                    var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, analysisContext);
+                    if (TypeManager.GetSizeOfType(memberType, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
+                    else Builder.AppendInstruction("mov eax, [eax]");
+                    break;
+                }
             case AssignmentExpressionNode assign:
                 {
+                    var analysisContext = CreateAnalysisContext();
                     bool isConstAssignment = false;
                     string? targetNameForError = null;
 
@@ -192,7 +208,7 @@ public class ExpressionGenerator
                     {
                         targetNameForError = memberTarget.Member.Value;
                         // It's an explicit member access (e.g., 'obj.member = ...')
-                        var ownerType = SemanticAnalyzer.AnalyzeExpressionType(memberTarget.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                        var ownerType = SemanticAnalyzer.AnalyzeExpressionType(memberTarget.Left, analysisContext);
                         string ownerStructFQN = ownerType.TrimEnd('*');
                         isConstAssignment = TypeManager.IsMemberConst(ownerStructFQN, memberTarget.Member.Value);
                     }
@@ -202,7 +218,7 @@ public class ExpressionGenerator
                         throw new InvalidOperationException($"Cannot assign to constant target '{targetNameForError ?? assign.Left.ToString()}'.");
                     }
 
-                    var lValueType = SemanticAnalyzer.AnalyzeExpressionType(assign.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                    var lValueType = SemanticAnalyzer.AnalyzeExpressionType(assign.Left, analysisContext);
                     var isStructAssign = TypeManager.IsStruct(lValueType);
 
                     if (isStructAssign)
@@ -270,12 +286,13 @@ public class ExpressionGenerator
 
     private void GenerateCallExpression(CallExpressionNode callExpr)
     {
+        var analysisContext = CreateAnalysisContext();
         int totalArgSize = 0;
         string calleeTarget;
 
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
-            var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+            var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, analysisContext);
             var isStruct = TypeManager.IsStruct(argType);
 
             if (isStruct)
@@ -298,7 +315,7 @@ public class ExpressionGenerator
 
         if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
         {
-            var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+            var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, analysisContext);
             var (structDef, qualifiedStructName) = TypeManager.GetStructTypeFromFullName(leftType.TrimEnd('*'));
 
             var method = TypeManager.ResolveMethod(structDef, memberAccess.Member.Value);

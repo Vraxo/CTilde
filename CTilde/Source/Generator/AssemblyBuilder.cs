@@ -18,8 +18,11 @@ public class AssemblyBuilder
 
     public void AppendInstruction(string? instruction, string? comment = null)
     {
-        var line = instruction == null ? "" : $"    {instruction}";
-        _sb.AppendLine(line.PadRight(35) + (comment == null ? "" : $"; {comment}"));
+        string line = instruction is null 
+            ? "" 
+            : $"    {instruction}";
+
+        _sb.AppendLine(line.PadRight(35) + (comment is null ? "" : $"; {comment}"));
     }
 
     public void AppendData(string label, string value)

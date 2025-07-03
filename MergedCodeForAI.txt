@@ -982,6 +982,112 @@ public class Tokenizer
 }
 </file>
 
+<file path="Analysis\SemanticAnalyzer.cs">
+using System;
+using System.Linq;
+
+namespace CTilde;
+
+public class SemanticAnalyzer
+{
+    private readonly TypeManager _typeManager;
+
+    public SemanticAnalyzer(TypeManager typeManager)
+    {
+        _typeManager = typeManager;
+    }
+
+    public string AnalyzeExpressionType(ExpressionNode expr, SymbolTable symbols, CompilationUnitNode context, FunctionDeclarationNode currentFunction)
+    {
+        switch (expr)
+        {
+            case IntegerLiteralNode: return "int";
+            case StringLiteralNode: return "char*";
+            case VariableExpressionNode v:
+                if (symbols.TryGetSymbol(v.Identifier.Value, out _, out _, out _)) return symbols.GetSymbolType(v.Identifier.Value);
+
+                // Try resolving as an unqualified enum member
+                var unqualifiedEnumValue = _typeManager.ResolveUnqualifiedEnumMember(v.Identifier.Value, context, currentFunction.Namespace);
+                if (unqualifiedEnumValue.HasValue) return "int";
+
+                if (currentFunction.OwnerStructName != null)
+                {
+                    try
+                    {
+                        (StructDefinitionNode Def, string FullName) = _typeManager.GetStructTypeFromUnqualifiedName(currentFunction.OwnerStructName, currentFunction.Namespace);
+                        (int _, string memberTypeResolved) = _typeManager.GetMemberInfo(FullName, v.Identifier.Value, context);
+                        return memberTypeResolved;
+                    }
+                    catch (InvalidOperationException) { /* Fall through */ }
+                }
+                throw new InvalidOperationException($"Cannot determine type for undefined variable '{v.Identifier.Value}'.");
+
+            case AssignmentExpressionNode a: return AnalyzeExpressionType(a.Left, symbols, context, currentFunction);
+
+            case MemberAccessExpressionNode ma:
+                var leftType = AnalyzeExpressionType(ma.Left, symbols, context, currentFunction);
+                string baseStructType = leftType.TrimEnd('*');
+                var (_, resolvedMemberType) = _typeManager.GetMemberInfo(baseStructType, ma.Member.Value, context);
+                return resolvedMemberType;
+
+            case UnaryExpressionNode u when u.Operator.Type == TokenType.Ampersand:
+                return AnalyzeExpressionType(u.Right, symbols, context, currentFunction) + "*";
+
+            case UnaryExpressionNode u when u.Operator.Type == TokenType.Star:
+                var operandType = AnalyzeExpressionType(u.Right, symbols, context, currentFunction);
+                if (!operandType.EndsWith("*")) throw new InvalidOperationException($"Cannot dereference non-pointer type '{operandType}'.");
+                return operandType.Substring(0, operandType.Length - 1);
+
+            case CallExpressionNode call:
+                FunctionDeclarationNode func;
+                if (call.Callee is MemberAccessExpressionNode callMemberAccess)
+                {
+                    var ownerTypeName = AnalyzeExpressionType(callMemberAccess.Left, symbols, context, currentFunction).TrimEnd('*');
+                    var (ownerStruct, _) = _typeManager.GetStructTypeFromFullName(ownerTypeName);
+                    func = _typeManager.ResolveMethod(ownerStruct, callMemberAccess.Member.Value);
+                }
+                else
+                {
+                    func = _typeManager.ResolveFunctionCall(call.Callee, context, currentFunction);
+                }
+
+                string returnTypeNameRaw = _typeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
+                string baseReturnName = returnTypeNameRaw.TrimEnd('*');
+                string returnPointerSuffix = new('*', returnTypeNameRaw.Length - baseReturnName.Length);
+
+                if (func.ReturnType.Type != TokenType.Keyword && !baseReturnName.Equals("void", StringComparison.OrdinalIgnoreCase))
+                {
+                    return _typeManager.ResolveTypeName(baseReturnName, func.Namespace, context) + returnPointerSuffix;
+                }
+                return returnTypeNameRaw;
+
+            case QualifiedAccessExpressionNode q:
+                // Check if the qualifier refers to an enum type name.
+                string? enumTypeFQN = _typeManager.ResolveEnumTypeName(q.Namespace.Value, currentFunction.Namespace, context);
+                if (enumTypeFQN != null)
+                {
+                    if (_typeManager.GetEnumValue(enumTypeFQN, q.Member.Value).HasValue)
+                    {
+                        return "int"; // Enum members are integers
+                    }
+                    // If it resolved to an enum type, but the member isn't found, still an enum context problem
+                    throw new InvalidOperationException($"Enum '{q.Namespace.Value}' does not contain member '{q.Member.Value}'.");
+                }
+                // If not an enum type, it must be a function call target
+                // For a function target, AnalyzeExpressionType isn't directly applicable, as it returns the *function itself*, not its return type.
+                // This QualifiedAccessExpressionNode might be the Callee of a CallExpressionNode.
+                // In that context, CallExpressionNode handles the function resolution and return type.
+                // If it's a standalone QualifiedAccessExpressionNode, it's likely an error unless it's an enum.
+                throw new InvalidOperationException($"Qualified access expression '{q.Namespace.Value}::{q.Member.Value}' cannot be evaluated as a value directly. Expected an enum member or part of a function call.");
+
+            case BinaryExpressionNode: return "int";
+
+            default: throw new NotImplementedException($"AnalyzeExpressionType not implemented for {expr.GetType().Name}");
+        }
+    }
+}
+</file>
+
 <file path="Generator\AssemblyBuilder.cs">
 using System.Text;
 
@@ -1035,6 +1141,7 @@ public class CodeGenerator
 {
     internal ProgramNode Program { get; }
     internal TypeManager TypeManager { get; }
+    internal SemanticAnalyzer SemanticAnalyzer { get; }
     internal AssemblyBuilder Builder { get; } = new();
 
     private int _labelIdCounter;
@@ -1052,6 +1159,7 @@ public class CodeGenerator
     {
         Program = program;
         TypeManager = new TypeManager(program);
+        SemanticAnalyzer = new SemanticAnalyzer(TypeManager);
 
         ExpressionGenerator = new ExpressionGenerator(this);
         _statementGenerator = new StatementGenerator(this);
@@ -1182,6 +1290,7 @@ public class ExpressionGenerator
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
     private TypeManager TypeManager => _context.TypeManager;
+    private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
     private ProgramNode Program => _context.Program;
     private SymbolTable CurrentSymbols => _context.CurrentSymbols;
     private CompilationUnitNode CurrentCompilationUnit => _context.CurrentCompilationUnit;
@@ -1230,7 +1339,7 @@ public class ExpressionGenerator
                 }
             case MemberAccessExpressionNode memberAccess:
                 {
-                    var leftType = TypeManager.GetExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                    var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                     string baseStructType = leftType.EndsWith("*") ? leftType.Substring(0, leftType.Length - 1) : leftType;
 
                     var structDef = TypeManager.FindStruct(baseStructType) ?? throw new InvalidOperationException($"Could not find struct definition for '{baseStructType}'");
@@ -1309,7 +1418,7 @@ public class ExpressionGenerator
                     {
                         // Generate L-value address and then load its value
                         GenerateLValueAddress(varExpr); // This will handle the 'this' offset and member offset
-                        var type = TypeManager.GetExpressionType(varExpr, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                        var type = SemanticAnalyzer.AnalyzeExpressionType(varExpr, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                         if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
                         else Builder.AppendInstruction("mov eax, [eax]");
                     }
@@ -1328,7 +1437,7 @@ public class ExpressionGenerator
                     if (u.Operator.Type == TokenType.Minus) Builder.AppendInstruction("neg eax");
                     else if (u.Operator.Type == TokenType.Star)
                     {
-                        var type = TypeManager.GetExpressionType(u, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                        var type = SemanticAnalyzer.AnalyzeExpressionType(u, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                         if (TypeManager.GetSizeOfType(type, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
                         else Builder.AppendInstruction("mov eax, [eax]");
                     }
@@ -1336,7 +1445,7 @@ public class ExpressionGenerator
                 break;
             case MemberAccessExpressionNode m:
                 GenerateLValueAddress(m);
-                var memberType = TypeManager.GetExpressionType(m, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                 if (TypeManager.GetSizeOfType(memberType, CurrentCompilationUnit) == 1) Builder.AppendInstruction("movzx eax, byte [eax]");
                 else Builder.AppendInstruction("mov eax, [eax]");
                 break;
@@ -1364,7 +1473,7 @@ public class ExpressionGenerator
                     {
                         targetNameForError = memberTarget.Member.Value;
                         // It's an explicit member access (e.g., 'obj.member = ...')
-                        var ownerType = TypeManager.GetExpressionType(memberTarget.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                        var ownerType = SemanticAnalyzer.AnalyzeExpressionType(memberTarget.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                         string ownerStructFQN = ownerType.TrimEnd('*');
                         isConstAssignment = TypeManager.IsMemberConst(ownerStructFQN, memberTarget.Member.Value);
                     }
@@ -1374,7 +1483,7 @@ public class ExpressionGenerator
                         throw new InvalidOperationException($"Cannot assign to constant target '{targetNameForError ?? assign.Left.ToString()}'.");
                     }
 
-                    var lValueType = TypeManager.GetExpressionType(assign.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+                    var lValueType = SemanticAnalyzer.AnalyzeExpressionType(assign.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
                     var isStructAssign = TypeManager.IsStruct(lValueType);
 
                     if (isStructAssign)
@@ -1447,7 +1556,7 @@ public class ExpressionGenerator
 
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
-            var argType = TypeManager.GetExpressionType(arg, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+            var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
             var isStruct = TypeManager.IsStruct(argType);
 
             if (isStruct)
@@ -1470,7 +1579,7 @@ public class ExpressionGenerator
 
         if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
         {
-            var leftType = TypeManager.GetExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
+            var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, CurrentSymbols, CurrentCompilationUnit, CurrentFunction);
             var (structDef, qualifiedStructName) = TypeManager.GetStructTypeFromFullName(leftType.TrimEnd('*'));
 
             var method = TypeManager.ResolveMethod(structDef, memberAccess.Member.Value);
@@ -2041,7 +2150,7 @@ public class TypeManager
         foreach (UsingDirectiveNode? u in context.Usings.Where(u => u.Alias == null))
         {
             string fqn = $"{u.Namespace}::{name}";
-            
+
             if (!_structs.ContainsKey(fqn))
             {
                 continue;
@@ -2337,95 +2446,6 @@ public class TypeManager
             throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'.");
         }
         return member.IsConst;
-    }
-
-    public string GetExpressionType(ExpressionNode expr, SymbolTable symbols, CompilationUnitNode context, FunctionDeclarationNode currentFunction)
-    {
-        switch (expr)
-        {
-            case IntegerLiteralNode: return "int";
-            case StringLiteralNode: return "char*";
-            case VariableExpressionNode v:
-                if (symbols.TryGetSymbol(v.Identifier.Value, out _, out _, out _)) return symbols.GetSymbolType(v.Identifier.Value);
-
-                // Try resolving as an unqualified enum member
-                var unqualifiedEnumValue = ResolveUnqualifiedEnumMember(v.Identifier.Value, context, currentFunction.Namespace);
-                if (unqualifiedEnumValue.HasValue) return "int";
-
-                if (currentFunction.OwnerStructName != null)
-                {
-                    try
-                    {
-                        (StructDefinitionNode Def, string FullName) = GetStructTypeFromUnqualifiedName(currentFunction.OwnerStructName, currentFunction.Namespace);
-                        (int _, string memberTypeResolved) = GetMemberInfo(FullName, v.Identifier.Value, context);
-                        return memberTypeResolved;
-                    }
-                    catch (InvalidOperationException) { /* Fall through */ }
-                }
-                throw new InvalidOperationException($"Cannot determine type for undefined variable '{v.Identifier.Value}'.");
-
-            case AssignmentExpressionNode a: return GetExpressionType(a.Left, symbols, context, currentFunction);
-
-            case MemberAccessExpressionNode ma:
-                var leftType = GetExpressionType(ma.Left, symbols, context, currentFunction);
-                string baseStructType = leftType.TrimEnd('*');
-                var (_, resolvedMemberType) = GetMemberInfo(baseStructType, ma.Member.Value, context);
-                return resolvedMemberType;
-
-            case UnaryExpressionNode u when u.Operator.Type == TokenType.Ampersand:
-                return GetExpressionType(u.Right, symbols, context, currentFunction) + "*";
-
-            case UnaryExpressionNode u when u.Operator.Type == TokenType.Star:
-                var operandType = GetExpressionType(u.Right, symbols, context, currentFunction);
-                if (!operandType.EndsWith("*")) throw new InvalidOperationException($"Cannot dereference non-pointer type '{operandType}'.");
-                return operandType.Substring(0, operandType.Length - 1);
-
-            case CallExpressionNode call:
-                FunctionDeclarationNode func;
-                if (call.Callee is MemberAccessExpressionNode callMemberAccess)
-                {
-                    var ownerTypeName = GetExpressionType(callMemberAccess.Left, symbols, context, currentFunction).TrimEnd('*');
-                    var (ownerStruct, _) = GetStructTypeFromFullName(ownerTypeName);
-                    func = ResolveMethod(ownerStruct, callMemberAccess.Member.Value);
-                }
-                else
-                {
-                    func = ResolveFunctionCall(call.Callee, context, currentFunction);
-                }
-
-                string returnTypeNameRaw = GetTypeName(func.ReturnType, func.ReturnPointerLevel);
-                string baseReturnName = returnTypeNameRaw.TrimEnd('*');
-                string returnPointerSuffix = new('*', returnTypeNameRaw.Length - baseReturnName.Length);
-
-                if (func.ReturnType.Type != TokenType.Keyword && !baseReturnName.Equals("void", StringComparison.OrdinalIgnoreCase))
-                {
-                    return ResolveTypeName(baseReturnName, func.Namespace, context) + returnPointerSuffix;
-                }
-                return returnTypeNameRaw;
-
-            case QualifiedAccessExpressionNode q:
-                // Check if the qualifier refers to an enum type name.
-                string? enumTypeFQN = ResolveEnumTypeName(q.Namespace.Value, currentFunction.Namespace, context);
-                if (enumTypeFQN != null)
-                {
-                    if (GetEnumValue(enumTypeFQN, q.Member.Value).HasValue)
-                    {
-                        return "int"; // Enum members are integers
-                    }
-                    // If it resolved to an enum type, but the member isn't found, still an enum context problem
-                    throw new InvalidOperationException($"Enum '{q.Namespace.Value}' does not contain member '{q.Member.Value}'.");
-                }
-                // If not an enum type, it must be a function call target
-                // For a function target, GetExpressionType isn't directly applicable, as it returns the *function itself*, not its return type.
-                // This QualifiedAccessExpressionNode might be the Callee of a CallExpressionNode.
-                // In that context, CallExpressionNode handles the function resolution and return type.
-                // If it's a standalone QualifiedAccessExpressionNode, it's likely an error unless it's an enum.
-                throw new InvalidOperationException($"Qualified access expression '{q.Namespace.Value}::{q.Member.Value}' cannot be evaluated as a value directly. Expected an enum member or part of a function call.");
-
-            case BinaryExpressionNode: return "int";
-
-            default: throw new NotImplementedException($"GetExpressionType not implemented for {expr.GetType().Name}");
-        }
     }
 }
 </file>

@@ -12,92 +12,124 @@ public class SemanticAnalyzer
         _typeManager = typeManager;
     }
 
-    public string AnalyzeExpressionType(ExpressionNode expr, SymbolTable symbols, CompilationUnitNode context, FunctionDeclarationNode currentFunction)
+    public string AnalyzeExpressionType(ExpressionNode expr, AnalysisContext context)
     {
-        switch (expr)
+        return expr switch
         {
-            case IntegerLiteralNode: return "int";
-            case StringLiteralNode: return "char*";
-            case VariableExpressionNode v:
-                if (symbols.TryGetSymbol(v.Identifier.Value, out _, out _, out _)) return symbols.GetSymbolType(v.Identifier.Value);
+            IntegerLiteralNode => "int",
+            StringLiteralNode => "char*",
+            VariableExpressionNode v => AnalyzeVariableExpression(v, context),
+            AssignmentExpressionNode a => AnalyzeExpressionType(a.Left, context), // Type of assignment is type of l-value
+            MemberAccessExpressionNode ma => AnalyzeMemberAccessExpression(ma, context),
+            UnaryExpressionNode u => AnalyzeUnaryExpression(u, context),
+            CallExpressionNode c => AnalyzeCallExpression(c, context),
+            QualifiedAccessExpressionNode q => AnalyzeQualifiedAccessExpression(q, context),
+            BinaryExpressionNode => "int", // All binary operations currently result in an integer
+            _ => throw new NotImplementedException($"AnalyzeExpressionType not implemented for {expr.GetType().Name}")
+        };
+    }
 
-                // Try resolving as an unqualified enum member
-                var unqualifiedEnumValue = _typeManager.ResolveUnqualifiedEnumMember(v.Identifier.Value, context, currentFunction.Namespace);
-                if (unqualifiedEnumValue.HasValue) return "int";
-
-                if (currentFunction.OwnerStructName != null)
-                {
-                    try
-                    {
-                        (StructDefinitionNode Def, string FullName) = _typeManager.GetStructTypeFromUnqualifiedName(currentFunction.OwnerStructName, currentFunction.Namespace);
-                        (int _, string memberTypeResolved) = _typeManager.GetMemberInfo(FullName, v.Identifier.Value, context);
-                        return memberTypeResolved;
-                    }
-                    catch (InvalidOperationException) { /* Fall through */ }
-                }
-                throw new InvalidOperationException($"Cannot determine type for undefined variable '{v.Identifier.Value}'.");
-
-            case AssignmentExpressionNode a: return AnalyzeExpressionType(a.Left, symbols, context, currentFunction);
-
-            case MemberAccessExpressionNode ma:
-                var leftType = AnalyzeExpressionType(ma.Left, symbols, context, currentFunction);
-                string baseStructType = leftType.TrimEnd('*');
-                var (_, resolvedMemberType) = _typeManager.GetMemberInfo(baseStructType, ma.Member.Value, context);
-                return resolvedMemberType;
-
-            case UnaryExpressionNode u when u.Operator.Type == TokenType.Ampersand:
-                return AnalyzeExpressionType(u.Right, symbols, context, currentFunction) + "*";
-
-            case UnaryExpressionNode u when u.Operator.Type == TokenType.Star:
-                var operandType = AnalyzeExpressionType(u.Right, symbols, context, currentFunction);
-                if (!operandType.EndsWith("*")) throw new InvalidOperationException($"Cannot dereference non-pointer type '{operandType}'.");
-                return operandType.Substring(0, operandType.Length - 1);
-
-            case CallExpressionNode call:
-                FunctionDeclarationNode func;
-                if (call.Callee is MemberAccessExpressionNode callMemberAccess)
-                {
-                    var ownerTypeName = AnalyzeExpressionType(callMemberAccess.Left, symbols, context, currentFunction).TrimEnd('*');
-                    var (ownerStruct, _) = _typeManager.GetStructTypeFromFullName(ownerTypeName);
-                    func = _typeManager.ResolveMethod(ownerStruct, callMemberAccess.Member.Value);
-                }
-                else
-                {
-                    func = _typeManager.ResolveFunctionCall(call.Callee, context, currentFunction);
-                }
-
-                string returnTypeNameRaw = _typeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
-                string baseReturnName = returnTypeNameRaw.TrimEnd('*');
-                string returnPointerSuffix = new('*', returnTypeNameRaw.Length - baseReturnName.Length);
-
-                if (func.ReturnType.Type != TokenType.Keyword && !baseReturnName.Equals("void", StringComparison.OrdinalIgnoreCase))
-                {
-                    return _typeManager.ResolveTypeName(baseReturnName, func.Namespace, context) + returnPointerSuffix;
-                }
-                return returnTypeNameRaw;
-
-            case QualifiedAccessExpressionNode q:
-                // Check if the qualifier refers to an enum type name.
-                string? enumTypeFQN = _typeManager.ResolveEnumTypeName(q.Namespace.Value, currentFunction.Namespace, context);
-                if (enumTypeFQN != null)
-                {
-                    if (_typeManager.GetEnumValue(enumTypeFQN, q.Member.Value).HasValue)
-                    {
-                        return "int"; // Enum members are integers
-                    }
-                    // If it resolved to an enum type, but the member isn't found, still an enum context problem
-                    throw new InvalidOperationException($"Enum '{q.Namespace.Value}' does not contain member '{q.Member.Value}'.");
-                }
-                // If not an enum type, it must be a function call target
-                // For a function target, AnalyzeExpressionType isn't directly applicable, as it returns the *function itself*, not its return type.
-                // This QualifiedAccessExpressionNode might be the Callee of a CallExpressionNode.
-                // In that context, CallExpressionNode handles the function resolution and return type.
-                // If it's a standalone QualifiedAccessExpressionNode, it's likely an error unless it's an enum.
-                throw new InvalidOperationException($"Qualified access expression '{q.Namespace.Value}::{q.Member.Value}' cannot be evaluated as a value directly. Expected an enum member or part of a function call.");
-
-            case BinaryExpressionNode: return "int";
-
-            default: throw new NotImplementedException($"AnalyzeExpressionType not implemented for {expr.GetType().Name}");
+    private string AnalyzeVariableExpression(VariableExpressionNode v, AnalysisContext context)
+    {
+        // 1. Check local variables and parameters in the symbol table.
+        if (context.Symbols.TryGetSymbol(v.Identifier.Value, out _, out var type, out _))
+        {
+            return type;
         }
+
+        // 2. Try resolving as an unqualified enum member (e.g., `KEY_D`).
+        var unqualifiedEnumValue = _typeManager.ResolveUnqualifiedEnumMember(v.Identifier.Value, context.CompilationUnit, context.CurrentFunction.Namespace);
+        if (unqualifiedEnumValue.HasValue)
+        {
+            return "int";
+        }
+
+        // 3. If in a method, try resolving as an implicit `this->member`.
+        if (context.CurrentFunction.OwnerStructName != null)
+        {
+            try
+            {
+                (StructDefinitionNode _, string fullName) = _typeManager.GetStructTypeFromUnqualifiedName(context.CurrentFunction.OwnerStructName, context.CurrentFunction.Namespace);
+                (int _, string memberTypeResolved) = _typeManager.GetMemberInfo(fullName, v.Identifier.Value, context.CompilationUnit);
+                return memberTypeResolved;
+            }
+            catch (InvalidOperationException) { /* Fall through to the final error */ }
+        }
+
+        throw new InvalidOperationException($"Cannot determine type for undefined variable '{v.Identifier.Value}'.");
+    }
+
+    private string AnalyzeMemberAccessExpression(MemberAccessExpressionNode ma, AnalysisContext context)
+    {
+        var leftType = AnalyzeExpressionType(ma.Left, context);
+        string baseStructType = leftType.TrimEnd('*');
+        var (_, resolvedMemberType) = _typeManager.GetMemberInfo(baseStructType, ma.Member.Value, context.CompilationUnit);
+        return resolvedMemberType;
+    }
+
+    private string AnalyzeUnaryExpression(UnaryExpressionNode u, AnalysisContext context)
+    {
+        if (u.Operator.Type == TokenType.Ampersand) // Address-of operator
+        {
+            return AnalyzeExpressionType(u.Right, context) + "*";
+        }
+
+        if (u.Operator.Type == TokenType.Star) // Dereference operator
+        {
+            var operandType = AnalyzeExpressionType(u.Right, context);
+            if (!operandType.EndsWith("*"))
+            {
+                throw new InvalidOperationException($"Cannot dereference non-pointer type '{operandType}'.");
+            }
+            return operandType[..^1]; // Remove one level of indirection
+        }
+
+        // For other unary operators like negation ('-'), the type does not change.
+        return AnalyzeExpressionType(u.Right, context);
+    }
+
+    private string AnalyzeCallExpression(CallExpressionNode call, AnalysisContext context)
+    {
+        FunctionDeclarationNode func;
+        if (call.Callee is MemberAccessExpressionNode callMemberAccess) // Method call: myText.draw()
+        {
+            var ownerTypeName = AnalyzeExpressionType(callMemberAccess.Left, context).TrimEnd('*');
+            var (ownerStruct, _) = _typeManager.GetStructTypeFromFullName(ownerTypeName);
+            func = _typeManager.ResolveMethod(ownerStruct, callMemberAccess.Member.Value);
+        }
+        else // Global or namespaced function call: DrawText(), rl::DrawText()
+        {
+            func = _typeManager.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
+        }
+
+        string returnTypeNameRaw = _typeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
+
+        // If the return type is not a primitive keyword (and not void), it's a UDT that needs full resolution.
+        if (func.ReturnType.Type != TokenType.Keyword && !returnTypeNameRaw.StartsWith("void"))
+        {
+            string baseReturnName = returnTypeNameRaw.TrimEnd('*');
+            string returnPointerSuffix = new('*', returnTypeNameRaw.Length - baseReturnName.Length);
+            return _typeManager.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + returnPointerSuffix;
+        }
+
+        return returnTypeNameRaw;
+    }
+
+    private string AnalyzeQualifiedAccessExpression(QualifiedAccessExpressionNode q, AnalysisContext context)
+    {
+        // A qualified access can be an enum member (e.g., `rl::KEY_D`) which has a value.
+        string? enumTypeFQN = _typeManager.ResolveEnumTypeName(q.Namespace.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        if (enumTypeFQN != null)
+        {
+            if (_typeManager.GetEnumValue(enumTypeFQN, q.Member.Value).HasValue)
+            {
+                return "int"; // Enum members are integers.
+            }
+            throw new InvalidOperationException($"Enum '{q.Namespace.Value}' (resolved to '{enumTypeFQN}') does not contain member '{q.Member.Value}'.");
+        }
+
+        // If not an enum, it's a qualified name like `rl::DrawText`. This is not a value on its own.
+        // It's only valid as the `Callee` of a `CallExpression`, which is handled by `AnalyzeCallExpression`.
+        throw new InvalidOperationException($"Qualified access '{q.Namespace.Value}::{q.Member.Value}' cannot be evaluated as a value directly. Only enum members or function calls are supported.");
     }
 }

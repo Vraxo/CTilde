@@ -115,21 +115,37 @@ public class SemanticAnalyzer
         return returnTypeNameRaw;
     }
 
+    private string ResolveQualifier(ExpressionNode expr)
+    {
+        return expr switch
+        {
+            VariableExpressionNode v => v.Identifier.Value,
+            QualifiedAccessExpressionNode q => $"{ResolveQualifier(q.Left)}::{q.Member.Value}",
+            _ => throw new InvalidOperationException($"Cannot resolve qualifier from expression of type {expr.GetType().Name}")
+        };
+    }
+
     private string AnalyzeQualifiedAccessExpression(QualifiedAccessExpressionNode q, AnalysisContext context)
     {
-        // A qualified access can be an enum member (e.g., `rl::KEY_D`) which has a value.
-        string? enumTypeFQN = _typeManager.ResolveEnumTypeName(q.Namespace.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        // This expression is a value, so it must be an enum member.
+        // `q.Left` resolves to the enum type (e.g., `raylib::KeyboardKey`)
+        // `q.Member` resolves to the enum member (e.g., `KEY_D`)
+
+        string potentialEnumTypeName = ResolveQualifier(q.Left);
+        string memberName = q.Member.Value;
+
+        string? enumTypeFQN = _typeManager.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction.Namespace, context.CompilationUnit);
         if (enumTypeFQN != null)
         {
-            if (_typeManager.GetEnumValue(enumTypeFQN, q.Member.Value).HasValue)
+            if (_typeManager.GetEnumValue(enumTypeFQN, memberName).HasValue)
             {
                 return "int"; // Enum members are integers.
             }
-            throw new InvalidOperationException($"Enum '{q.Namespace.Value}' (resolved to '{enumTypeFQN}') does not contain member '{q.Member.Value}'.");
+            throw new InvalidOperationException($"Enum '{potentialEnumTypeName}' (resolved to '{enumTypeFQN}') does not contain member '{memberName}'.");
         }
 
         // If not an enum, it's a qualified name like `rl::DrawText`. This is not a value on its own.
         // It's only valid as the `Callee` of a `CallExpression`, which is handled by `AnalyzeCallExpression`.
-        throw new InvalidOperationException($"Qualified access '{q.Namespace.Value}::{q.Member.Value}' cannot be evaluated as a value directly. Only enum members or function calls are supported.");
+        throw new InvalidOperationException($"Qualified access '{potentialEnumTypeName}::{memberName}' cannot be evaluated as a value directly. Only enum members or function calls are supported.");
     }
 }

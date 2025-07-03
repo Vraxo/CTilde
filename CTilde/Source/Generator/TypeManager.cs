@@ -97,6 +97,16 @@ public class TypeManager
         return candidates.First();
     }
 
+    private string ResolveQualifier(ExpressionNode expr)
+    {
+        return expr switch
+        {
+            VariableExpressionNode v => v.Identifier.Value,
+            QualifiedAccessExpressionNode q => $"{ResolveQualifier(q.Left)}::{q.Member.Value}",
+            _ => throw new InvalidOperationException($"Cannot resolve qualifier from expression of type {expr.GetType().Name}")
+        };
+    }
+
     public FunctionDeclarationNode ResolveFunctionCall(ExpressionNode callee, CompilationUnitNode context, FunctionDeclarationNode currentFunction)
     {
         if (callee is VariableExpressionNode varNode)
@@ -105,19 +115,11 @@ public class TypeManager
         }
         if (callee is QualifiedAccessExpressionNode qNode)
         {
-            var qualifier = qNode.Namespace.Value; // This is now potentially an enum type name OR a namespace alias/name
+            // The new qNode is recursive. We need to resolve the qualifier part first.
+            string qualifier = ResolveQualifier(qNode.Left);
             var funcName = qNode.Member.Value;
 
-            // First, check if the qualifier refers to an enum type name.
-            string? enumTypeFQN = ResolveEnumTypeName(qualifier, currentFunction.Namespace, context);
-            if (enumTypeFQN != null)
-            {
-                // If it resolves to an enum type, then this is not a function call.
-                // It's an error to call a function using EnumType::member syntax, so this path should not be reached for successful enum member lookups
-                throw new InvalidOperationException($"'{qualifier}::{funcName}' is an enum member, not a function.");
-            }
-
-            // If it's not an enum type, treat the qualifier as a namespace or alias.
+            // Now, `qualifier` could be a namespace or an alias.
             string? resolvedNamespace = qualifier;
             var aliased = context.Usings.FirstOrDefault(u => u.Alias == qualifier);
             if (aliased != null) resolvedNamespace = aliased.Namespace;
@@ -295,33 +297,36 @@ public class TypeManager
         if (typeName == "int") return 4;
         if (typeName == "char") return 1;
 
-        // If it's not a primitive or pointer, it must be a struct type.
-        // It must be a fully qualified name here.
         if (_structs.TryGetValue(typeName, out var structDef))
         {
-            // When calculating the size of a struct, resolve its members' types
-            // using the *struct's own compilation unit context*, not the calling context.
-            var structDefUnit = _structUnitMap[typeName]; // Get the unit where this struct was defined
+            var structDefUnit = _structUnitMap[typeName];
+            int size = 0;
 
-            return structDef.Members.Sum(mem =>
+            // Add size of base class, if any
+            if (structDef.BaseStructName != null)
+            {
+                string baseFqn = ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structDefUnit);
+                size += GetSizeOfType(baseFqn, structDefUnit); // Recursive call
+            }
+
+            // Add size of own members
+            size += structDef.Members.Sum(mem =>
             {
                 var rawMemberType = GetTypeName(mem.Type, mem.PointerLevel);
-
                 string baseMemberName = rawMemberType.TrimEnd('*');
                 string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
-
                 string resolvedMemberTypeForSize;
                 if (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", StringComparison.OrdinalIgnoreCase))
                 {
-                    resolvedMemberTypeForSize = rawMemberType; // Primitive types, void don't need resolution
+                    resolvedMemberTypeForSize = rawMemberType;
                 }
                 else
                 {
-                    // Resolve member type using the namespace and usings of the *struct definition's unit*
                     resolvedMemberTypeForSize = ResolveTypeName(baseMemberName, structDef.Namespace, structDefUnit) + pointerSuffix;
                 }
-                return GetSizeOfType(resolvedMemberTypeForSize, structDefUnit); // Recursive call, passing struct's unit
+                return GetSizeOfType(resolvedMemberTypeForSize, structDefUnit);
             });
+            return size;
         }
         throw new InvalidOperationException($"Unknown type '{typeName}' for size calculation.");
     }
@@ -333,34 +338,45 @@ public class TypeManager
         if (!_structs.TryGetValue(structName, out var structDef))
             throw new InvalidOperationException($"Undefined struct '{structName}'");
 
-        int currentOffset = 0;
-        // Get the compilation unit where this struct was defined to use its usings for member type resolution
         var structDefUnit = _structUnitMap[structName];
 
-        foreach (var mem in structDef.Members) // Changed loop variable from 'member' to 'mem' to avoid conflict
+        int baseSize = 0;
+        if (structDef.BaseStructName != null)
+        {
+            string baseFqn = ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structDefUnit);
+            baseSize = GetSizeOfType(baseFqn, structDefUnit);
+        }
+
+        int currentMemberOffset = 0;
+        foreach (var mem in structDef.Members)
         {
             var rawMemberType = GetTypeName(mem.Type, mem.PointerLevel);
-
             string baseMemberName = rawMemberType.TrimEnd('*');
             string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
-
             string resolvedMemberType;
             if (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", StringComparison.OrdinalIgnoreCase))
             {
-                resolvedMemberType = rawMemberType; // Primitive, no resolution needed
+                resolvedMemberType = rawMemberType;
             }
             else
             {
-                // Resolve member type using the namespace and usings of the *struct definition's unit*
                 resolvedMemberType = ResolveTypeName(baseMemberName, structDef.Namespace, structDefUnit) + pointerSuffix;
             }
 
             if (mem.Name.Value == memberName)
             {
-                return (currentOffset, resolvedMemberType);
+                return (baseSize + currentMemberOffset, resolvedMemberType);
             }
-            currentOffset += GetSizeOfType(resolvedMemberType, structDefUnit); // Pass struct's unit here too
+            currentMemberOffset += GetSizeOfType(resolvedMemberType, structDefUnit);
         }
+
+        // If not found in current struct's members, check base class
+        if (structDef.BaseStructName != null)
+        {
+            string baseFqn = ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structDefUnit);
+            return GetMemberInfo(baseFqn, memberName, context); // Recursive call
+        }
+
         throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
     }
 
@@ -370,10 +386,19 @@ public class TypeManager
             throw new InvalidOperationException($"Undefined struct '{structName}'");
 
         var member = structDef.Members.FirstOrDefault(m => m.Name.Value == memberName);
-        if (member == null)
+        if (member != null)
         {
-            throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'.");
+            return member.IsConst;
         }
-        return member.IsConst;
+
+        // If not found, check the base class
+        if (structDef.BaseStructName != null)
+        {
+            var structDefUnit = _structUnitMap[structName];
+            string baseFqn = ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structDefUnit);
+            return IsMemberConst(baseFqn, memberName);
+        }
+
+        throw new InvalidOperationException($"Struct '{structName}' has no member '{memberName}'.");
     }
 }

@@ -40,7 +40,7 @@ public class Parser
         var usings = new List<UsingDirectiveNode>();
         var structs = new List<StructDefinitionNode>();
         var functions = new List<FunctionDeclarationNode>();
-        var enums = new List<EnumDefinitionNode>(); // NEW
+        var enums = new List<EnumDefinitionNode>();
 
         while (Current.Type != TokenType.Unknown)
         {
@@ -72,9 +72,9 @@ public class Parser
             {
                 structs.Add(ParseStructDefinition(functions));
             }
-            else if (Current.Type == TokenType.Keyword && Current.Value == "enum") // NEW
+            else if (Current.Type == TokenType.Keyword && Current.Value == "enum")
             {
-                enums.Add(ParseEnumDefinition()); // NEW
+                enums.Add(ParseEnumDefinition());
             }
             else
             {
@@ -82,7 +82,7 @@ public class Parser
             }
         }
 
-        var unitNode = new CompilationUnitNode(filePath, usings, structs, functions, enums); // MODIFIED
+        var unitNode = new CompilationUnitNode(filePath, usings, structs, functions, enums);
         SetParents(unitNode);
         return unitNode;
     }
@@ -133,7 +133,7 @@ public class Parser
         // No AST node for include, as it's handled by the preprocessor
     }
 
-    private EnumDefinitionNode ParseEnumDefinition() // NEW
+    private EnumDefinitionNode ParseEnumDefinition()
     {
         Eat(TokenType.Keyword); // enum
         var enumName = Eat(TokenType.Identifier);
@@ -176,6 +176,14 @@ public class Parser
     {
         Eat(TokenType.Keyword); // struct
         var structName = Eat(TokenType.Identifier);
+
+        string? baseStructName = null;
+        if (Current.Type == TokenType.Colon)
+        {
+            Eat(TokenType.Colon);
+            baseStructName = Eat(TokenType.Identifier).Value;
+        }
+
         Eat(TokenType.LeftBrace);
 
         var members = new List<MemberVariableNode>();
@@ -217,7 +225,7 @@ public class Parser
 
         Eat(TokenType.RightBrace);
         Eat(TokenType.Semicolon);
-        return new StructDefinitionNode(structName.Value, _currentNamespace, members);
+        return new StructDefinitionNode(structName.Value, baseStructName, _currentNamespace, members);
     }
 
     private void SetParents(AstNode node)
@@ -591,6 +599,12 @@ public class Parser
                 var member = Eat(TokenType.Identifier);
                 expr = new MemberAccessExpressionNode(expr, op, member);
             }
+            else if (Current.Type == TokenType.DoubleColon) // Qualified access
+            {
+                Eat(TokenType.DoubleColon);
+                var member = Eat(TokenType.Identifier);
+                expr = new QualifiedAccessExpressionNode(expr, member);
+            }
             else
             {
                 break;
@@ -619,13 +633,6 @@ public class Parser
         {
             var token = Eat(TokenType.StringLiteral);
             return new StringLiteralNode(token.Value, $"str{_stringLabelCounter++}");
-        }
-        if (Current.Type == TokenType.Identifier && Peek(1).Type == TokenType.DoubleColon)
-        {
-            var ns = Eat(TokenType.Identifier);
-            Eat(TokenType.DoubleColon);
-            var member = Eat(TokenType.Identifier);
-            return new QualifiedAccessExpressionNode(ns, member);
         }
         if (Current.Type == TokenType.Identifier) return new VariableExpressionNode(Eat(TokenType.Identifier));
         if (Current.Type == TokenType.LeftParen)

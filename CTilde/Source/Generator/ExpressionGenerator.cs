@@ -366,21 +366,36 @@ public class ExpressionGenerator
         }
     }
 
+    private string ResolveQualifier(ExpressionNode expr)
+    {
+        return expr switch
+        {
+            VariableExpressionNode v => v.Identifier.Value,
+            QualifiedAccessExpressionNode q => $"{ResolveQualifier(q.Left)}::{q.Member.Value}",
+            _ => throw new InvalidOperationException($"Cannot resolve qualifier from expression of type {expr.GetType().Name}")
+        };
+    }
+
     private void GenerateQualifiedAccessExpression(QualifiedAccessExpressionNode qNode, AnalysisContext context)
     {
-        // Case 1: Enum member access (e.g. `rl::KEY_D`)
-        string? enumTypeFQN = TypeManager.ResolveEnumTypeName(qNode.Namespace.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        // A qualified access can be an enum member (which evaluates to an int)
+        // or a qualified function name (which evaluates to an address).
+
+        // First, try to resolve it as an enum member.
+        string potentialEnumTypeName = ResolveQualifier(qNode.Left);
+        string memberName = qNode.Member.Value;
+        string? enumTypeFQN = TypeManager.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction.Namespace, context.CompilationUnit);
         if (enumTypeFQN != null)
         {
-            var enumValue = TypeManager.GetEnumValue(enumTypeFQN, qNode.Member.Value);
+            var enumValue = TypeManager.GetEnumValue(enumTypeFQN, memberName);
             if (enumValue.HasValue)
             {
-                Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {qNode.Namespace.Value}::{qNode.Member.Value}");
+                Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {potentialEnumTypeName}::{memberName}");
                 return;
             }
         }
 
-        // Case 2: Qualified function name (e.g. `rl::DrawText`)
+        // If it's not an enum, it must be a function name.
         var func = TypeManager.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
         if (func.Body == null)
         {

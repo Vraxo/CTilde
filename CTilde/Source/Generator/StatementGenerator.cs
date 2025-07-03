@@ -7,8 +7,7 @@ public class StatementGenerator
 {
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
-    private TypeRepository TypeRepository => _context.TypeRepository;
-    private FunctionResolver FunctionResolver => _context.FunctionResolver;
+    private TypeManager TypeManager => _context.TypeManager;
     private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
     private ExpressionGenerator ExpressionGenerator => _context.ExpressionGenerator;
 
@@ -42,7 +41,7 @@ public class StatementGenerator
 
         var pointerType = _context.SemanticAnalyzer.AnalyzeExpressionType(deleteNode.Expression, context);
         var objectType = pointerType.TrimEnd('*');
-        var dtor = FunctionResolver.FindDestructor(objectType);
+        var dtor = TypeManager.FindDestructor(objectType);
 
         if (dtor != null)
         {
@@ -70,10 +69,10 @@ public class StatementGenerator
         var varTypeFqn = context.Symbols.GetSymbolType(variableName);
         context.Symbols.TryGetSymbol(variableName, out var offset, out _, out _);
 
-        if (TypeRepository.IsStruct(varTypeFqn))
+        if (TypeManager.IsStruct(varTypeFqn))
         {
-            var structDef = TypeRepository.FindStruct(varTypeFqn);
-            if (_context.VTableManager.HasVTable(varTypeFqn))
+            var structDef = TypeManager.FindStruct(varTypeFqn);
+            if (TypeManager.HasVTable(varTypeFqn))
             {
                 var vtableLabel = NameMangler.GetVTableLabel(structDef);
                 Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of object '{variableName}'");
@@ -85,7 +84,7 @@ public class StatementGenerator
                 var argTypes = decl.ConstructorArguments
                     .Select(arg => _context.SemanticAnalyzer.AnalyzeExpressionType(arg, context))
                     .ToList();
-                var ctor = FunctionResolver.FindConstructor(varTypeFqn, argTypes) ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' matching signature.");
+                var ctor = TypeManager.FindConstructor(varTypeFqn, argTypes) ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' matching signature.");
 
                 int totalArgSize = 0;
                 foreach (var arg in decl.ConstructorArguments.AsEnumerable().Reverse())
@@ -122,7 +121,7 @@ public class StatementGenerator
                 else // e.g. string s = "hello"; or string s = other_s; (Implicit constructor call)
                 {
                     string initializerType = _context.SemanticAnalyzer.AnalyzeExpressionType(decl.Initializer, context);
-                    var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType })
+                    var ctor = TypeManager.FindConstructor(varTypeFqn, new List<string> { initializerType })
                         ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
 
                     int totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
@@ -149,7 +148,7 @@ public class StatementGenerator
     private void GenerateReturn(ReturnStatementNode ret, AnalysisContext context)
     {
         var returnTypeFqn = _context.SemanticAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
-        if (TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
+        if (TypeManager.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
             // Handle return by value for structs (RVO)
             if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");

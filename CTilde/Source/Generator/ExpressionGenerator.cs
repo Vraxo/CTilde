@@ -8,10 +8,7 @@ public class ExpressionGenerator
 {
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
-    private TypeRepository TypeRepository => _context.TypeRepository;
-    private TypeResolver TypeResolver => _context.TypeResolver;
-    private FunctionResolver FunctionResolver => _context.FunctionResolver;
-    private VTableManager VTableManager => _context.VTableManager;
+    private TypeManager TypeManager => _context.TypeManager;
     private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
     private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
     private HashSet<string> ExternalFunctions => _context.ExternalFunctions;
@@ -26,7 +23,7 @@ public class ExpressionGenerator
         var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, context);
         GenerateExpression(arg, context); // Result is address (for struct) or value (for primitive) in EAX
 
-        if (TypeRepository.IsStruct(argType) && !argType.EndsWith("*"))
+        if (TypeManager.IsStruct(argType) && !argType.EndsWith("*"))
         {
             int argSize = MemoryLayoutManager.GetSizeOfType(argType, context.CompilationUnit);
             for (int offset = argSize - 4; offset >= 0; offset -= 4)
@@ -110,7 +107,7 @@ public class ExpressionGenerator
 
     private void GenerateNewExpression(NewExpressionNode n, AnalysisContext context)
     {
-        var typeFqn = TypeResolver.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var typeFqn = TypeManager.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
         var size = MemoryLayoutManager.GetSizeOfType(typeFqn, context.CompilationUnit);
 
         Builder.AppendInstruction($"push {size}", "Push size for malloc");
@@ -119,11 +116,11 @@ public class ExpressionGenerator
         Builder.AppendInstruction("mov edi, eax", "Save new'd pointer in edi");
 
         var argTypes = n.Arguments.Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, context)).ToList();
-        var ctor = FunctionResolver.FindConstructor(typeFqn, argTypes) ?? throw new InvalidOperationException($"No matching constructor for 'new {typeFqn}'");
+        var ctor = TypeManager.FindConstructor(typeFqn, argTypes) ?? throw new InvalidOperationException($"No matching constructor for 'new {typeFqn}'");
 
-        if (VTableManager.HasVTable(typeFqn))
+        if (TypeManager.HasVTable(typeFqn))
         {
-            var structDef = TypeRepository.FindStruct(typeFqn);
+            var structDef = TypeManager.FindStruct(typeFqn);
             var vtableLabel = NameMangler.GetVTableLabel(structDef);
             Builder.AppendInstruction($"mov dword [edi], {vtableLabel}", "Set vtable pointer on heap object");
         }
@@ -150,7 +147,7 @@ public class ExpressionGenerator
     {
         if (context.Symbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out string type, out _))
         {
-            if (TypeRepository.IsStruct(type) && !type.EndsWith("*")) GenerateLValueAddress(varExpr, context);
+            if (TypeManager.IsStruct(type) && !type.EndsWith("*")) GenerateLValueAddress(varExpr, context);
             else
             {
                 string sign = offset > 0 ? "+" : "";
@@ -160,7 +157,7 @@ public class ExpressionGenerator
             return;
         }
 
-        var enumValue = FunctionResolver.ResolveUnqualifiedEnumMember(varExpr.Identifier.Value, context.CompilationUnit, context.CurrentFunction?.Namespace);
+        var enumValue = TypeManager.ResolveUnqualifiedEnumMember(varExpr.Identifier.Value, context.CompilationUnit, context.CurrentFunction?.Namespace);
         if (enumValue.HasValue)
         {
             Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {varExpr.Identifier.Value}");
@@ -199,7 +196,7 @@ public class ExpressionGenerator
     {
         GenerateLValueAddress(m, context);
         var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, context);
-        if (TypeRepository.IsStruct(memberType) && !memberType.EndsWith("*")) return;
+        if (TypeManager.IsStruct(memberType) && !memberType.EndsWith("*")) return;
 
         string instruction = MemoryLayoutManager.GetSizeOfType(memberType, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
         Builder.AppendInstruction(instruction);
@@ -208,7 +205,7 @@ public class ExpressionGenerator
     private void GenerateAssignmentExpression(AssignmentExpressionNode assign, AnalysisContext context)
     {
         string lValueType = SemanticAnalyzer.AnalyzeExpressionType(assign.Left, context);
-        bool isStructAssign = TypeRepository.IsStruct(lValueType);
+        bool isStructAssign = TypeManager.IsStruct(lValueType);
 
         if (isStructAssign)
         {
@@ -239,7 +236,7 @@ public class ExpressionGenerator
     private void GenerateCallExpression(CallExpressionNode callExpr, AnalysisContext context)
     {
         var returnType = SemanticAnalyzer.AnalyzeExpressionType(callExpr, context);
-        bool returnsStruct = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
+        bool returnsStruct = TypeManager.IsStruct(returnType) && !returnType.EndsWith("*");
         int totalArgSize = 0;
 
         if (returnsStruct)
@@ -258,8 +255,8 @@ public class ExpressionGenerator
         if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
         {
             var ownerTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context).TrimEnd('*');
-            var ownerStruct = TypeRepository.FindStruct(ownerTypeFqn) ?? throw new InvalidOperationException($"Struct '{ownerTypeFqn}' not found.");
-            var method = FunctionResolver.ResolveMethod(ownerStruct, memberAccess.Member.Value);
+            var (structDef, _) = TypeManager.GetStructTypeFromFullName(ownerTypeFqn);
+            var method = TypeManager.ResolveMethod(structDef, memberAccess.Member.Value);
 
             if (memberAccess.Operator.Type == TokenType.Arrow) GenerateExpression(memberAccess.Left, context);
             else GenerateLValueAddress(memberAccess.Left, context);
@@ -269,7 +266,7 @@ public class ExpressionGenerator
 
             if (method.IsVirtual || method.IsOverride)
             {
-                var vtableIndex = VTableManager.GetMethodVTableIndex(ownerTypeFqn, method.Name);
+                var vtableIndex = TypeManager.GetMethodVTableIndex(ownerTypeFqn, method.Name);
                 int thisPtrOffset = totalArgSize - 4; // 'this' is the last thing pushed before call
                 Builder.AppendInstruction($"mov eax, [esp + {thisPtrOffset}]", "Get 'this' from stack");
                 Builder.AppendInstruction("mov eax, [eax]", "Get vtable pointer from object");
@@ -280,7 +277,7 @@ public class ExpressionGenerator
         }
         else
         {
-            var func = FunctionResolver.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
+            var func = TypeManager.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
             string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
             if (func.Body == null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
@@ -301,13 +298,13 @@ public class ExpressionGenerator
     {
         var leftTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(binExpr.Left, context);
 
-        if (TypeRepository.IsStruct(leftTypeFqn))
+        if (TypeManager.IsStruct(leftTypeFqn))
         {
             var opName = $"operator_{NameMangler.MangleOperator(binExpr.Operator.Value)}";
-            var overload = FunctionResolver.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
+            var overload = TypeManager.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
 
             var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(overload, context);
-            bool returnsStruct = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
+            bool returnsStruct = TypeManager.IsStruct(returnType) && !returnType.EndsWith("*");
             int totalArgSize = 0;
 
             if (returnsStruct)
@@ -354,14 +351,21 @@ public class ExpressionGenerator
         }
     }
 
+    private string ResolveQualifier(ExpressionNode expr) => expr switch
+    {
+        VariableExpressionNode v => v.Identifier.Value,
+        QualifiedAccessExpressionNode q => $"{ResolveQualifier(q.Left)}::{q.Member.Value}",
+        _ => throw new InvalidOperationException($"Cannot resolve qualifier from expression of type {expr.GetType().Name}")
+    };
+
     private void GenerateQualifiedAccessExpression(QualifiedAccessExpressionNode qNode, AnalysisContext context)
     {
-        string potentialEnumTypeName = TypeResolver.ResolveQualifier(qNode.Left);
+        string potentialEnumTypeName = ResolveQualifier(qNode.Left);
         string memberName = qNode.Member.Value;
-        string? enumTypeFQN = TypeResolver.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction?.Namespace, context.CompilationUnit);
+        string? enumTypeFQN = TypeManager.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction?.Namespace, context.CompilationUnit);
         if (enumTypeFQN != null)
         {
-            var enumValue = FunctionResolver.GetEnumValue(enumTypeFQN, memberName);
+            var enumValue = TypeManager.GetEnumValue(enumTypeFQN, memberName);
             if (enumValue.HasValue)
             {
                 Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {potentialEnumTypeName}::{memberName}");
@@ -369,7 +373,7 @@ public class ExpressionGenerator
             }
         }
 
-        var func = FunctionResolver.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
+        var func = TypeManager.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
         string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
         if (func.Body == null) ExternalFunctions.Add(func.Name);
         Builder.AppendInstruction($"mov eax, {calleeTarget}");

@@ -4,10 +4,7 @@ public class DeclarationGenerator
 {
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
-    private TypeRepository TypeRepository => _context.TypeRepository;
-    private TypeResolver TypeResolver => _context.TypeResolver;
-    private FunctionResolver FunctionResolver => _context.FunctionResolver;
-    private VTableManager VTableManager => _context.VTableManager;
+    private TypeManager TypeManager => _context.TypeManager;
     private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
     private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
     private StatementGenerator StatementGenerator => _context.StatementGenerator;
@@ -20,7 +17,7 @@ public class DeclarationGenerator
 
     public void GenerateConstructor(ConstructorDeclarationNode ctor, CompilationUnitNode unit)
     {
-        var symbols = new SymbolTable(ctor, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
+        var symbols = new SymbolTable(ctor, TypeManager, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis, preventing NullReferenceException.
         var dummyFunctionForContext = new FunctionDeclarationNode(
             new Token(TokenType.Keyword, "void"), 0, ctor.OwnerStructName,
@@ -34,13 +31,13 @@ public class DeclarationGenerator
 
         if (ctor.Initializer != null)
         {
-            var ownerStruct = TypeRepository.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
+            var ownerStruct = TypeManager.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
 
             var argTypes = ctor.Initializer.Arguments
                 .Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, context))
                 .ToList();
-            var baseFqn = TypeResolver.ResolveTypeName(ownerStruct.BaseStructName!, ownerStruct.Namespace, unit);
-            var baseCtor = FunctionResolver.FindConstructor(baseFqn, argTypes) ?? throw new InvalidOperationException("Base constructor not found for given argument types.");
+            var baseFqn = TypeManager.ResolveTypeName(ownerStruct.BaseStructName!, ownerStruct.Namespace, unit);
+            var baseCtor = TypeManager.FindConstructor(baseFqn, argTypes) ?? throw new InvalidOperationException("Base constructor not found for given argument types.");
 
 
             int totalArgSize = 0;
@@ -65,7 +62,7 @@ public class DeclarationGenerator
 
     public void GenerateDestructor(DestructorDeclarationNode dtor, CompilationUnitNode unit)
     {
-        var symbols = new SymbolTable(dtor, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
+        var symbols = new SymbolTable(dtor, TypeManager, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis.
         var dummyFunctionForContext = new FunctionDeclarationNode(
             new Token(TokenType.Keyword, "void"), 0, dtor.OwnerStructName,
@@ -82,9 +79,9 @@ public class DeclarationGenerator
 
     public void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
-        var symbols = new SymbolTable(function, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
+        var symbols = new SymbolTable(function, TypeManager, MemoryLayoutManager, unit);
         var context = new AnalysisContext(symbols, unit, function);
-        var destructibleLocals = symbols.GetDestructibleLocals(FunctionResolver);
+        var destructibleLocals = symbols.GetDestructibleLocals(TypeManager);
 
         string mangledName = function.Name == "main" ? "_main" : NameMangler.Mangle(function);
 
@@ -120,7 +117,7 @@ public class DeclarationGenerator
             Builder.AppendInstruction(null, "Destructor cleanup");
             foreach (var (name, offset, type) in destructibleLocals.AsEnumerable().Reverse())
             {
-                var dtor = FunctionResolver.FindDestructor(type);
+                var dtor = TypeManager.FindDestructor(type);
                 if (dtor != null)
                 {
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of '{name}' for dtor");

@@ -7,10 +7,7 @@ namespace CTilde;
 public class CodeGenerator
 {
     internal ProgramNode Program { get; }
-    internal TypeRepository TypeRepository { get; }
-    internal TypeResolver TypeResolver { get; }
-    internal FunctionResolver FunctionResolver { get; }
-    internal VTableManager VTableManager { get; }
+    internal TypeManager TypeManager { get; }
     internal MemoryLayoutManager MemoryLayoutManager { get; }
     internal SemanticAnalyzer SemanticAnalyzer { get; }
     internal AssemblyBuilder Builder { get; } = new();
@@ -26,12 +23,9 @@ public class CodeGenerator
     public CodeGenerator(ProgramNode program)
     {
         Program = program;
-        TypeRepository = new TypeRepository(program);
-        TypeResolver = new TypeResolver(TypeRepository);
-        FunctionResolver = new FunctionResolver(TypeRepository, TypeResolver, program);
-        VTableManager = new VTableManager(TypeRepository, TypeResolver);
-        MemoryLayoutManager = new MemoryLayoutManager(TypeRepository, TypeResolver, VTableManager);
-        SemanticAnalyzer = new SemanticAnalyzer(TypeRepository, TypeResolver, FunctionResolver, MemoryLayoutManager);
+        TypeManager = new TypeManager(program);
+        MemoryLayoutManager = new MemoryLayoutManager(TypeManager);
+        SemanticAnalyzer = new SemanticAnalyzer(TypeManager, MemoryLayoutManager);
 
         ExpressionGenerator = new ExpressionGenerator(this);
         StatementGenerator = new StatementGenerator(this);
@@ -95,11 +89,11 @@ public class CodeGenerator
         Builder.AppendDirective("section '.rdata' data readable");
         foreach (var s in Program.CompilationUnits.SelectMany(cu => cu.Structs))
         {
-            var structFqn = TypeRepository.GetFullyQualifiedName(s);
-            if (VTableManager.HasVTable(structFqn))
+            var structFqn = TypeManager.GetFullyQualifiedName(s);
+            if (TypeManager.HasVTable(structFqn))
             {
                 Builder.AppendLabel(NameMangler.GetVTableLabel(s));
-                var vtable = VTableManager.GetVTable(structFqn);
+                var vtable = TypeManager.GetVTable(structFqn);
                 foreach (var entry in vtable)
                 {
                     var mangledName = entry switch

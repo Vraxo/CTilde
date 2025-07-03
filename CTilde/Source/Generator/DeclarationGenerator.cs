@@ -82,7 +82,20 @@ public class DeclarationGenerator
 
     public void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
-        var symbols = new SymbolTable(function, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
+        var tempContext = new AnalysisContext(null, unit, function);
+        var returnTypeFqn = SemanticAnalyzer.AnalyzeFunctionReturnType(function, tempContext);
+        var returnsStructByValue = TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*");
+
+        var parametersWithRetPtr = new List<ParameterNode>(function.Parameters);
+        if (returnsStructByValue)
+        {
+            var retPtrParam = new ParameterNode(new Token(TokenType.Keyword, "void"), 1, new Token(TokenType.Identifier, "__ret_ptr"));
+            parametersWithRetPtr.Add(retPtrParam);
+        }
+
+        var functionForSymbols = function with { Parameters = parametersWithRetPtr };
+        var symbols = new SymbolTable(functionForSymbols, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
+
         var context = new AnalysisContext(symbols, unit, function);
         var destructibleLocals = symbols.GetDestructibleLocals(FunctionResolver);
 

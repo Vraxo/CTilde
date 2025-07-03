@@ -70,7 +70,7 @@ public class Parser
             }
             else if (Current.Type == TokenType.Keyword && Current.Value == "struct")
             {
-                structs.Add(ParseStructDefinition(functions));
+                structs.Add(ParseStructDefinition());
             }
             else if (Current.Type == TokenType.Keyword && Current.Value == "enum")
             {
@@ -172,7 +172,7 @@ public class Parser
         return new EnumDefinitionNode(enumName.Value, _currentNamespace, members);
     }
 
-    private StructDefinitionNode ParseStructDefinition(List<FunctionDeclarationNode> programFunctions)
+    private StructDefinitionNode ParseStructDefinition()
     {
         Eat(TokenType.Keyword); // struct
         var structName = Eat(TokenType.Identifier);
@@ -187,7 +187,11 @@ public class Parser
         Eat(TokenType.LeftBrace);
 
         var members = new List<MemberVariableNode>();
-        var currentAccess = AccessSpecifier.Private; // Default for struct is private
+        var methods = new List<FunctionDeclarationNode>();
+        var constructors = new List<ConstructorDeclarationNode>();
+        var destructors = new List<DestructorDeclarationNode>();
+
+        var currentAccess = AccessSpecifier.Private;
 
         while (Current.Type != TokenType.RightBrace)
         {
@@ -206,7 +210,7 @@ public class Parser
             if (Current.Type == TokenType.Keyword && Current.Value == "const")
             {
                 isConst = true;
-                Eat(TokenType.Keyword); // Eat 'const'
+                Eat(TokenType.Keyword);
             }
 
             if (Current.Type == TokenType.Keyword && Current.Value == "virtual")
@@ -222,29 +226,81 @@ public class Parser
 
             if (isVirtual && isOverride) throw new InvalidOperationException("A method cannot be both 'virtual' and 'override'.");
 
+            if (Current.Type == TokenType.Tilde)
+            {
+                destructors.Add(ParseDestructor(structName.Value, currentAccess, isVirtual));
+                continue;
+            }
+
+            if (Current.Type == TokenType.Identifier && Current.Value == structName.Value && Peek(1).Type == TokenType.LeftParen)
+            {
+                if (isVirtual || isOverride || isConst) throw new InvalidOperationException("Constructors cannot be marked 'virtual', 'override', or 'const'.");
+                constructors.Add(ParseConstructor(structName.Value, baseStructName, currentAccess));
+                continue;
+            }
 
             var (type, pointerLevel) = ParseType();
             var name = Eat(TokenType.Identifier);
 
             if (Current.Type == TokenType.LeftParen)
             {
-                // This is a method definition.
-                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value, currentAccess, isVirtual, isOverride, _currentNamespace);
-                programFunctions.Add(methodNode);
+                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value, currentAccess, isVirtual, isOverride, _currentNamespace, true);
+                methods.Add(methodNode);
             }
             else
             {
-                // This is a member variable.
                 if (isVirtual || isOverride) throw new InvalidOperationException("Only methods can be marked 'virtual' or 'override'.");
-                members.Add(new MemberVariableNode(isConst, type, pointerLevel, name, currentAccess)); // Pass isConst
+                members.Add(new MemberVariableNode(isConst, type, pointerLevel, name, currentAccess));
                 Eat(TokenType.Semicolon);
             }
         }
 
         Eat(TokenType.RightBrace);
         Eat(TokenType.Semicolon);
-        return new StructDefinitionNode(structName.Value, baseStructName, _currentNamespace, members);
+        return new StructDefinitionNode(structName.Value, baseStructName, _currentNamespace, members, methods, constructors, destructors);
     }
+
+    private ConstructorDeclarationNode ParseConstructor(string ownerStructName, string? baseStructName, AccessSpecifier access)
+    {
+        Eat(TokenType.Identifier);
+        var parameters = ParseParameterList(false);
+
+        BaseInitializerNode? baseInitializer = null;
+        if (Current.Type == TokenType.Colon)
+        {
+            if (baseStructName == null) throw new InvalidOperationException($"Struct '{ownerStructName}' cannot have a base initializer because it does not inherit from another struct.");
+            Eat(TokenType.Colon);
+            var baseName = Eat(TokenType.Identifier);
+            if (baseName.Value != baseStructName) throw new InvalidOperationException($"Base initializer name '{baseName.Value}' does not match the base struct name '{baseStructName}'.");
+
+            Eat(TokenType.LeftParen);
+            var arguments = new List<ExpressionNode>();
+            if (Current.Type != TokenType.RightParen)
+            {
+                do { arguments.Add(ParseExpression()); }
+                while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+            }
+            Eat(TokenType.RightParen);
+            baseInitializer = new BaseInitializerNode(arguments);
+        }
+
+        var body = ParseBlockStatement();
+        return new ConstructorDeclarationNode(ownerStructName, _currentNamespace, access, parameters, baseInitializer, body);
+    }
+
+    private DestructorDeclarationNode ParseDestructor(string ownerStructName, AccessSpecifier access, bool isVirtual)
+    {
+        Eat(TokenType.Tilde);
+        var name = Eat(TokenType.Identifier);
+        if (name.Value != ownerStructName) throw new InvalidOperationException($"Destructor name '~{name.Value}' must match struct name '{ownerStructName}'.");
+
+        Eat(TokenType.LeftParen);
+        Eat(TokenType.RightParen);
+
+        var body = ParseBlockStatement();
+        return new DestructorDeclarationNode(ownerStructName, _currentNamespace, access, isVirtual, body);
+    }
+
 
     private void SetParents(AstNode node)
     {
@@ -291,7 +347,6 @@ public class Parser
             _position++;
         }
 
-        // Only qualify if it's an identifier (a UDT), not a keyword (int, char)
         if (typeToken.Type == TokenType.Identifier)
         {
             if (namespaceQualifier != null)
@@ -309,18 +364,9 @@ public class Parser
         return (typeToken, pointerLevel);
     }
 
-    private FunctionDeclarationNode ParseGlobalFunction()
-    {
-        var (returnType, returnPointerLevel) = ParseType();
-        var identifier = Eat(TokenType.Identifier);
-        // Global functions are implicitly public and never virtual/override
-        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null, AccessSpecifier.Public, false, false, _currentNamespace);
-    }
-
-    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName, AccessSpecifier accessLevel, bool isVirtual, bool isOverride, string? namespaceName)
+    private List<ParameterNode> ParseParameterList(bool addThisPointer)
     {
         Eat(TokenType.LeftParen);
-
         var parameters = new List<ParameterNode>();
         if (Current.Type != TokenType.RightParen)
         {
@@ -331,11 +377,22 @@ public class Parser
                 parameters.Add(new ParameterNode(paramType, paramPointerLevel, paramName));
             } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
         }
-
         Eat(TokenType.RightParen);
+        return parameters;
+    }
 
-        // If this is a method, prepend the implicit 'this' pointer to the parameter list.
-        if (ownerStructName != null)
+    private FunctionDeclarationNode ParseGlobalFunction()
+    {
+        var (returnType, returnPointerLevel) = ParseType();
+        var identifier = Eat(TokenType.Identifier);
+        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null, AccessSpecifier.Public, false, false, _currentNamespace, false);
+    }
+
+    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName, AccessSpecifier accessLevel, bool isVirtual, bool isOverride, string? namespaceName, bool isMethod)
+    {
+        var parameters = ParseParameterList(isMethod);
+
+        if (isMethod && ownerStructName != null)
         {
             var thisTypeTokenValue = namespaceName != null ? $"{namespaceName}::{ownerStructName}" : ownerStructName;
             var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeTokenValue), 1, new Token(TokenType.Identifier, "this"));
@@ -373,7 +430,7 @@ public class Parser
                 case "return": return ParseReturnStatement();
                 case "if": return ParseIfStatement();
                 case "while": return ParseWhileStatement();
-                case "const": // Handle 'const' keyword for declarations
+                case "const":
                 case "int":
                 case "char":
                 case "struct":
@@ -381,54 +438,20 @@ public class Parser
             }
         }
 
-        // Disambiguate between a declaration and an expression statement
         bool isDeclaration = false;
-        // Check for 'const' keyword, type keyword, or identifier followed by variable name
         if (Current.Type == TokenType.Identifier || (Current.Type == TokenType.Keyword && (Current.Value == "const" || Current.Value == "int" || Current.Value == "char" || Current.Value == "struct")))
         {
-            int tempPos = _position; // Save current position for backtracking
+            int tempPos = _position;
             try
             {
-                if (Current.Type == TokenType.Keyword && Current.Value == "const")
-                {
-                    _position++; // Consume 'const'
-                }
-
-                Token potentialTypeToken = Current;
-                if (potentialTypeToken.Type == TokenType.Identifier || (potentialTypeToken.Type == TokenType.Keyword && (potentialTypeToken.Value == "int" || potentialTypeToken.Value == "char" || potentialTypeToken.Value == "struct")))
-                {
-                    _position++; // Consume potential type (Identifier or Keyword like 'int')
-                    while (Current.Type == TokenType.Star) _position++; // Consume pointers
-
-                    if (Current.Type == TokenType.Identifier) // Next must be the variable name
-                    {
-                        isDeclaration = true;
-                    }
-                    else if (potentialTypeToken.Type == TokenType.Identifier && Peek(0).Type == TokenType.DoubleColon && Peek(1).Type == TokenType.Identifier)
-                    {
-                        // Case for `ns::TypeName varName`
-                        _position++; // Consume ::
-                        _position++; // Consume TypeName
-                        while (Current.Type == TokenType.Star) _position++; // Consume pointers
-                        if (Current.Type == TokenType.Identifier) // Next must be variable name
-                        {
-                            isDeclaration = true;
-                        }
-                    }
-                }
+                if (Current.Type == TokenType.Keyword && Current.Value == "const") _position++;
+                ParseType();
+                if (Current.Type == TokenType.Identifier) isDeclaration = true;
             }
-            finally
-            {
-                _position = tempPos; // Always rewind position
-            }
+            finally { _position = tempPos; }
         }
 
-
-        if (isDeclaration)
-        {
-            return ParseDeclarationStatement();
-        }
-
+        if (isDeclaration) return ParseDeclarationStatement();
         if (Current.Type == TokenType.LeftBrace) return ParseBlockStatement();
 
         var expression = ParseExpression();
@@ -458,31 +481,38 @@ public class Parser
         if (Current.Type == TokenType.Keyword && Current.Value == "const")
         {
             isConst = true;
-            Eat(TokenType.Keyword); // Eat 'const'
+            Eat(TokenType.Keyword);
         }
 
         var (typeToken, pointerLevel) = ParseType();
         var identifier = Eat(TokenType.Identifier);
+
         ExpressionNode? initializer = null;
+        List<ExpressionNode>? ctorArgs = null;
+
         if (Current.Type == TokenType.Assignment)
         {
             Eat(TokenType.Assignment);
-            if (Current.Type == TokenType.LeftBrace)
+            if (Current.Type == TokenType.LeftBrace) initializer = ParseInitializerListExpression();
+            else initializer = ParseExpression();
+        }
+        else if (Current.Type == TokenType.LeftParen)
+        {
+            Eat(TokenType.LeftParen);
+            ctorArgs = new List<ExpressionNode>();
+            if (Current.Type != TokenType.RightParen)
             {
-                initializer = ParseInitializerListExpression();
+                do { ctorArgs.Add(ParseExpression()); }
+                while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
             }
-            else
-            {
-                initializer = ParseExpression();
-            }
+            Eat(TokenType.RightParen);
         }
         else if (isConst)
         {
-            // const variables must be initialized
             throw new InvalidOperationException($"Constant variable '{identifier.Value}' must be initialized.");
         }
         Eat(TokenType.Semicolon);
-        return new DeclarationStatementNode(isConst, typeToken, pointerLevel, identifier, initializer);
+        return new DeclarationStatementNode(isConst, typeToken, pointerLevel, identifier, initializer, ctorArgs);
     }
 
     private ExpressionNode ParseInitializerListExpression()
@@ -491,10 +521,8 @@ public class Parser
         var values = new List<ExpressionNode>();
         if (Current.Type != TokenType.RightBrace)
         {
-            do
-            {
-                values.Add(ParseExpression());
-            } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+            do { values.Add(ParseExpression()); }
+            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
         }
         Eat(TokenType.RightBrace);
         return new InitializerListExpressionNode(values);
@@ -595,10 +623,9 @@ public class Parser
     private ExpressionNode ParsePostfixExpression()
     {
         var expr = ParsePrimaryExpression();
-
         while (true)
         {
-            if (Current.Type == TokenType.LeftParen) // Call
+            if (Current.Type == TokenType.LeftParen)
             {
                 Eat(TokenType.LeftParen);
                 var arguments = new List<ExpressionNode>();
@@ -610,25 +637,20 @@ public class Parser
                 Eat(TokenType.RightParen);
                 expr = new CallExpressionNode(expr, arguments);
             }
-            else if (Current.Type is TokenType.Dot or TokenType.Arrow) // Member access
+            else if (Current.Type is TokenType.Dot or TokenType.Arrow)
             {
-                var op = Current;
-                _position++;
+                var op = Current; _position++;
                 var member = Eat(TokenType.Identifier);
                 expr = new MemberAccessExpressionNode(expr, op, member);
             }
-            else if (Current.Type == TokenType.DoubleColon) // Qualified access
+            else if (Current.Type == TokenType.DoubleColon)
             {
                 Eat(TokenType.DoubleColon);
                 var member = Eat(TokenType.Identifier);
                 expr = new QualifiedAccessExpressionNode(expr, member);
             }
-            else
-            {
-                break;
-            }
+            else { break; }
         }
-
         return expr;
     }
 

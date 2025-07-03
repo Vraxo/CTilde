@@ -37,26 +37,39 @@ public class StatementGenerator
         var varTypeFqn = context.Symbols.GetSymbolType(variableName);
         context.Symbols.TryGetSymbol(variableName, out var offset, out _, out _);
 
-        // If it's a struct with a vtable, initialize its vptr
-        if (TypeManager.IsStruct(varTypeFqn) && TypeManager.HasVTable(varTypeFqn))
+        if (TypeManager.IsStruct(varTypeFqn))
         {
             var structDef = TypeManager.FindStruct(varTypeFqn);
-            var mangledStructName = TypeManager.Mangle(structDef);
-            Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of object '{variableName}'");
-            Builder.AppendInstruction($"mov dword [eax], _vtable_{mangledStructName}", "Set vtable pointer");
+            if (TypeManager.HasVTable(varTypeFqn))
+            {
+                var vtableLabel = TypeManager.GetVTableLabel(structDef);
+                Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of object '{variableName}'");
+                Builder.AppendInstruction($"mov dword [eax], {vtableLabel}", "Set vtable pointer");
+            }
         }
 
-        if (decl.Initializer == null) return;
-
-        if (decl.Initializer is InitializerListExpressionNode initList)
+        if (decl.ConstructorArguments != null)
         {
-            var structDef = TypeManager.FindStruct(varTypeFqn)
-                ?? throw new InvalidOperationException($"Could not find struct definition for initializer list type '{varTypeFqn}'.");
+            int argCount = decl.ConstructorArguments.Count;
+            var ctor = TypeManager.FindConstructor(varTypeFqn, argCount) ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' with {argCount} arguments.");
 
-            if (initList.Values.Count > structDef.Members.Count)
-                throw new InvalidOperationException($"Too many values in initializer list for struct '{structDef.Name}'.");
+            int totalArgSize = 0;
+            foreach (var arg in decl.ConstructorArguments.AsEnumerable().Reverse())
+            {
+                totalArgSize += ExpressionGenerator.PushArgument(arg, context);
+            }
 
+            Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
+            Builder.AppendInstruction("push eax");
+            totalArgSize += 4;
+
+            Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
+            Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
+        }
+        else if (decl.Initializer is InitializerListExpressionNode initList)
+        {
             var allMembers = TypeManager.GetAllMembers(varTypeFqn, context.CompilationUnit);
+            if (initList.Values.Count > allMembers.Count) throw new InvalidOperationException($"Too many values in initializer list for struct '{varTypeFqn}'.");
 
             for (int j = 0; j < initList.Values.Count; j++)
             {
@@ -70,25 +83,21 @@ public class StatementGenerator
                 else Builder.AppendInstruction($"mov dword [ebp + {totalOffset}], eax", $"Init member {memberName}");
             }
         }
-        else // Simple variable initialization (e.g., int x = 5; or const int x = 5;)
+        else if (decl.Initializer != null)
         {
-            ExpressionGenerator.GenerateExpression(decl.Initializer, context); // Value to assign is in EAX
-
+            ExpressionGenerator.GenerateExpression(decl.Initializer, context);
             if (TypeManager.GetSizeOfType(varTypeFqn, context.CompilationUnit) == 1)
-            {
                 Builder.AppendInstruction($"mov byte [ebp + {offset}], al", $"Initialize {variableName}");
-            }
             else
-            {
                 Builder.AppendInstruction($"mov dword [ebp + {offset}], eax", $"Initialize {variableName}");
-            }
         }
     }
 
     private void GenerateReturn(ReturnStatementNode ret, AnalysisContext context)
     {
         if (ret.Expression != null) ExpressionGenerator.GenerateExpression(ret.Expression, context);
-        _context.GenerateFunctionEpilogue();
+        // NOTE: The actual return instruction is now handled by the epilogue generation in CodeGenerator
+        // to ensure destructors are called first.
     }
 
     private void GenerateWhile(WhileStatementNode w, AnalysisContext context)

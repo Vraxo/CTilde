@@ -51,8 +51,27 @@ public class CodeGenerator
         {
             foreach (var function in unit.Functions.Where(f => f.Body != null))
             {
-                GenerateFunction(function, unit);
+                GenerateFunction(function, unit, null);
                 Builder.AppendBlankLine();
+            }
+
+            foreach (var s in unit.Structs)
+            {
+                foreach (var method in s.Methods.Where(m => m.Body != null))
+                {
+                    GenerateFunction(method, unit, s);
+                    Builder.AppendBlankLine();
+                }
+                foreach (var ctor in s.Constructors)
+                {
+                    GenerateConstructor(ctor, unit);
+                    Builder.AppendBlankLine();
+                }
+                foreach (var dtor in s.Destructors)
+                {
+                    GenerateDestructor(dtor, unit);
+                    Builder.AppendBlankLine();
+                }
             }
         }
 
@@ -64,22 +83,24 @@ public class CodeGenerator
     private void GenerateVTables()
     {
         Builder.AppendDirective("section '.rdata' data readable");
-        foreach (var unit in Program.CompilationUnits)
+        foreach (var s in Program.CompilationUnits.SelectMany(cu => cu.Structs))
         {
-            foreach (var s in unit.Structs)
+            var structFqn = TypeManager.GetFullyQualifiedName(s);
+            if (TypeManager.HasVTable(structFqn))
             {
-                var structFqn = TypeManager.GetFullyQualifiedName(s);
-                if (TypeManager.HasVTable(structFqn))
+                Builder.AppendLabel(TypeManager.GetVTableLabel(s));
+                var vtable = TypeManager.GetVTable(structFqn);
+                foreach (var entry in vtable)
                 {
-                    Builder.AppendLabel($"_vtable_{TypeManager.Mangle(s)}");
-                    var vtable = TypeManager.GetVTable(structFqn);
-                    foreach (var func in vtable)
+                    var mangledName = entry switch
                     {
-                        var mangledFuncName = TypeManager.Mangle(func);
-                        Builder.AppendInstruction($"dd {mangledFuncName}");
-                    }
-                    Builder.AppendBlankLine();
+                        FunctionDeclarationNode f => TypeManager.Mangle(f),
+                        DestructorDeclarationNode d => TypeManager.Mangle(d),
+                        _ => throw new InvalidOperationException("Invalid vtable entry type")
+                    };
+                    Builder.AppendInstruction($"dd {mangledName}");
                 }
+                Builder.AppendBlankLine();
             }
         }
     }
@@ -103,22 +124,86 @@ public class CodeGenerator
             }
             else if (property.GetValue(node) is IEnumerable<AstNode> children)
             {
-                foreach (var c in children)
-                {
-                    FindAllStringLiterals(c);
-                }
+                foreach (var c in children) FindAllStringLiterals(c);
             }
         }
     }
 
-    private void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit)
+    private void GenerateConstructor(ConstructorDeclarationNode ctor, CompilationUnitNode unit)
+    {
+        var symbols = new SymbolTable(ctor, TypeManager, unit);
+        // Create a dummy function node to provide context for analysis, preventing NullReferenceException.
+        var dummyFunctionForContext = new FunctionDeclarationNode(
+            new Token(TokenType.Keyword, "void"), 0, ctor.OwnerStructName,
+            ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
+            false, false, ctor.Namespace
+        );
+        var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
+
+        Builder.AppendLabel(TypeManager.Mangle(ctor));
+        GeneratePrologue(symbols);
+
+        if (ctor.Initializer != null)
+        {
+            var ownerStruct = TypeManager.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
+            var baseFqn = TypeManager.ResolveTypeName(ownerStruct.BaseStructName!, ownerStruct.Namespace, unit);
+            var baseCtor = TypeManager.FindConstructor(baseFqn, ctor.Initializer.Arguments.Count) ?? throw new InvalidOperationException("Base constructor not found");
+
+            int totalArgSize = 0;
+            foreach (var arg in ctor.Initializer.Arguments.AsEnumerable().Reverse())
+            {
+                totalArgSize += ExpressionGenerator.PushArgument(arg, context);
+            }
+
+            context.Symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
+            Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get 'this' pointer");
+            Builder.AppendInstruction("push eax", "Push 'this' for base ctor");
+            totalArgSize += 4;
+
+            Builder.AppendInstruction($"call {TypeManager.Mangle(baseCtor)}");
+            Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up base ctor args");
+            Builder.AppendBlankLine();
+        }
+
+        _statementGenerator.GenerateStatement(ctor.Body, context);
+        GenerateEpilogue(new List<(string, int, string)>());
+    }
+
+    private void GenerateDestructor(DestructorDeclarationNode dtor, CompilationUnitNode unit)
+    {
+        var symbols = new SymbolTable(dtor, TypeManager, unit);
+        // Create a dummy function node to provide context for analysis.
+        var dummyFunctionForContext = new FunctionDeclarationNode(
+            new Token(TokenType.Keyword, "void"), 0, dtor.OwnerStructName,
+            new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
+            dtor.IsVirtual, false, dtor.Namespace
+        );
+        var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
+
+        Builder.AppendLabel(TypeManager.Mangle(dtor));
+        GeneratePrologue(symbols);
+        _statementGenerator.GenerateStatement(dtor.Body, context);
+        GenerateEpilogue(new List<(string, int, string)>());
+    }
+
+    private void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
         var symbols = new SymbolTable(function, TypeManager, unit);
         var context = new AnalysisContext(symbols, unit, function);
+        var destructibleLocals = symbols.GetDestructibleLocals(TypeManager);
 
         string mangledName = function.Name == "main" ? "_main" : TypeManager.Mangle(function);
 
         Builder.AppendLabel(mangledName);
+        GeneratePrologue(symbols);
+
+        if (function.Body != null) _statementGenerator.GenerateStatement(function.Body, context);
+
+        GenerateEpilogue(destructibleLocals);
+    }
+
+    private void GeneratePrologue(SymbolTable symbols)
+    {
         Builder.AppendInstruction("push ebp");
         Builder.AppendInstruction("mov ebp, esp");
         Builder.AppendInstruction("push ebx", "Preserve non-volatile registers");
@@ -131,19 +216,39 @@ public class CodeGenerator
         {
             Builder.AppendInstruction($"sub esp, {totalLocalSize}", "Allocate space for all local variables");
         }
+    }
 
-        if (function.Body != null)
+    private void GenerateEpilogue(List<(string Name, int Offset, string TypeFqn)> destructibleLocals)
+    {
+        if (destructibleLocals.Any())
         {
-            _statementGenerator.GenerateStatement(function.Body, context);
+            Builder.AppendBlankLine();
+            Builder.AppendInstruction(null, "Destructor cleanup");
+            foreach (var (name, offset, type) in destructibleLocals.AsEnumerable().Reverse())
+            {
+                var dtor = TypeManager.FindDestructor(type);
+                if (dtor != null)
+                {
+                    Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of '{name}' for dtor");
+                    Builder.AppendInstruction("push eax");
+
+                    if (dtor.IsVirtual)
+                    {
+                        // The destructor is always at index 0 in the vtable if virtual
+                        Builder.AppendInstruction("mov eax, [eax]", "Get vtable ptr");
+                        Builder.AppendInstruction("mov eax, [eax]", "Get dtor from vtable[0]");
+                        Builder.AppendInstruction("call eax");
+                    }
+                    else
+                    {
+                        Builder.AppendInstruction($"call {TypeManager.Mangle(dtor)}");
+                    }
+                    Builder.AppendInstruction("add esp, 4", "Clean up 'this'");
+                }
+            }
         }
 
         Builder.AppendBlankLine();
-        Builder.AppendInstruction(null, "Implicit return cleanup");
-        GenerateFunctionEpilogue();
-    }
-
-    internal void GenerateFunctionEpilogue()
-    {
         Builder.AppendInstruction("pop edi");
         Builder.AppendInstruction("pop esi");
         Builder.AppendInstruction("pop ebx");

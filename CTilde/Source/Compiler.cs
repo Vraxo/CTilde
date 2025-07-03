@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using CTilde.Diagnostics;
@@ -17,10 +18,13 @@ public class Compiler
         var compilationUnits = new List<CompilationUnitNode>();
         var allImports = new List<ImportDirectiveNode>();
         var allDiagnostics = new List<Diagnostic>();
+        var sourceFileCache = new Dictionary<string, string[]>();
 
         foreach (var file in allFiles)
         {
             var code = File.ReadAllText(file);
+            sourceFileCache[file] = code.Split('\n');
+
             var tokens = Tokenizer.Tokenize(code);
             var parser = new Parser(tokens);
             var unit = parser.Parse(file);
@@ -37,10 +41,8 @@ public class Compiler
 
         if (allDiagnostics.Any())
         {
-            foreach (var diagnostic in allDiagnostics.OrderBy(d => d.FilePath).ThenBy(d => d.Line).ThenBy(d => d.Column))
-            {
-                Console.Error.WriteLine($"Error: {diagnostic.FilePath}({diagnostic.Line},{diagnostic.Column}): {diagnostic.Message}");
-            }
+            var printer = new DiagnosticPrinter(allDiagnostics, sourceFileCache);
+            printer.Print();
             Console.WriteLine($"\nCompilation failed with {allDiagnostics.Count} error(s).");
             return;
         }

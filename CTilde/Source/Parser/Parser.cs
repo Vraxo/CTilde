@@ -28,11 +28,19 @@ public class Parser
     }
 
     internal Token Current => _position < _tokens.Count ? _tokens[_position] : _tokens[^1];
+    internal Token Previous => _position > 0 ? _tokens[_position - 1] : _tokens[0];
     internal Token Peek(int offset) => _position + offset < _tokens.Count ? _tokens[_position + offset] : _tokens[^1];
 
     internal void ReportError(string message, Token token)
     {
         Diagnostics.Add(new Diagnostic(_filePath, message, token.Line, token.Column));
+    }
+
+    internal void ReportErrorAfter(string message, Token previousToken)
+    {
+        var line = previousToken.Line;
+        var col = previousToken.Column + previousToken.Value.Length;
+        Diagnostics.Add(new Diagnostic(_filePath, message, line, col));
     }
 
     internal Token Eat(TokenType expectedType)
@@ -44,7 +52,19 @@ public class Parser
             return currentToken;
         }
 
-        ReportError($"Expected token '{expectedType}' but got '{currentToken.Type}' ('{currentToken.Value}')", currentToken);
+        string message = $"Expected '{expectedType}' but got '{currentToken.Type}' ('{currentToken.Value}')";
+
+        // Heuristic: If we expect a statement/block terminator, the error is likely at the end of the previous construct.
+        if (expectedType is TokenType.Semicolon or TokenType.RightBrace or TokenType.RightParen)
+        {
+            // Report the error at the position immediately *after* the last successfully consumed token.
+            ReportErrorAfter(message, Previous);
+        }
+        else
+        {
+            ReportError(message, currentToken);
+        }
+
         return new Token(expectedType, string.Empty, currentToken.Line, currentToken.Column); // Return a dummy token
     }
 

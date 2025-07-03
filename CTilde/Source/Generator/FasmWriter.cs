@@ -46,33 +46,42 @@ public class FasmWriter
         builder.AppendDirective("section '.idata' import data readable");
         builder.AppendBlankLine();
 
+        // Define standard libraries and their common functions
         var libraries = new Dictionary<string, List<string>>
         {
             { "kernel32.dll", new List<string> { "ExitProcess" } },
-            { "msvcrt.dll", new List<string> { "printf", "malloc", "free", "strlen", "strcpy", "memcpy" } } // MODIFIED
+            { "msvcrt.dll", new List<string> { "printf", "malloc", "free", "strlen", "strcpy", "memcpy" } }
         };
 
-        foreach (var import in program.Imports)
+        // Get a list of all user-imported libraries from #import directives
+        var userLibs = program.Imports.Select(i => i.LibraryName).ToList();
+
+        // Add user-imported libraries to our main dictionary
+        foreach (var lib in userLibs)
         {
-            if (!libraries.ContainsKey(import.LibraryName)) libraries[import.LibraryName] = new List<string>();
+            if (!libraries.ContainsKey(lib))
+            {
+                libraries[lib] = new List<string>();
+            }
         }
 
-        foreach (var funcName in externalFunctions)
+        // Determine the primary user library (heuristic: the first one that isn't standard)
+        var primaryUserLib = userLibs.FirstOrDefault(lib => lib != "kernel32.dll" && lib != "msvcrt.dll");
+
+        // Get lists of functions we know belong to standard libraries
+        var kernel32Funcs = libraries["kernel32.dll"];
+        var msvcrtFuncs = libraries["msvcrt.dll"];
+
+        // Distribute all other external functions to the primary user library
+        if (primaryUserLib != null)
         {
-            bool found = false;
-            foreach (var import in program.Imports)
+            foreach (var funcName in externalFunctions)
             {
-                if (import.LibraryName != "kernel32.dll" && import.LibraryName != "msvcrt.dll")
+                // If the function isn't a known standard library function, assign it to the user's library.
+                if (!kernel32Funcs.Contains(funcName) && !msvcrtFuncs.Contains(funcName))
                 {
-                    libraries[import.LibraryName].Add(funcName);
-                    found = true;
-                    break;
+                    libraries[primaryUserLib].Add(funcName);
                 }
-            }
-            if (!found && funcName != "printf")
-            {
-                if (!libraries.ContainsKey("user32.dll")) libraries["user32.dll"] = new List<string>();
-                if (!libraries["user32.dll"].Contains(funcName)) libraries["user32.dll"].Add(funcName);
             }
         }
 

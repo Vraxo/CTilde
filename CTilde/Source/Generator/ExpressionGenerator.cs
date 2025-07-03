@@ -295,7 +295,10 @@ public class ExpressionGenerator
             Builder.AppendInstruction($"call {calleeTarget}");
         }
 
-        Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
+        if (totalArgSize > 0)
+        {
+            Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
+        }
 
         if (returnsStructByValue)
         {

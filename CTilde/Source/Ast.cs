@@ -45,9 +45,10 @@ public record BlockStatementNode(List<StatementNode> Statements) : StatementNode
 public record ReturnStatementNode(ExpressionNode? Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBody, StatementNode? ElseBody) : StatementNode;
+public record ForStatementNode(StatementNode? Initializer, ExpressionNode? Condition, ExpressionNode? Increment, StatementNode Body) : StatementNode; // NEW
 public record DeclarationStatementNode(bool IsConst, Token Type, int PointerLevel, Token Identifier, ExpressionNode? Initializer, List<ExpressionNode>? ConstructorArguments) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
-public record DeleteStatementNode(ExpressionNode Expression) : StatementNode; // NEW
+public record DeleteStatementNode(ExpressionNode Expression) : StatementNode;
 
 
 // Expressions
@@ -61,4 +62,4 @@ public record CallExpressionNode(ExpressionNode Callee, List<ExpressionNode> Arg
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;
 public record MemberAccessExpressionNode(ExpressionNode Left, Token Operator, Token Member) : ExpressionNode;
 public record QualifiedAccessExpressionNode(ExpressionNode Left, Token Member) : ExpressionNode;
-public record NewExpressionNode(Token Type, List<ExpressionNode> Arguments) : ExpressionNode; // NEW
+public record NewExpressionNode(Token Type, List<ExpressionNode> Arguments) : ExpressionNode;

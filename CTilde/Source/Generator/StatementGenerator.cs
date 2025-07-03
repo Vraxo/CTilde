@@ -179,9 +179,10 @@ public class StatementGenerator
         var returnTypeFqn = _context.SemanticAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
         if (TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
+            // Handle return by value for structs (RVO)
             if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");
 
-            // Get the address of the local object being returned (e.g. &result)
+            // Get the address of the return value object
             ExpressionGenerator.GenerateExpression(ret.Expression, context);
             Builder.AppendInstruction("mov esi, eax", "Source address for return value");
 
@@ -189,27 +190,13 @@ public class StatementGenerator
             context.Symbols.TryGetSymbol("__ret_ptr", out var retPtrOffset, out _, out _);
             Builder.AppendInstruction($"mov edi, [ebp + {retPtrOffset}]", "Destination address for return value");
 
-            // Find a copy constructor, e.g. string(string*)
-            var copyCtor = FunctionResolver.FindConstructor(returnTypeFqn, new List<string> { returnTypeFqn + "*" });
-
-            if (copyCtor != null)
-            {
-                Builder.AppendInstruction(null, "Calling copy constructor for return value");
-                Builder.AppendInstruction("push esi", "Push source pointer argument");
-                Builder.AppendInstruction("push edi", "Push destination pointer as 'this'");
-                Builder.AppendInstruction($"call {NameMangler.Mangle(copyCtor)}");
-                Builder.AppendInstruction("add esp, 8", "Clean up copy ctor args");
-            }
-            else
-            {
-                // Fallback to memcpy for POD structs without a copy constructor
-                var size = MemoryLayoutManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
-                Builder.AppendInstruction($"push {size}");
-                Builder.AppendInstruction("push esi");
-                Builder.AppendInstruction("push edi");
-                Builder.AppendInstruction("call [memcpy]");
-                Builder.AppendInstruction("add esp, 12");
-            }
+            // Copy the struct
+            var size = MemoryLayoutManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
+            Builder.AppendInstruction($"push {size}");
+            Builder.AppendInstruction("push esi");
+            Builder.AppendInstruction("push edi");
+            Builder.AppendInstruction("call [memcpy]");
+            Builder.AppendInstruction("add esp, 12");
         }
         else
         {

@@ -51,9 +51,9 @@ public record DeleteStatementNode(ExpressionNode Expression) : StatementNode; //
 
 
 // Expressions
-public record InitializerListExpressionNode(List<ExpressionNode> Values) : ExpressionNode;
-public record IntegerLiteralNode(int Value) : ExpressionNode;
-public record StringLiteralNode(string Value, string Label) : ExpressionNode;
+public record InitializerListExpressionNode(Token OpeningBrace, List<ExpressionNode> Values) : ExpressionNode;
+public record IntegerLiteralNode(Token Token, int Value) : ExpressionNode;
+public record StringLiteralNode(Token Token, string Value, string Label) : ExpressionNode;
 public record UnaryExpressionNode(Token Operator, ExpressionNode Right) : ExpressionNode;
 public record AssignmentExpressionNode(ExpressionNode Left, ExpressionNode Right) : ExpressionNode;
 public record VariableExpressionNode(Token Identifier) : ExpressionNode;

@@ -31,29 +31,51 @@ public class Compiler
 
             allDiagnostics.AddRange(parser.Diagnostics);
 
-            // Collect all #import directives globally, even if there are errors,
-            // as they might be needed for other analysis.
             var importsInFile = parser.GetImports();
             allImports.AddRange(importsInFile);
 
             compilationUnits.Add(unit);
         }
 
+        // --- Stop if there are parsing errors ---
         if (allDiagnostics.Any())
         {
             var printer = new DiagnosticPrinter(allDiagnostics, sourceFileCache);
             printer.Print();
-            Console.WriteLine($"\nCompilation failed with {allDiagnostics.Count} error(s).");
+            Console.WriteLine($"\nCompilation failed with {allDiagnostics.Count} parsing error(s).");
             return;
         }
 
         var programNode = new ProgramNode(allImports.DistinctBy(i => i.LibraryName).ToList(), compilationUnits);
 
-        // 3. Generate Code
-        var generator = new CodeGenerator(programNode);
+        // 3. Create analysis services ONCE
+        var typeRepository = new TypeRepository(programNode);
+        var typeResolver = new TypeResolver(typeRepository);
+        var vtableManager = new VTableManager(typeRepository, typeResolver);
+        var memoryLayoutManager = new MemoryLayoutManager(typeRepository, typeResolver, vtableManager);
+        var functionResolver = new FunctionResolver(typeRepository, typeResolver, programNode);
+        var semanticAnalyzer = new SemanticAnalyzer(typeRepository, typeResolver, functionResolver, memoryLayoutManager);
+
+        // 4. Perform Semantic Analysis
+        var runner = new SemanticAnalyzerRunner(programNode, typeRepository, typeResolver, functionResolver, memoryLayoutManager, semanticAnalyzer);
+        runner.Analyze();
+
+        allDiagnostics.AddRange(runner.Diagnostics);
+
+        // --- Stop if there are semantic errors ---
+        if (allDiagnostics.Any())
+        {
+            var printer = new DiagnosticPrinter(allDiagnostics, sourceFileCache);
+            printer.Print();
+            Console.WriteLine($"\nCompilation failed with {allDiagnostics.Count} semantic error(s).");
+            return;
+        }
+
+        // 5. Generate Code
+        var generator = new CodeGenerator(programNode, typeRepository, typeResolver, functionResolver, vtableManager, memoryLayoutManager, semanticAnalyzer);
         string asmCode = generator.Generate();
 
-        // 4. Output
+        // 6. Output
         File.WriteAllText("Output/output.asm", asmCode);
         Console.WriteLine("Compilation successful. Assembly code written to output.asm");
     }

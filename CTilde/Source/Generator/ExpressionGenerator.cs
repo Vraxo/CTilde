@@ -123,8 +123,7 @@ public class ExpressionGenerator
 
         if (VTableManager.HasVTable(typeFqn))
         {
-            var structDef = TypeRepository.FindStruct(typeFqn);
-            var vtableLabel = NameMangler.GetVTableLabel(structDef);
+            var vtableLabel = NameMangler.GetVTableLabel(typeFqn);
             Builder.AppendInstruction($"mov dword [edi], {vtableLabel}", "Set vtable pointer on heap object");
         }
 
@@ -245,7 +244,7 @@ public class ExpressionGenerator
         {
             var ownerTypeName = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context).TrimEnd('*');
             var ownerStruct = TypeRepository.FindStruct(ownerTypeName) ?? throw new InvalidOperationException($"Could not find struct definition for '{ownerTypeName}'.");
-            func = FunctionResolver.ResolveMethod(ownerStruct, memberAccess.Member.Value);
+            func = FunctionResolver.ResolveMethod(ownerTypeName, memberAccess.Member.Value);
         }
         else
         {

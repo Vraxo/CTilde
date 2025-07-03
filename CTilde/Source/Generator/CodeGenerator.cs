@@ -23,15 +23,22 @@ public class CodeGenerator
     internal ExpressionGenerator ExpressionGenerator { get; }
     private readonly DeclarationGenerator _declarationGenerator;
 
-    public CodeGenerator(ProgramNode program)
+    public CodeGenerator(
+        ProgramNode program,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        VTableManager vtableManager,
+        MemoryLayoutManager memoryLayoutManager,
+        SemanticAnalyzer semanticAnalyzer)
     {
         Program = program;
-        TypeRepository = new TypeRepository(program);
-        TypeResolver = new TypeResolver(TypeRepository);
-        FunctionResolver = new FunctionResolver(TypeRepository, TypeResolver, program);
-        VTableManager = new VTableManager(TypeRepository, TypeResolver);
-        MemoryLayoutManager = new MemoryLayoutManager(TypeRepository, TypeResolver, VTableManager);
-        SemanticAnalyzer = new SemanticAnalyzer(TypeRepository, TypeResolver, FunctionResolver, MemoryLayoutManager);
+        TypeRepository = typeRepository;
+        TypeResolver = typeResolver;
+        FunctionResolver = functionResolver;
+        VTableManager = vtableManager;
+        MemoryLayoutManager = memoryLayoutManager;
+        SemanticAnalyzer = semanticAnalyzer;
 
         ExpressionGenerator = new ExpressionGenerator(this);
         StatementGenerator = new StatementGenerator(this);
@@ -98,7 +105,7 @@ public class CodeGenerator
             var structFqn = TypeRepository.GetFullyQualifiedName(s);
             if (VTableManager.HasVTable(structFqn))
             {
-                Builder.AppendLabel(NameMangler.GetVTableLabel(s));
+                Builder.AppendLabel(NameMangler.GetVTableLabel(structFqn));
                 var vtable = VTableManager.GetVTable(structFqn);
                 foreach (var entry in vtable)
                 {

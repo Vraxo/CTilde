@@ -16,7 +16,7 @@ internal class ExpressionParser
 
     internal ExpressionNode ParseInitializerListExpression()
     {
-        _parser.Eat(TokenType.LeftBrace);
+        var openingBrace = _parser.Eat(TokenType.LeftBrace);
         var values = new List<ExpressionNode>();
         if (_parser.Current.Type != TokenType.RightBrace)
         {
@@ -24,7 +24,7 @@ internal class ExpressionParser
             while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
         }
         _parser.Eat(TokenType.RightBrace);
-        return new InitializerListExpressionNode(values);
+        return new InitializerListExpressionNode(openingBrace, values);
     }
 
     internal ExpressionNode ParseExpression() => ParseAssignmentExpression();
@@ -34,7 +34,8 @@ internal class ExpressionParser
         var left = ParseEqualityExpression();
         if (_parser.Current.Type == TokenType.Assignment)
         {
-            var operatorToken = _parser.Eat(TokenType.Assignment);
+            var operatorToken = _parser.Current; // Get token before eating
+            _parser.Eat(TokenType.Assignment);
             var right = ParseAssignmentExpression();
             if (left is VariableExpressionNode or MemberAccessExpressionNode or UnaryExpressionNode) return new AssignmentExpressionNode(left, right);
 
@@ -164,20 +165,20 @@ internal class ExpressionParser
         {
             case TokenType.IntegerLiteral:
                 _parser.Eat(TokenType.IntegerLiteral);
-                if (int.TryParse(token.Value, out int v)) return new IntegerLiteralNode(v);
+                if (int.TryParse(token.Value, out int v)) return new IntegerLiteralNode(token, v);
                 _parser.ReportError($"Could not parse int: {token.Value}", token);
-                return new IntegerLiteralNode(0);
+                return new IntegerLiteralNode(token, 0);
 
             case TokenType.HexLiteral:
                 _parser.Eat(TokenType.HexLiteral);
                 var hex = token.Value.StartsWith("0x") ? token.Value.Substring(2) : token.Value;
-                if (int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int vHex)) return new IntegerLiteralNode(vHex);
+                if (int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int vHex)) return new IntegerLiteralNode(token, vHex);
                 _parser.ReportError($"Could not parse hex: {token.Value}", token);
-                return new IntegerLiteralNode(0);
+                return new IntegerLiteralNode(token, 0);
 
             case TokenType.StringLiteral:
                 _parser.Eat(TokenType.StringLiteral);
-                return new StringLiteralNode(token.Value, $"str{_stringLabelCounter++}");
+                return new StringLiteralNode(token, token.Value, $"str{_stringLabelCounter++}");
 
             case TokenType.Identifier:
                 return new VariableExpressionNode(_parser.Eat(TokenType.Identifier));
@@ -192,6 +193,6 @@ internal class ExpressionParser
         _parser.ReportError($"Unexpected token in expression: '{token.Type}'", token);
         // Advance past the bad token to prevent an infinite loop and return a dummy node.
         _parser.AdvancePosition(1);
-        return new IntegerLiteralNode(0);
+        return new IntegerLiteralNode(token, 0);
     }
 }

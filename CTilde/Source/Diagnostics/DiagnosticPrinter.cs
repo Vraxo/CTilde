@@ -19,9 +19,9 @@ public class DiagnosticPrinter
     {
         foreach (var diagnostic in _diagnostics.OrderBy(d => d.FilePath).ThenBy(d => d.Line).ThenBy(d => d.Column))
         {
-            if (!_sourceFiles.TryGetValue(diagnostic.FilePath, out var lines))
+            // Fallback for cases where source isn't available or line number is invalid
+            if (!_sourceFiles.TryGetValue(diagnostic.FilePath, out var lines) || diagnostic.Line < 1)
             {
-                // Fallback for cases where source isn't available
                 Console.Error.WriteLine($"Error: {diagnostic.FilePath}({diagnostic.Line},{diagnostic.Column}): {diagnostic.Message}");
                 continue;
             }

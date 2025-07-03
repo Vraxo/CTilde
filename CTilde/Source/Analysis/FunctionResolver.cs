@@ -46,7 +46,24 @@ public class FunctionResolver
         return candidates.First();
     }
 
-    public FunctionDeclarationNode ResolveMethod(StructDefinitionNode owner, string name) => owner.Methods.FirstOrDefault(m => m.Name == name) ?? throw new InvalidOperationException($"Method '{name}' not found on struct '{owner.Name}'");
+    public FunctionDeclarationNode? ResolveMethod(string ownerFqn, string name)
+    {
+        var structFqn = ownerFqn;
+        while (structFqn != null)
+        {
+            var structDef = _typeRepository.FindStruct(structFqn);
+            if (structDef == null) return null; // Should not happen if ownerFqn is valid
+
+            var method = structDef.Methods.FirstOrDefault(m => m.Name == name);
+            if (method != null) return method;
+
+            if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
+
+            var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
+            structFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+        }
+        return null;
+    }
 
     public FunctionDeclarationNode? FindMethod(string structFqn, string methodName)
     {
@@ -87,6 +104,12 @@ public class FunctionResolver
                 bool isMatch = resolvedParamType == argumentType;
 
                 if (!isMatch && resolvedParamType == "char" && argumentType == "int")
+                {
+                    isMatch = true;
+                }
+
+                // Allow assigning an int (from malloc) to any pointer type
+                if (!isMatch && argumentType == "int" && resolvedParamType.EndsWith("*"))
                 {
                     isMatch = true;
                 }

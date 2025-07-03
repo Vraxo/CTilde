@@ -103,10 +103,9 @@ public class StatementGenerator
 
         if (TypeRepository.IsStruct(varTypeFqn))
         {
-            var structDef = TypeRepository.FindStruct(varTypeFqn);
             if (_context.VTableManager.HasVTable(varTypeFqn))
             {
-                var vtableLabel = NameMangler.GetVTableLabel(structDef);
+                var vtableLabel = NameMangler.GetVTableLabel(varTypeFqn);
                 Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of object '{variableName}'");
                 Builder.AppendInstruction($"mov dword [eax], {vtableLabel}", "Set vtable pointer");
             }

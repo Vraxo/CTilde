@@ -21,7 +21,9 @@ public class MemoryLayoutManager
         if (typeNameFqn.EndsWith("*")) return 4;
         if (typeNameFqn == "int") return 4;
         if (typeNameFqn == "char") return 1;
+        if (typeNameFqn == "void") return 0; // Void has no size
 
+        // If it's not a primitive, try to find it as a struct
         if (_typeRepository.FindStruct(typeNameFqn) is { } structDef)
         {
             int size = 0;
@@ -29,6 +31,7 @@ public class MemoryLayoutManager
             if (structDef.BaseStructName != null)
             {
                 string baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+                // The baseUnit might be different if the base struct is in another file/namespace
                 var baseUnit = _typeRepository.GetCompilationUnitForStruct(baseFqn);
                 size += GetSizeOfType(baseFqn, baseUnit);
             }
@@ -43,13 +46,19 @@ public class MemoryLayoutManager
                 string baseMemberName = rawMemberType.TrimEnd('*');
                 string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
 
-                string resolvedMemberType = (member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void"))
-                    ? rawMemberType
-                    : _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, structUnit) + pointerSuffix;
+                string resolvedMemberType;
+                if (member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
+                {
+                    resolvedMemberType = rawMemberType;
+                }
+                else
+                {
+                    resolvedMemberType = _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, structUnit) + pointerSuffix;
+                }
 
                 var memberUnit = _typeRepository.IsStruct(resolvedMemberType)
                     ? _typeRepository.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
-                    : structUnit;
+                    : structUnit; // If not a struct, use the owner struct's unit for context
                 size += GetSizeOfType(resolvedMemberType, memberUnit);
             }
             return size;
@@ -90,15 +99,22 @@ public class MemoryLayoutManager
             var rawMemberType = TypeRepository.GetTypeNameFromToken(mem.Type, mem.PointerLevel);
             var baseMemberName = rawMemberType.TrimEnd('*');
             var pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
-            var resolvedMemberType = (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void"))
-                ? rawMemberType
-                : _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
+
+            string resolvedMemberType;
+            if (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedMemberType = rawMemberType;
+            }
+            else
+            {
+                resolvedMemberType = _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
+            }
 
             allMembers.Add((mem.Name.Value, resolvedMemberType, currentOffset, mem.IsConst));
 
             var memberUnit = _typeRepository.IsStruct(resolvedMemberType)
                 ? _typeRepository.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
-                : ownUnit;
+                : ownUnit; // If not a struct, use the owner struct's unit for context
             currentOffset += GetSizeOfType(resolvedMemberType, memberUnit);
         }
         return allMembers;

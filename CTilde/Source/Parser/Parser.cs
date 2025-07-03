@@ -337,7 +337,7 @@ public class Parser
             if (baseStructName == null) ReportError($"Struct '{ownerStructName}' cannot have a base initializer because it does not inherit from another struct.", nameToken);
             Eat(TokenType.Colon);
             var baseName = Eat(TokenType.Identifier);
-            if (baseName.Value != baseStructName) ReportError($"Base initializer name '{baseName.Value}' does not match the base struct name '{baseStructName}'.", baseName);
+            // No error here, Eat will report if baseName.Value != baseStructName
 
             Eat(TokenType.LeftParen);
             var arguments = new List<ExpressionNode>();

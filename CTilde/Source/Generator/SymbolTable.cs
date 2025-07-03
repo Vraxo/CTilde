@@ -9,6 +9,9 @@ public class SymbolTable
     private readonly Dictionary<string, (int Offset, string Type, bool IsConst)> _symbols = new();
     public int TotalLocalSize { get; private set; }
 
+    // Dummy constructor for semantic analysis pass where symbols aren't fully resolved yet.
+    public SymbolTable() { }
+
     // Constructor for Functions/Methods
     public SymbolTable(FunctionDeclarationNode function, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {

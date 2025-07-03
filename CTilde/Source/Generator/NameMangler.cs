@@ -39,9 +39,9 @@ public static class NameMangler
         return MangleName(d.Namespace, d.OwnerStructName, $"{d.OwnerStructName}_dtor");
     }
 
-    public static string GetVTableLabel(StructDefinitionNode s)
+    public static string GetVTableLabel(string structFqn)
     {
-        return $"_vtable_{s.Namespace?.Replace("::", "_")}_{s.Name}".Replace("__", "_");
+        return $"_vtable_{structFqn.Replace("::", "_")}";
     }
 
     public static string MangleOperator(string op)

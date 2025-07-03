@@ -6,7 +6,7 @@ namespace CTilde;
 
 public class SymbolTable
 {
-    private readonly Dictionary<string, (int Offset, string Type, bool IsConst)> _symbols = new();
+    private readonly Dictionary<string, (int Offset, string Type, bool IsConst, bool IsRead)> _symbols = new();
     public int TotalLocalSize { get; private set; }
 
     // Dummy constructor for semantic analysis pass where symbols aren't fully resolved yet.
@@ -82,7 +82,7 @@ public class SymbolTable
                 resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
             }
 
-            _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false);
+            _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false, false); // isRead = false
             currentParamOffset += Math.Max(4, memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit));
         }
 
@@ -98,8 +98,27 @@ public class SymbolTable
 
             int size = memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;
-            _symbols[decl.Identifier.Value] = (currentLocalOffset, resolvedTypeName, decl.IsConst);
+            _symbols[decl.Identifier.Value] = (currentLocalOffset, resolvedTypeName, decl.IsConst, false); // isRead = false
         }
+    }
+
+    public void MarkAsRead(string name)
+    {
+        if (_symbols.TryGetValue(name, out var symbol))
+        {
+            _symbols[name] = (symbol.Offset, symbol.Type, symbol.IsConst, true);
+        }
+    }
+
+    public IEnumerable<(string Name, int Line, int Column)> GetUnreadLocals()
+    {
+        return _symbols
+            .Where(kvp => kvp.Value.Offset < 0 && !kvp.Value.IsRead) // Only locals (negative offset)
+            .Select(kvp => {
+                // This is a bit of a hack to get the declaration location back.
+                // A better approach would be to store the DeclarationStatementNode in the symbol table.
+                return (kvp.Key, -1, -1);
+            });
     }
 
 
@@ -116,7 +135,7 @@ public class SymbolTable
     public List<(string Name, int Offset, string TypeFqn)> GetDestructibleLocals(FunctionResolver functionResolver)
     {
         var result = new List<(string, int, string)>();
-        foreach (var (name, (offset, type, _)) in _symbols)
+        foreach (var (name, (offset, type, _, _)) in _symbols)
         {
             if (offset < 0 && functionResolver.FindDestructor(type) != null) // Locals have negative offset
             {

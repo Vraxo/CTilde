@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Linq;
 using CTilde.Diagnostics;
 
 namespace CTilde;
@@ -28,10 +29,10 @@ public class SemanticAnalyzerRunner
             foreach (var function in unit.Functions)
             {
                 if (function.Body == null) continue;
-                // Create a correct symbol table for each function
                 var symbols = new SymbolTable(function, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                 var context = new AnalysisContext(symbols, unit, function);
                 WalkStatement(function.Body, context);
+                CheckForUnusedVariables(function, context);
             }
 
             foreach (var s in unit.Structs)
@@ -42,11 +43,10 @@ public class SemanticAnalyzerRunner
                     var symbols = new SymbolTable(method, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                     var context = new AnalysisContext(symbols, unit, method);
                     WalkStatement(method.Body, context);
+                    CheckForUnusedVariables(method, context);
                 }
                 foreach (var ctor in s.Constructors)
                 {
-                    // For constructors, the "current function" is effectively the constructor itself for analysis context.
-                    // We create a FunctionDeclarationNode that mirrors the constructor's context.
                     var dummyFunctionForContext = new FunctionDeclarationNode(
                         new Token(TokenType.Keyword, "void", -1, -1), 0, ctor.OwnerStructName,
                         ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
@@ -55,10 +55,10 @@ public class SemanticAnalyzerRunner
                     var symbols = new SymbolTable(ctor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                     var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
                     WalkStatement(ctor.Body, context);
+                    CheckForUnusedVariables(dummyFunctionForContext, context);
                 }
                 foreach (var dtor in s.Destructors)
                 {
-                    // For destructors, similarly, a dummy function node provides context.
                     var dummyFunctionForContext = new FunctionDeclarationNode(
                         new Token(TokenType.Keyword, "void", -1, -1), 0, dtor.OwnerStructName,
                         new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
@@ -67,44 +67,109 @@ public class SemanticAnalyzerRunner
                     var symbols = new SymbolTable(dtor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                     var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
                     WalkStatement(dtor.Body, context);
+                    CheckForUnusedVariables(dummyFunctionForContext, context);
                 }
             }
         }
     }
 
-    private void WalkStatement(StatementNode statement, AnalysisContext context)
+    private void CheckForUnusedVariables(FunctionDeclarationNode function, AnalysisContext context)
     {
+        var localDeclarations = new List<DeclarationStatementNode>();
+        if (function.Body != null)
+        {
+            FindAllDeclarations(function.Body, localDeclarations);
+        }
+
+        var unreadLocals = context.Symbols.GetUnreadLocals().Select(ul => ul.Name).ToHashSet();
+        foreach (var decl in localDeclarations)
+        {
+            if (unreadLocals.Contains(decl.Identifier.Value))
+            {
+                Diagnostics.Add(new Diagnostic(
+                    context.CompilationUnit.FilePath,
+                    $"Unused variable '{decl.Identifier.Value}'.",
+                    decl.Identifier.Line,
+                    decl.Identifier.Column,
+                    DiagnosticSeverity.Warning
+                ));
+            }
+        }
+    }
+
+    private void FindAllDeclarations(StatementNode stmt, List<DeclarationStatementNode> declarations)
+    {
+        switch (stmt)
+        {
+            case DeclarationStatementNode d:
+                declarations.Add(d);
+                break;
+            case BlockStatementNode b:
+                foreach (var s in b.Statements) FindAllDeclarations(s, declarations);
+                break;
+            case IfStatementNode i:
+                FindAllDeclarations(i.ThenBody, declarations);
+                if (i.ElseBody != null) FindAllDeclarations(i.ElseBody, declarations);
+                break;
+            case WhileStatementNode w:
+                FindAllDeclarations(w.Body, declarations);
+                break;
+        }
+    }
+
+
+    private void WalkStatement(StatementNode statement, AnalysisContext context, bool isReachable = true)
+    {
+        // Check for unreachable code first
+        if (!isReachable)
+        {
+            var token = AstHelper.GetFirstToken(statement);
+            // Don't flag closing braces as unreachable
+            if (token.Type != TokenType.RightBrace)
+            {
+                Diagnostics.Add(new Diagnostic(
+                    context.CompilationUnit.FilePath,
+                    "Unreachable code detected.",
+                    token.Line,
+                    token.Column,
+                    DiagnosticSeverity.Warning
+                ));
+            }
+            return; // Do not process this statement further
+        }
+
         switch (statement)
         {
             case BlockStatementNode block:
-                foreach (var s in block.Statements) WalkStatement(s, context);
+                bool blockIsReachable = true;
+                foreach (var s in block.Statements)
+                {
+                    WalkStatement(s, context, blockIsReachable);
+                    if (s is ReturnStatementNode) blockIsReachable = false;
+                }
                 break;
             case ExpressionStatementNode exprStmt:
-                WalkExpression(exprStmt.Expression, context);
+                _analyzer.AnalyzeExpressionType(exprStmt.Expression, context, Diagnostics);
                 break;
             case ReturnStatementNode retStmt:
                 _analyzer.AnalyzeReturnStatement(retStmt, context, Diagnostics);
                 break;
             case IfStatementNode ifStmt:
-                WalkExpression(ifStmt.Condition, context);
+                _analyzer.AnalyzeExpressionType(ifStmt.Condition, context, Diagnostics);
                 WalkStatement(ifStmt.ThenBody, context);
                 if (ifStmt.ElseBody != null) WalkStatement(ifStmt.ElseBody, context);
                 break;
             case WhileStatementNode whileStmt:
-                WalkExpression(whileStmt.Condition, context);
+                _analyzer.AnalyzeExpressionType(whileStmt.Condition, context, Diagnostics);
                 WalkStatement(whileStmt.Body, context);
                 break;
             case DeclarationStatementNode decl:
+                // Special handling for declarations since initializer lists are not standalone expressions.
                 _analyzer.AnalyzeDeclarationStatement(decl, context, Diagnostics);
                 break;
             case DeleteStatementNode deleteStmt:
                 _analyzer.AnalyzeDeleteStatement(deleteStmt, context, Diagnostics);
                 break;
         }
-    }
-
-    private void WalkExpression(ExpressionNode expression, AnalysisContext context)
-    {
-        _analyzer.AnalyzeExpressionType(expression, context, Diagnostics);
     }
 }

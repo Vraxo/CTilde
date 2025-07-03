@@ -27,8 +27,23 @@ public class DiagnosticPrinter
             }
 
             Console.Error.WriteLine(); // Blank line for separation
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.Error.Write($"Error: ");
+
+            ConsoleColor color;
+            string prefix;
+            switch (diagnostic.Severity)
+            {
+                case DiagnosticSeverity.Warning:
+                    color = ConsoleColor.Yellow;
+                    prefix = "Warning: ";
+                    break;
+                default: // Error
+                    color = ConsoleColor.Red;
+                    prefix = "Error: ";
+                    break;
+            }
+
+            Console.ForegroundColor = color;
+            Console.Error.Write(prefix);
             Console.ResetColor();
             Console.Error.WriteLine($"{diagnostic.Message}");
 
@@ -45,7 +60,7 @@ public class DiagnosticPrinter
 
             Console.ForegroundColor = ConsoleColor.DarkGray;
             Console.Error.Write($"   | ");
-            Console.ForegroundColor = ConsoleColor.Red;
+            Console.ForegroundColor = color;
             Console.Error.WriteLine(new string(' ', diagnostic.Column - 1) + "^");
             Console.ResetColor();
         }

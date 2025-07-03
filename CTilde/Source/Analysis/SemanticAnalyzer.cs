@@ -86,8 +86,8 @@ public class SemanticAnalyzer
 
     private string AnalyzeInitializerListExpression(InitializerListExpressionNode il, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        // An initializer list cannot be used as a standalone expression.
-        // Its validity is checked within AnalyzeDeclarationStatement.
+        // This method is only called if an initializer list is used as a standalone expression,
+        // which is illegal. AnalyzeDeclarationStatement handles the valid case directly.
         diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, "Initializer lists can only be used to initialize a variable.", il.OpeningBrace.Line, il.OpeningBrace.Column));
         return "unknown";
     }
@@ -283,6 +283,7 @@ public class SemanticAnalyzer
         // 1. Check local variables and parameters in the symbol table.
         if (context.Symbols.TryGetSymbol(v.Identifier.Value, out _, out var type, out _))
         {
+            context.Symbols.MarkAsRead(v.Identifier.Value);
             return type;
         }
 
@@ -325,6 +326,7 @@ public class SemanticAnalyzer
 
             if (member != null && definingStruct != null)
             {
+                context.Symbols.MarkAsRead("this");
                 if (member.AccessLevel == AccessSpecifier.Private)
                 {
                     if (context.CurrentFunction.OwnerStructName != definingStruct.Name || context.CurrentFunction.Namespace != definingStruct.Namespace)

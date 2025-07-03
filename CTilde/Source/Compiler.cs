@@ -53,13 +53,18 @@ public class Compiler
 
         allDiagnostics.AddRange(runner.Diagnostics);
 
-        // --- Stop if there are any errors (parsing or semantic) ---
+        // --- Print all diagnostics, but only fail on errors ---
         if (allDiagnostics.Any())
         {
             var printer = new DiagnosticPrinter(allDiagnostics, sourceFileCache);
             printer.Print();
-            Console.WriteLine($"\nCompilation failed with {allDiagnostics.Count} error(s).");
-            return;
+
+            var errorCount = allDiagnostics.Count(d => d.Severity == DiagnosticSeverity.Error);
+            if (errorCount > 0)
+            {
+                Console.WriteLine($"\nCompilation failed with {errorCount} error(s).");
+                return;
+            }
         }
 
         // 5. Generate Code

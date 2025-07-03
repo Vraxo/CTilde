@@ -187,6 +187,146 @@ public record AnalysisContext(
 );
 </file>
 
+<file path="Analysis\FunctionResolver.cs">
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace CTilde;
+
+public class FunctionResolver
+{
+    private readonly TypeRepository _typeRepository;
+    private readonly TypeResolver _typeResolver;
+    private readonly ProgramNode _program; // For accessing all functions
+
+    public FunctionResolver(TypeRepository typeRepository, TypeResolver typeResolver, ProgramNode program)
+    {
+        _typeRepository = typeRepository;
+        _typeResolver = typeResolver;
+        _program = program;
+    }
+
+    public FunctionDeclarationNode ResolveFunctionCall(ExpressionNode callee, CompilationUnitNode context, FunctionDeclarationNode? currentFunction)
+    {
+        if (callee is VariableExpressionNode varNode) return ResolveFunctionByName(varNode.Identifier.Value, currentFunction?.Namespace, context);
+        if (callee is QualifiedAccessExpressionNode qNode)
+        {
+            string qualifier = TypeResolver.ResolveQualifier(qNode.Left);
+            var funcName = qNode.Member.Value;
+            string? resolvedNamespace = qualifier;
+            var aliased = context.Usings.FirstOrDefault(u => u.Alias == qualifier);
+            if (aliased != null) resolvedNamespace = aliased.Namespace;
+
+            var globalFunctions = _program.CompilationUnits.SelectMany(cu => cu.Functions);
+            var func = globalFunctions.FirstOrDefault(f => f.OwnerStructName == null && f.Namespace == resolvedNamespace && f.Name == funcName);
+            if (func == null) throw new InvalidOperationException($"Function '{resolvedNamespace}::{funcName}' not found.");
+            return func;
+        }
+        throw new NotSupportedException($"Unsupported callee type for resolution: {callee.GetType().Name}");
+    }
+
+    private FunctionDeclarationNode ResolveFunctionByName(string name, string? currentNamespace, CompilationUnitNode context)
+    {
+        var globalFunctions = _program.CompilationUnits.SelectMany(cu => cu.Functions);
+        var candidates = globalFunctions.Where(f => f.OwnerStructName == null && f.Name == name)
+            .Where(f => f.Namespace == currentNamespace || f.Namespace == null || context.Usings.Any(u => u.Alias == null && u.Namespace == f.Namespace)).ToList();
+        if (candidates.Count == 0) throw new InvalidOperationException($"Function '{name}' could not be resolved in the current context.");
+        if (candidates.Select(f => f.Namespace).Distinct().Count() > 1) throw new InvalidOperationException($"Function call '{name}' is ambiguous.");
+        return candidates.First();
+    }
+
+    public FunctionDeclarationNode ResolveMethod(StructDefinitionNode owner, string name) => owner.Methods.FirstOrDefault(m => m.Name == name) ?? throw new InvalidOperationException($"Method '{name}' not found on struct '{owner.Name}'");
+
+    public FunctionDeclarationNode? FindMethod(string structFqn, string methodName)
+    {
+        var structDef = _typeRepository.FindStruct(structFqn);
+        return structDef?.Methods.FirstOrDefault(m => m.Name == methodName);
+    }
+
+    public ConstructorDeclarationNode? FindConstructor(string structFqn, List<string> argTypeFqns)
+    {
+        var structDef = _typeRepository.FindStruct(structFqn);
+        if (structDef == null) return null;
+
+        var ctorUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
+
+        foreach (var ctor in structDef.Constructors)
+        {
+            if (ctor.Parameters.Count != argTypeFqns.Count) continue;
+
+            bool allParamsMatch = true;
+            for (int i = 0; i < argTypeFqns.Count; i++)
+            {
+                var param = ctor.Parameters[i];
+                var rawParamType = TypeRepository.GetTypeNameFromToken(param.Type, param.PointerLevel);
+                var baseParamType = rawParamType.TrimEnd('*');
+                var pointerSuffix = new string('*', rawParamType.Length - baseParamType.Length);
+
+                string resolvedParamType;
+                if (param.Type.Type == TokenType.Keyword || baseParamType.Equals("void", StringComparison.OrdinalIgnoreCase))
+                {
+                    resolvedParamType = rawParamType;
+                }
+                else
+                {
+                    resolvedParamType = _typeResolver.ResolveTypeName(baseParamType, ctor.Namespace, ctorUnit) + pointerSuffix;
+                }
+
+                string argumentType = argTypeFqns[i];
+                bool isMatch = resolvedParamType == argumentType;
+
+                if (!isMatch && resolvedParamType == "char" && argumentType == "int")
+                {
+                    isMatch = true;
+                }
+
+                if (!isMatch)
+                {
+                    allParamsMatch = false;
+                    break;
+                }
+            }
+
+            if (allParamsMatch) return ctor;
+        }
+
+        return null;
+    }
+
+    public DestructorDeclarationNode? FindDestructor(string fqn)
+    {
+        var structDef = _typeRepository.FindStruct(fqn);
+        return structDef?.Destructors.FirstOrDefault();
+    }
+
+    public int? GetEnumValue(string enumFQN, string memberName)
+    {
+        var ed = _typeRepository.FindEnum(enumFQN);
+        return ed?.Members.FirstOrDefault(m => m.Name.Value == memberName)?.Value;
+    }
+
+    public int? ResolveUnqualifiedEnumMember(string memberName, CompilationUnitNode context, string? currentContextNamespace)
+    {
+        var namespacesToCheck = new List<string?> { currentContextNamespace }
+            .Concat(context.Usings.Where(u => u.Alias == null).Select(u => u.Namespace))
+            .Append(null);
+
+        foreach (var ns in namespacesToCheck.Distinct())
+        {
+            foreach (var enumDef in _typeRepository.GetAllEnums().Where(e => e.Namespace == ns))
+            {
+                if (enumDef.Members.Any(m => m.Name.Value == memberName))
+                {
+                    return GetEnumValue(TypeRepository.GetFullyQualifiedName(enumDef), memberName);
+                }
+            }
+        }
+        return null;
+    }
+}
+</file>
+
 <file path="Analysis\SemanticAnalyzer.cs">
 using System;
 using System.Linq;
@@ -195,12 +335,16 @@ namespace CTilde;
 
 public class SemanticAnalyzer
 {
-    private readonly TypeManager _typeManager;
+    private readonly TypeRepository _typeRepository;
+    private readonly TypeResolver _typeResolver;
+    private readonly FunctionResolver _functionResolver;
     private readonly MemoryLayoutManager _memoryLayoutManager;
 
-    public SemanticAnalyzer(TypeManager typeManager, MemoryLayoutManager memoryLayoutManager)
+    public SemanticAnalyzer(TypeRepository typeRepository, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager)
     {
-        _typeManager = typeManager;
+        _typeRepository = typeRepository;
+        _typeResolver = typeResolver;
+        _functionResolver = functionResolver;
         _memoryLayoutManager = memoryLayoutManager;
     }
 
@@ -224,21 +368,21 @@ public class SemanticAnalyzer
 
     public string AnalyzeFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
     {
-        var returnTypeNameRaw = TypeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
+        var returnTypeNameRaw = TypeRepository.GetTypeNameFromToken(func.ReturnType, func.ReturnPointerLevel);
         string resolvedReturnName;
 
         if (func.ReturnType.Type != TokenType.Keyword && !returnTypeNameRaw.StartsWith("void"))
         {
             string baseReturnName = returnTypeNameRaw.TrimEnd('*');
             string pointerSuffix = new string('*', returnTypeNameRaw.Length - baseReturnName.Length);
-            resolvedReturnName = _typeManager.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + pointerSuffix;
+            resolvedReturnName = _typeResolver.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + pointerSuffix;
         }
         else
         {
             resolvedReturnName = returnTypeNameRaw;
         }
 
-        if (_typeManager.IsStruct(resolvedReturnName) && !resolvedReturnName.EndsWith("*"))
+        if (_typeRepository.IsStruct(resolvedReturnName) && !resolvedReturnName.EndsWith("*"))
         {
             // A function returning a struct by value actually returns a pointer
             // to a caller-provided location. The type of the expression is a pointer.
@@ -252,12 +396,12 @@ public class SemanticAnalyzer
     {
         var leftTypeFqn = AnalyzeExpressionType(bin.Left, context);
 
-        if (_typeManager.IsStruct(leftTypeFqn))
+        if (_typeRepository.IsStruct(leftTypeFqn))
         {
             try
             {
                 var opName = $"operator_{NameMangler.MangleOperator(bin.Operator.Value)}";
-                var overload = _typeManager.FindMethod(leftTypeFqn, opName);
+                var overload = _functionResolver.FindMethod(leftTypeFqn, opName);
 
                 if (overload != null)
                 {
@@ -278,7 +422,7 @@ public class SemanticAnalyzer
     private string AnalyzeNewExpression(NewExpressionNode n, AnalysisContext context)
     {
         // A new expression always returns a pointer to the type.
-        var typeName = _typeManager.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var typeName = _typeResolver.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
         return typeName + "*";
     }
 
@@ -291,7 +435,7 @@ public class SemanticAnalyzer
         }
 
         // 2. Try resolving as an unqualified enum member (e.g., `KEY_D`).
-        var unqualifiedEnumValue = _typeManager.ResolveUnqualifiedEnumMember(v.Identifier.Value, context.CompilationUnit, context.CurrentFunction.Namespace);
+        var unqualifiedEnumValue = _functionResolver.ResolveUnqualifiedEnumMember(v.Identifier.Value, context.CompilationUnit, context.CurrentFunction.Namespace);
         if (unqualifiedEnumValue.HasValue)
         {
             return "int";
@@ -334,7 +478,7 @@ public class SemanticAnalyzer
                 return operandType + "*";
             }
             // Taking address of a value type (e.g. `string s; &s;` -> `string*`)
-            return _typeManager.IsStruct(operandType) ? operandType + "*" : operandType;
+            return _typeRepository.IsStruct(operandType) ? operandType + "*" : operandType;
         }
 
         if (u.Operator.Type == TokenType.Star) // Dereference operator
@@ -357,25 +501,15 @@ public class SemanticAnalyzer
         if (call.Callee is MemberAccessExpressionNode callMemberAccess) // Method call: myText.draw()
         {
             var ownerTypeName = AnalyzeExpressionType(callMemberAccess.Left, context).TrimEnd('*');
-            var (ownerStruct, _) = _typeManager.GetStructTypeFromFullName(ownerTypeName);
-            func = _typeManager.ResolveMethod(ownerStruct, callMemberAccess.Member.Value);
+            var ownerStruct = _typeRepository.FindStruct(ownerTypeName) ?? throw new InvalidOperationException($"Could not find struct definition for '{ownerTypeName}'.");
+            func = _functionResolver.ResolveMethod(ownerStruct, callMemberAccess.Member.Value);
         }
         else // Global or namespaced function call: DrawText(), rl::DrawText()
         {
-            func = _typeManager.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
+            func = _functionResolver.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
         }
 
         return AnalyzeFunctionReturnType(func, context);
-    }
-
-    private string ResolveQualifier(ExpressionNode expr)
-    {
-        return expr switch
-        {
-            VariableExpressionNode v => v.Identifier.Value,
-            QualifiedAccessExpressionNode q => $"{ResolveQualifier(q.Left)}::{q.Member.Value}",
-            _ => throw new InvalidOperationException($"Cannot resolve qualifier from expression of type {expr.GetType().Name}")
-        };
     }
 
     private string AnalyzeQualifiedAccessExpression(QualifiedAccessExpressionNode q, AnalysisContext context)
@@ -384,13 +518,13 @@ public class SemanticAnalyzer
         // `q.Left` resolves to the enum type (e.g., `raylib::KeyboardKey`)
         // `q.Member` resolves to the enum member (e.g., `KEY_D`)
 
-        string potentialEnumTypeName = ResolveQualifier(q.Left);
+        string potentialEnumTypeName = TypeResolver.ResolveQualifier(q.Left);
         string memberName = q.Member.Value;
 
-        string? enumTypeFQN = _typeManager.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction.Namespace, context.CompilationUnit);
+        string? enumTypeFQN = _typeResolver.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction.Namespace, context.CompilationUnit);
         if (enumTypeFQN != null)
         {
-            if (_typeManager.GetEnumValue(enumTypeFQN, memberName).HasValue)
+            if (_functionResolver.GetEnumValue(enumTypeFQN, memberName).HasValue)
             {
                 return "int"; // Enum members are integers.
             }
@@ -400,6 +534,91 @@ public class SemanticAnalyzer
         // If not an enum, it's a qualified name like `rl::DrawText`. This is not a value on its own.
         // It's only valid as the `Callee` of a `CallExpression`, which is handled by `AnalyzeCallExpression`.
         throw new InvalidOperationException($"Qualified access '{potentialEnumTypeName}::{memberName}' cannot be evaluated as a value directly. Only enum members or function calls are supported.");
+    }
+}
+</file>
+
+<file path="Analysis\TypeResolver.cs">
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace CTilde;
+
+public class TypeResolver
+{
+    private readonly TypeRepository _typeRepository;
+
+    public TypeResolver(TypeRepository typeRepository)
+    {
+        _typeRepository = typeRepository;
+    }
+
+    public static string ResolveQualifier(ExpressionNode expr)
+    {
+        return expr switch
+        {
+            VariableExpressionNode v => v.Identifier.Value,
+            QualifiedAccessExpressionNode q => $"{ResolveQualifier(q.Left)}::{q.Member.Value}",
+            _ => throw new InvalidOperationException($"Cannot resolve qualifier from expression of type {expr.GetType().Name}")
+        };
+    }
+
+    public string ResolveTypeName(string name, string? currentNamespace, CompilationUnitNode context)
+    {
+        if (name.Contains("::"))
+        {
+            var parts = name.Split("::");
+            var nsPart = parts[0];
+            var typeName = parts[1];
+            var aliased = context.Usings.FirstOrDefault(u => u.Alias == nsPart);
+            if (aliased != null)
+            {
+                var fqn = $"{aliased.Namespace}::{typeName}";
+                return _typeRepository.FindStruct(fqn) != null ? fqn : throw new InvalidOperationException($"Type '{name}' with aliased namespace '{nsPart}' not found.");
+            }
+            return _typeRepository.FindStruct(name) != null ? name : throw new InvalidOperationException($"Type '{name}' not found.");
+        }
+
+        var candidates = new List<string>();
+        if (currentNamespace != null)
+        {
+            var fqn = $"{currentNamespace}::{name}";
+            if (_typeRepository.FindStruct(fqn) != null) candidates.Add(fqn);
+        }
+        foreach (var u in context.Usings.Where(u => u.Alias == null))
+        {
+            string fqn = $"{u.Namespace}::{name}";
+            if (_typeRepository.FindStruct(fqn) != null) candidates.Add(fqn);
+        }
+        if (_typeRepository.FindStruct(name) != null) candidates.Add(name);
+
+        if (candidates.Count == 0) throw new InvalidOperationException($"Type '{name}' could not be resolved in the current context.");
+        if (candidates.Distinct().Count() > 1) throw new InvalidOperationException($"Type '{name}' is ambiguous between: {string.Join(", ", candidates.Distinct())}");
+        return candidates.First();
+    }
+
+    public string? ResolveEnumTypeName(string name, string? currentNamespace, CompilationUnitNode context)
+    {
+        if (name.Contains("::"))
+        {
+            var parts = name.Split("::");
+            var aliased = context.Usings.FirstOrDefault(u => u.Alias == parts[0]);
+            var fqn = aliased != null ? $"{aliased.Namespace}::{parts[1]}" : name;
+            return _typeRepository.FindEnum(fqn) != null ? fqn : null;
+        }
+
+        var namespacesToCheck = new List<string?> { currentNamespace }
+            .Concat(context.Usings.Where(u => u.Alias == null).Select(u => u.Namespace))
+            .Append(null);
+
+        foreach (var ns in namespacesToCheck.Distinct())
+        {
+            var fqn = ns != null ? $"{ns}::{name}" : name;
+            if (_typeRepository.FindEnum(fqn) != null) return fqn;
+        }
+
+        return null;
     }
 }
 </file>
@@ -459,7 +678,10 @@ namespace CTilde;
 public class CodeGenerator
 {
     internal ProgramNode Program { get; }
-    internal TypeManager TypeManager { get; }
+    internal TypeRepository TypeRepository { get; }
+    internal TypeResolver TypeResolver { get; }
+    internal FunctionResolver FunctionResolver { get; }
+    internal VTableManager VTableManager { get; }
     internal MemoryLayoutManager MemoryLayoutManager { get; }
     internal SemanticAnalyzer SemanticAnalyzer { get; }
     internal AssemblyBuilder Builder { get; } = new();
@@ -475,9 +697,12 @@ public class CodeGenerator
     public CodeGenerator(ProgramNode program)
     {
         Program = program;
-        TypeManager = new TypeManager(program);
-        MemoryLayoutManager = new MemoryLayoutManager(TypeManager);
-        SemanticAnalyzer = new SemanticAnalyzer(TypeManager, MemoryLayoutManager);
+        TypeRepository = new TypeRepository(program);
+        TypeResolver = new TypeResolver(TypeRepository);
+        FunctionResolver = new FunctionResolver(TypeRepository, TypeResolver, program);
+        VTableManager = new VTableManager(TypeRepository, TypeResolver);
+        MemoryLayoutManager = new MemoryLayoutManager(TypeRepository, TypeResolver, VTableManager);
+        SemanticAnalyzer = new SemanticAnalyzer(TypeRepository, TypeResolver, FunctionResolver, MemoryLayoutManager);
 
         ExpressionGenerator = new ExpressionGenerator(this);
         StatementGenerator = new StatementGenerator(this);
@@ -541,11 +766,11 @@ public class CodeGenerator
         Builder.AppendDirective("section '.rdata' data readable");
         foreach (var s in Program.CompilationUnits.SelectMany(cu => cu.Structs))
         {
-            var structFqn = TypeManager.GetFullyQualifiedName(s);
-            if (TypeManager.HasVTable(structFqn))
+            var structFqn = TypeRepository.GetFullyQualifiedName(s);
+            if (VTableManager.HasVTable(structFqn))
             {
                 Builder.AppendLabel(NameMangler.GetVTableLabel(s));
-                var vtable = TypeManager.GetVTable(structFqn);
+                var vtable = VTableManager.GetVTable(structFqn);
                 foreach (var entry in vtable)
                 {
                     var mangledName = entry switch
@@ -594,7 +819,10 @@ public class DeclarationGenerator
 {
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
-    private TypeManager TypeManager => _context.TypeManager;
+    private TypeRepository TypeRepository => _context.TypeRepository;
+    private TypeResolver TypeResolver => _context.TypeResolver;
+    private FunctionResolver FunctionResolver => _context.FunctionResolver;
+    private VTableManager VTableManager => _context.VTableManager;
     private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
     private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
     private StatementGenerator StatementGenerator => _context.StatementGenerator;
@@ -607,7 +835,7 @@ public class DeclarationGenerator
 
     public void GenerateConstructor(ConstructorDeclarationNode ctor, CompilationUnitNode unit)
     {
-        var symbols = new SymbolTable(ctor, TypeManager, MemoryLayoutManager, unit);
+        var symbols = new SymbolTable(ctor, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis, preventing NullReferenceException.
         var dummyFunctionForContext = new FunctionDeclarationNode(
             new Token(TokenType.Keyword, "void"), 0, ctor.OwnerStructName,
@@ -621,13 +849,13 @@ public class DeclarationGenerator
 
         if (ctor.Initializer != null)
         {
-            var ownerStruct = TypeManager.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
+            var ownerStruct = TypeRepository.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
 
             var argTypes = ctor.Initializer.Arguments
                 .Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, context))
                 .ToList();
-            var baseFqn = TypeManager.ResolveTypeName(ownerStruct.BaseStructName!, ownerStruct.Namespace, unit);
-            var baseCtor = TypeManager.FindConstructor(baseFqn, argTypes) ?? throw new InvalidOperationException("Base constructor not found for given argument types.");
+            var baseFqn = TypeResolver.ResolveTypeName(ownerStruct.BaseStructName!, ownerStruct.Namespace, unit);
+            var baseCtor = FunctionResolver.FindConstructor(baseFqn, argTypes) ?? throw new InvalidOperationException("Base constructor not found for given argument types.");
 
 
             int totalArgSize = 0;
@@ -652,7 +880,7 @@ public class DeclarationGenerator
 
     public void GenerateDestructor(DestructorDeclarationNode dtor, CompilationUnitNode unit)
     {
-        var symbols = new SymbolTable(dtor, TypeManager, MemoryLayoutManager, unit);
+        var symbols = new SymbolTable(dtor, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis.
         var dummyFunctionForContext = new FunctionDeclarationNode(
             new Token(TokenType.Keyword, "void"), 0, dtor.OwnerStructName,
@@ -669,9 +897,9 @@ public class DeclarationGenerator
 
     public void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
-        var symbols = new SymbolTable(function, TypeManager, MemoryLayoutManager, unit);
+        var symbols = new SymbolTable(function, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
         var context = new AnalysisContext(symbols, unit, function);
-        var destructibleLocals = symbols.GetDestructibleLocals(TypeManager);
+        var destructibleLocals = symbols.GetDestructibleLocals(FunctionResolver);
 
         string mangledName = function.Name == "main" ? "_main" : NameMangler.Mangle(function);
 
@@ -707,7 +935,7 @@ public class DeclarationGenerator
             Builder.AppendInstruction(null, "Destructor cleanup");
             foreach (var (name, offset, type) in destructibleLocals.AsEnumerable().Reverse())
             {
-                var dtor = TypeManager.FindDestructor(type);
+                var dtor = FunctionResolver.FindDestructor(type);
                 if (dtor != null)
                 {
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of '{name}' for dtor");
@@ -751,7 +979,10 @@ public class ExpressionGenerator
 {
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
-    private TypeManager TypeManager => _context.TypeManager;
+    private TypeRepository TypeRepository => _context.TypeRepository;
+    private TypeResolver TypeResolver => _context.TypeResolver;
+    private FunctionResolver FunctionResolver => _context.FunctionResolver;
+    private VTableManager VTableManager => _context.VTableManager;
     private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
     private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
     private HashSet<string> ExternalFunctions => _context.ExternalFunctions;
@@ -766,7 +997,7 @@ public class ExpressionGenerator
         var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, context);
         GenerateExpression(arg, context); // Result is address (for struct) or value (for primitive) in EAX
 
-        if (TypeManager.IsStruct(argType) && !argType.EndsWith("*"))
+        if (TypeRepository.IsStruct(argType) && !argType.EndsWith("*"))
         {
             int argSize = MemoryLayoutManager.GetSizeOfType(argType, context.CompilationUnit);
             for (int offset = argSize - 4; offset >= 0; offset -= 4)
@@ -850,7 +1081,7 @@ public class ExpressionGenerator
 
     private void GenerateNewExpression(NewExpressionNode n, AnalysisContext context)
     {
-        var typeFqn = TypeManager.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var typeFqn = TypeResolver.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
         var size = MemoryLayoutManager.GetSizeOfType(typeFqn, context.CompilationUnit);
 
         Builder.AppendInstruction($"push {size}", "Push size for malloc");
@@ -859,11 +1090,11 @@ public class ExpressionGenerator
         Builder.AppendInstruction("mov edi, eax", "Save new'd pointer in edi");
 
         var argTypes = n.Arguments.Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, context)).ToList();
-        var ctor = TypeManager.FindConstructor(typeFqn, argTypes) ?? throw new InvalidOperationException($"No matching constructor for 'new {typeFqn}'");
+        var ctor = FunctionResolver.FindConstructor(typeFqn, argTypes) ?? throw new InvalidOperationException($"No matching constructor for 'new {typeFqn}'");
 
-        if (TypeManager.HasVTable(typeFqn))
+        if (VTableManager.HasVTable(typeFqn))
         {
-            var structDef = TypeManager.FindStruct(typeFqn);
+            var structDef = TypeRepository.FindStruct(typeFqn);
             var vtableLabel = NameMangler.GetVTableLabel(structDef);
             Builder.AppendInstruction($"mov dword [edi], {vtableLabel}", "Set vtable pointer on heap object");
         }
@@ -890,7 +1121,7 @@ public class ExpressionGenerator
     {
         if (context.Symbols.TryGetSymbol(varExpr.Identifier.Value, out int offset, out string type, out _))
         {
-            if (TypeManager.IsStruct(type) && !type.EndsWith("*")) GenerateLValueAddress(varExpr, context);
+            if (TypeRepository.IsStruct(type) && !type.EndsWith("*")) GenerateLValueAddress(varExpr, context);
             else
             {
                 string sign = offset > 0 ? "+" : "";
@@ -900,7 +1131,7 @@ public class ExpressionGenerator
             return;
         }
 
-        var enumValue = TypeManager.ResolveUnqualifiedEnumMember(varExpr.Identifier.Value, context.CompilationUnit, context.CurrentFunction?.Namespace);
+        var enumValue = FunctionResolver.ResolveUnqualifiedEnumMember(varExpr.Identifier.Value, context.CompilationUnit, context.CurrentFunction?.Namespace);
         if (enumValue.HasValue)
         {
             Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {varExpr.Identifier.Value}");
@@ -939,7 +1170,7 @@ public class ExpressionGenerator
     {
         GenerateLValueAddress(m, context);
         var memberType = SemanticAnalyzer.AnalyzeExpressionType(m, context);
-        if (TypeManager.IsStruct(memberType) && !memberType.EndsWith("*")) return;
+        if (TypeRepository.IsStruct(memberType) && !memberType.EndsWith("*")) return;
 
         string instruction = MemoryLayoutManager.GetSizeOfType(memberType, context.CompilationUnit) == 1 ? "movzx eax, byte [eax]" : "mov eax, [eax]";
         Builder.AppendInstruction(instruction);
@@ -948,7 +1179,7 @@ public class ExpressionGenerator
     private void GenerateAssignmentExpression(AssignmentExpressionNode assign, AnalysisContext context)
     {
         string lValueType = SemanticAnalyzer.AnalyzeExpressionType(assign.Left, context);
-        bool isStructAssign = TypeManager.IsStruct(lValueType);
+        bool isStructAssign = TypeRepository.IsStruct(lValueType);
 
         if (isStructAssign)
         {
@@ -979,7 +1210,7 @@ public class ExpressionGenerator
     private void GenerateCallExpression(CallExpressionNode callExpr, AnalysisContext context)
     {
         var returnType = SemanticAnalyzer.AnalyzeExpressionType(callExpr, context);
-        bool returnsStruct = TypeManager.IsStruct(returnType) && !returnType.EndsWith("*");
+        bool returnsStruct = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
         int totalArgSize = 0;
 
         if (returnsStruct)
@@ -998,8 +1229,8 @@ public class ExpressionGenerator
         if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
         {
             var ownerTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context).TrimEnd('*');
-            var (structDef, _) = TypeManager.GetStructTypeFromFullName(ownerTypeFqn);
-            var method = TypeManager.ResolveMethod(structDef, memberAccess.Member.Value);
+            var ownerStruct = TypeRepository.FindStruct(ownerTypeFqn) ?? throw new InvalidOperationException($"Struct '{ownerTypeFqn}' not found.");
+            var method = FunctionResolver.ResolveMethod(ownerStruct, memberAccess.Member.Value);
 
             if (memberAccess.Operator.Type == TokenType.Arrow) GenerateExpression(memberAccess.Left, context);
             else GenerateLValueAddress(memberAccess.Left, context);
@@ -1009,7 +1240,7 @@ public class ExpressionGenerator
 
             if (method.IsVirtual || method.IsOverride)
             {
-                var vtableIndex = TypeManager.GetMethodVTableIndex(ownerTypeFqn, method.Name);
+                var vtableIndex = VTableManager.GetMethodVTableIndex(ownerTypeFqn, method.Name);
                 int thisPtrOffset = totalArgSize - 4; // 'this' is the last thing pushed before call
                 Builder.AppendInstruction($"mov eax, [esp + {thisPtrOffset}]", "Get 'this' from stack");
                 Builder.AppendInstruction("mov eax, [eax]", "Get vtable pointer from object");
@@ -1020,7 +1251,7 @@ public class ExpressionGenerator
         }
         else
         {
-            var func = TypeManager.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
+            var func = FunctionResolver.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
             string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
             if (func.Body == null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
@@ -1041,13 +1272,13 @@ public class ExpressionGenerator
     {
         var leftTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(binExpr.Left, context);
 
-        if (TypeManager.IsStruct(leftTypeFqn))
+        if (TypeRepository.IsStruct(leftTypeFqn))
         {
             var opName = $"operator_{NameMangler.MangleOperator(binExpr.Operator.Value)}";
-            var overload = TypeManager.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
+            var overload = FunctionResolver.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
 
             var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(overload, context);
-            bool returnsStruct = TypeManager.IsStruct(returnType) && !returnType.EndsWith("*");
+            bool returnsStruct = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
             int totalArgSize = 0;
 
             if (returnsStruct)
@@ -1094,21 +1325,14 @@ public class ExpressionGenerator
         }
     }
 
-    private string ResolveQualifier(ExpressionNode expr) => expr switch
-    {
-        VariableExpressionNode v => v.Identifier.Value,
-        QualifiedAccessExpressionNode q => $"{ResolveQualifier(q.Left)}::{q.Member.Value}",
-        _ => throw new InvalidOperationException($"Cannot resolve qualifier from expression of type {expr.GetType().Name}")
-    };
-
     private void GenerateQualifiedAccessExpression(QualifiedAccessExpressionNode qNode, AnalysisContext context)
     {
-        string potentialEnumTypeName = ResolveQualifier(qNode.Left);
+        string potentialEnumTypeName = TypeResolver.ResolveQualifier(qNode.Left);
         string memberName = qNode.Member.Value;
-        string? enumTypeFQN = TypeManager.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction?.Namespace, context.CompilationUnit);
+        string? enumTypeFQN = TypeResolver.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction?.Namespace, context.CompilationUnit);
         if (enumTypeFQN != null)
         {
-            var enumValue = TypeManager.GetEnumValue(enumTypeFQN, memberName);
+            var enumValue = FunctionResolver.GetEnumValue(enumTypeFQN, memberName);
             if (enumValue.HasValue)
             {
                 Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {potentialEnumTypeName}::{memberName}");
@@ -1116,7 +1340,7 @@ public class ExpressionGenerator
             }
         }
 
-        var func = TypeManager.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
+        var func = FunctionResolver.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
         string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
         if (func.Body == null) ExternalFunctions.Add(func.Name);
         Builder.AppendInstruction($"mov eax, {calleeTarget}");
@@ -1252,11 +1476,15 @@ namespace CTilde;
 
 public class MemoryLayoutManager
 {
-    private readonly TypeManager _typeManager;
+    private readonly TypeRepository _typeRepository;
+    private readonly TypeResolver _typeResolver;
+    private readonly VTableManager _vtableManager;
 
-    public MemoryLayoutManager(TypeManager typeManager)
+    public MemoryLayoutManager(TypeRepository typeRepository, TypeResolver typeResolver, VTableManager vtableManager)
     {
-        _typeManager = typeManager;
+        _typeRepository = typeRepository;
+        _typeResolver = typeResolver;
+        _vtableManager = vtableManager;
     }
 
     public int GetSizeOfType(string typeNameFqn, CompilationUnitNode context)
@@ -1265,33 +1493,33 @@ public class MemoryLayoutManager
         if (typeNameFqn == "int") return 4;
         if (typeNameFqn == "char") return 1;
 
-        if (_typeManager.FindStruct(typeNameFqn) is { } structDef)
+        if (_typeRepository.FindStruct(typeNameFqn) is { } structDef)
         {
             int size = 0;
-            var structUnit = _typeManager.GetCompilationUnitForStruct(typeNameFqn);
+            var structUnit = _typeRepository.GetCompilationUnitForStruct(typeNameFqn);
             if (structDef.BaseStructName != null)
             {
-                string baseFqn = _typeManager.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
-                var baseUnit = _typeManager.GetCompilationUnitForStruct(baseFqn);
+                string baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+                var baseUnit = _typeRepository.GetCompilationUnitForStruct(baseFqn);
                 size += GetSizeOfType(baseFqn, baseUnit);
             }
-            else if (_typeManager.HasVTable(typeNameFqn))
+            else if (_vtableManager.HasVTable(typeNameFqn))
             {
                 size += 4; // vtable pointer
             }
 
             foreach (var member in structDef.Members)
             {
-                var rawMemberType = TypeManager.GetTypeName(member.Type, member.PointerLevel);
+                var rawMemberType = TypeRepository.GetTypeNameFromToken(member.Type, member.PointerLevel);
                 string baseMemberName = rawMemberType.TrimEnd('*');
                 string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
 
                 string resolvedMemberType = (member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void"))
                     ? rawMemberType
-                    : _typeManager.ResolveTypeName(baseMemberName, structDef.Namespace, structUnit) + pointerSuffix;
+                    : _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, structUnit) + pointerSuffix;
 
-                var memberUnit = _typeManager.IsStruct(resolvedMemberType)
-                    ? _typeManager.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
+                var memberUnit = _typeRepository.IsStruct(resolvedMemberType)
+                    ? _typeRepository.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
                     : structUnit;
                 size += GetSizeOfType(resolvedMemberType, memberUnit);
             }
@@ -1309,38 +1537,38 @@ public class MemoryLayoutManager
 
     public List<(string name, string type, int offset, bool isConst)> GetAllMembers(string structFqn, CompilationUnitNode context)
     {
-        if (_typeManager.FindStruct(structFqn) is not { } structDef) throw new System.InvalidOperationException($"Struct '{structFqn}' not found.");
+        if (_typeRepository.FindStruct(structFqn) is not { } structDef) throw new System.InvalidOperationException($"Struct '{structFqn}' not found.");
 
         var allMembers = new List<(string, string, int, bool)>();
         int currentOffset = 0;
 
         if (structDef.BaseStructName != null)
         {
-            var structUnit = _typeManager.GetCompilationUnitForStruct(structFqn);
-            string baseFqn = _typeManager.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
-            var baseUnit = _typeManager.GetCompilationUnitForStruct(baseFqn);
+            var structUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
+            string baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+            var baseUnit = _typeRepository.GetCompilationUnitForStruct(baseFqn);
             allMembers.AddRange(GetAllMembers(baseFqn, baseUnit));
             currentOffset = GetSizeOfType(baseFqn, baseUnit);
         }
-        else if (_typeManager.HasVTable(structFqn))
+        else if (_vtableManager.HasVTable(structFqn))
         {
             currentOffset = 4; // vtable pointer
         }
 
         foreach (var mem in structDef.Members)
         {
-            var ownUnit = _typeManager.GetCompilationUnitForStruct(structFqn);
-            var rawMemberType = TypeManager.GetTypeName(mem.Type, mem.PointerLevel);
+            var ownUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
+            var rawMemberType = TypeRepository.GetTypeNameFromToken(mem.Type, mem.PointerLevel);
             var baseMemberName = rawMemberType.TrimEnd('*');
             var pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
             var resolvedMemberType = (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void"))
                 ? rawMemberType
-                : _typeManager.ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
+                : _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
 
             allMembers.Add((mem.Name.Value, resolvedMemberType, currentOffset, mem.IsConst));
 
-            var memberUnit = _typeManager.IsStruct(resolvedMemberType)
-                ? _typeManager.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
+            var memberUnit = _typeRepository.IsStruct(resolvedMemberType)
+                ? _typeRepository.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
                 : ownUnit;
             currentOffset += GetSizeOfType(resolvedMemberType, memberUnit);
         }
@@ -1400,7 +1628,8 @@ public class StatementGenerator
 {
     private readonly CodeGenerator _context;
     private AssemblyBuilder Builder => _context.Builder;
-    private TypeManager TypeManager => _context.TypeManager;
+    private TypeRepository TypeRepository => _context.TypeRepository;
+    private FunctionResolver FunctionResolver => _context.FunctionResolver;
     private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
     private ExpressionGenerator ExpressionGenerator => _context.ExpressionGenerator;
 
@@ -1434,7 +1663,7 @@ public class StatementGenerator
 
         var pointerType = _context.SemanticAnalyzer.AnalyzeExpressionType(deleteNode.Expression, context);
         var objectType = pointerType.TrimEnd('*');
-        var dtor = TypeManager.FindDestructor(objectType);
+        var dtor = FunctionResolver.FindDestructor(objectType);
 
         if (dtor != null)
         {
@@ -1462,10 +1691,10 @@ public class StatementGenerator
         var varTypeFqn = context.Symbols.GetSymbolType(variableName);
         context.Symbols.TryGetSymbol(variableName, out var offset, out _, out _);
 
-        if (TypeManager.IsStruct(varTypeFqn))
+        if (TypeRepository.IsStruct(varTypeFqn))
         {
-            var structDef = TypeManager.FindStruct(varTypeFqn);
-            if (TypeManager.HasVTable(varTypeFqn))
+            var structDef = TypeRepository.FindStruct(varTypeFqn);
+            if (_context.VTableManager.HasVTable(varTypeFqn))
             {
                 var vtableLabel = NameMangler.GetVTableLabel(structDef);
                 Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of object '{variableName}'");
@@ -1477,7 +1706,7 @@ public class StatementGenerator
                 var argTypes = decl.ConstructorArguments
                     .Select(arg => _context.SemanticAnalyzer.AnalyzeExpressionType(arg, context))
                     .ToList();
-                var ctor = TypeManager.FindConstructor(varTypeFqn, argTypes) ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' matching signature.");
+                var ctor = FunctionResolver.FindConstructor(varTypeFqn, argTypes) ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' matching signature.");
 
                 int totalArgSize = 0;
                 foreach (var arg in decl.ConstructorArguments.AsEnumerable().Reverse())
@@ -1514,7 +1743,7 @@ public class StatementGenerator
                 else // e.g. string s = "hello"; or string s = other_s; (Implicit constructor call)
                 {
                     string initializerType = _context.SemanticAnalyzer.AnalyzeExpressionType(decl.Initializer, context);
-                    var ctor = TypeManager.FindConstructor(varTypeFqn, new List<string> { initializerType })
+                    var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType })
                         ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
 
                     int totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
@@ -1541,7 +1770,7 @@ public class StatementGenerator
     private void GenerateReturn(ReturnStatementNode ret, AnalysisContext context)
     {
         var returnTypeFqn = _context.SemanticAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
-        if (TypeManager.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
+        if (TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
             // Handle return by value for structs (RVO)
             if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");
@@ -1614,15 +1843,15 @@ public class SymbolTable
     public int TotalLocalSize { get; private set; }
 
     // Constructor for Functions/Methods
-    public SymbolTable(FunctionDeclarationNode function, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
+    public SymbolTable(FunctionDeclarationNode function, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(function.Body, allLocalDeclarations);
-        Initialize(function.Parameters, allLocalDeclarations, typeManager, memoryLayoutManager, function.Namespace, currentUnit);
+        Initialize(function.Parameters, allLocalDeclarations, typeResolver, memoryLayoutManager, function.Namespace, currentUnit);
     }
 
     // Constructor for Constructors
-    public SymbolTable(ConstructorDeclarationNode ctor, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
+    public SymbolTable(ConstructorDeclarationNode ctor, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(ctor.Body, allLocalDeclarations);
@@ -1632,11 +1861,11 @@ public class SymbolTable
 
         var allParams = new List<ParameterNode> { thisParam };
         allParams.AddRange(ctor.Parameters);
-        Initialize(allParams, allLocalDeclarations, typeManager, memoryLayoutManager, ctor.Namespace, currentUnit);
+        Initialize(allParams, allLocalDeclarations, typeResolver, memoryLayoutManager, ctor.Namespace, currentUnit);
     }
 
     // Constructor for Destructors
-    public SymbolTable(DestructorDeclarationNode dtor, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
+    public SymbolTable(DestructorDeclarationNode dtor, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager, CompilationUnitNode currentUnit)
     {
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(dtor.Body, allLocalDeclarations);
@@ -1644,27 +1873,27 @@ public class SymbolTable
         var thisTypeName = dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName;
         var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName), 1, new Token(TokenType.Identifier, "this"));
 
-        Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeManager, memoryLayoutManager, dtor.Namespace, currentUnit);
+        Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeResolver, memoryLayoutManager, dtor.Namespace, currentUnit);
     }
 
-    private void Initialize(List<ParameterNode> parameters, List<DeclarationStatementNode> localDeclarations, TypeManager typeManager, MemoryLayoutManager memoryLayoutManager, string? currentNamespace, CompilationUnitNode currentUnit)
+    private void Initialize(List<ParameterNode> parameters, List<DeclarationStatementNode> localDeclarations, TypeResolver typeResolver, MemoryLayoutManager memoryLayoutManager, string? currentNamespace, CompilationUnitNode currentUnit)
     {
         TotalLocalSize = 0;
         foreach (var d in localDeclarations)
         {
-            var rawTypeName = TypeManager.GetTypeName(d.Type, d.PointerLevel);
+            var rawTypeName = TypeRepository.GetTypeNameFromToken(d.Type, d.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             var resolvedTypeName = d.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
                 ? rawTypeName
-                : typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+                : typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
             TotalLocalSize += memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
         }
 
         int currentParamOffset = 8; // EBP + 8 is first parameter
         foreach (var param in parameters)
         {
-            var rawTypeName = TypeManager.GetTypeName(param.Type, param.PointerLevel);
+            var rawTypeName = TypeRepository.GetTypeNameFromToken(param.Type, param.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             string resolvedTypeName;
@@ -1680,7 +1909,7 @@ public class SymbolTable
             }
             else
             {
-                resolvedTypeName = typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
             }
 
             _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false);
@@ -1690,12 +1919,12 @@ public class SymbolTable
         int currentLocalOffset = 0;
         foreach (var decl in localDeclarations)
         {
-            var rawTypeName = TypeManager.GetTypeName(decl.Type, decl.PointerLevel);
+            var rawTypeName = TypeRepository.GetTypeNameFromToken(decl.Type, decl.PointerLevel);
             var baseTypeName = rawTypeName.TrimEnd('*');
             var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
             var resolvedTypeName = decl.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
                 ? rawTypeName
-                : typeManager.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+                : typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
 
             int size = memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;
@@ -1714,12 +1943,12 @@ public class SymbolTable
         else if (node is WhileStatementNode whileStmt) CollectDeclarations(whileStmt.Body, declarations);
     }
 
-    public List<(string Name, int Offset, string TypeFqn)> GetDestructibleLocals(TypeManager typeManager)
+    public List<(string Name, int Offset, string TypeFqn)> GetDestructibleLocals(FunctionResolver functionResolver)
     {
         var result = new List<(string, int, string)>();
         foreach (var (name, (offset, type, _)) in _symbols)
         {
-            if (offset < 0 && typeManager.FindDestructor(type) != null) // Locals have negative offset
+            if (offset < 0 && functionResolver.FindDestructor(type) != null) // Locals have negative offset
             {
                 result.Add((name, offset, type));
             }
@@ -1742,193 +1971,112 @@ public class SymbolTable
 
     public string GetSymbolType(string name)
     {
-        return _symbols.TryGetValue(name, out var symbol) 
+        return _symbols.TryGetValue(name, out var symbol)
             ? symbol.Type
             : throw new InvalidOperationException($"Symbol '{name}' not found in current scope.");
     }
 }
 </file>
 
-<file path="Generator\TypeManager.cs">
-using System;
+<file path="Generator\TypeRepository.cs">
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 
 namespace CTilde;
 
-public class TypeManager
+public class TypeRepository
 {
-    private readonly ProgramNode _program;
     private readonly Dictionary<string, StructDefinitionNode> _structs;
     private readonly Dictionary<string, EnumDefinitionNode> _enums;
     private readonly Dictionary<string, CompilationUnitNode> _structUnitMap;
+    private readonly Dictionary<string, CompilationUnitNode> _enumUnitMap;
 
-    private readonly Dictionary<string, List<AstNode>> _vtableCache = new();
-    private readonly Dictionary<string, bool> _hasVTableCache = new();
-
-    public TypeManager(ProgramNode program)
+    public TypeRepository(ProgramNode program)
     {
-        _program = program;
         _structs = program.CompilationUnits.SelectMany(cu => cu.Structs)
             .ToDictionary(s => GetFullyQualifiedName(s));
         _enums = program.CompilationUnits.SelectMany(cu => cu.Enums)
-            .ToDictionary(e => e.Namespace != null ? $"{e.Namespace}::{e.Name}" : e.Name);
+            .ToDictionary(e => GetFullyQualifiedName(e));
+
         _structUnitMap = new Dictionary<string, CompilationUnitNode>();
         foreach (var cu in program.CompilationUnits)
             foreach (var s in cu.Structs)
                 _structUnitMap[GetFullyQualifiedName(s)] = cu;
+
+        _enumUnitMap = new Dictionary<string, CompilationUnitNode>();
+        foreach (var cu in program.CompilationUnits)
+            foreach (var e in cu.Enums)
+                _enumUnitMap[GetFullyQualifiedName(e)] = cu;
     }
 
-    public string GetFullyQualifiedName(StructDefinitionNode s) => s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name;
+    public static string GetFullyQualifiedName(StructDefinitionNode s) => s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name;
+    public static string GetFullyQualifiedName(EnumDefinitionNode e) => e.Namespace != null ? $"{e.Namespace}::{e.Name}" : e.Name;
 
-    private string ResolveQualifier(ExpressionNode expr) => expr switch
-    {
-        VariableExpressionNode v => v.Identifier.Value,
-        QualifiedAccessExpressionNode q => $"{ResolveQualifier(q.Left)}::{q.Member.Value}",
-        _ => throw new InvalidOperationException($"Cannot resolve qualifier from expression of type {expr.GetType().Name}")
-    };
+    public StructDefinitionNode? FindStruct(string qualifiedName) => _structs.TryGetValue(qualifiedName, out var def) ? def : null;
 
-    public string ResolveTypeName(string name, string? currentNamespace, CompilationUnitNode context)
+    public StructDefinitionNode? FindStructByUnqualifiedName(string name, string? currentNamespace)
     {
-        if (name.Contains("::"))
-        {
-            var parts = name.Split("::");
-            var nsPart = parts[0];
-            var typeName = parts[1];
-            var aliased = context.Usings.FirstOrDefault(u => u.Alias == nsPart);
-            if (aliased != null)
-            {
-                var fqn = $"{aliased.Namespace}::{typeName}";
-                return _structs.ContainsKey(fqn) ? fqn : throw new InvalidOperationException($"Type '{name}' with aliased namespace '{nsPart}' not found.");
-            }
-            return _structs.ContainsKey(name) ? name : throw new InvalidOperationException($"Type '{name}' not found.");
-        }
-        var candidates = new List<string>();
-        if (currentNamespace != null)
-        {
-            var fqn = $"{currentNamespace}::{name}";
-            if (_structs.ContainsKey(fqn)) candidates.Add(fqn);
-        }
-        foreach (UsingDirectiveNode? u in context.Usings.Where(u => u.Alias == null))
-        {
-            string fqn = $"{u.Namespace}::{name}";
-            if (_structs.ContainsKey(fqn)) candidates.Add(fqn);
-        }
-        if (_structs.ContainsKey(name)) candidates.Add(name);
-        if (candidates.Count == 0) throw new InvalidOperationException($"Type '{name}' could not be resolved in the current context.");
-        if (candidates.Distinct().Count() > 1) throw new InvalidOperationException($"Type '{name}' is ambiguous between: {string.Join(", ", candidates.Distinct())}");
-        return candidates.First();
+        var fqn = currentNamespace != null ? $"{currentNamespace}::{name}" : name;
+        if (_structs.TryGetValue(fqn, out var def)) return def;
+        return _structs.TryGetValue(name, out def) ? def : null;
     }
 
-    public FunctionDeclarationNode ResolveFunctionCall(ExpressionNode callee, CompilationUnitNode context, FunctionDeclarationNode? currentFunction)
+    public EnumDefinitionNode? FindEnum(string qualifiedName) => _enums.TryGetValue(qualifiedName, out var def) ? def : null;
+
+    public IEnumerable<StructDefinitionNode> GetAllStructs() => _structs.Values;
+    public IEnumerable<EnumDefinitionNode> GetAllEnums() => _enums.Values;
+
+    public CompilationUnitNode GetCompilationUnitForStruct(string structFqn) => _structUnitMap[structFqn];
+    public CompilationUnitNode GetCompilationUnitForEnum(string enumFqn) => _enumUnitMap[enumFqn];
+
+    public bool IsStruct(string typeName) => _structs.ContainsKey(typeName.TrimEnd('*'));
+
+    public static string GetTypeNameFromToken(Token type, int pointerLevel) => type.Value + new string('*', pointerLevel);
+}
+</file>
+
+<file path="Generator\VTableManager.cs">
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace CTilde;
+
+public class VTableManager
+{
+    private readonly TypeRepository _typeRepository;
+    private readonly TypeResolver _typeResolver;
+
+    private readonly Dictionary<string, List<AstNode>> _vtableCache = new();
+    private readonly Dictionary<string, bool> _hasVTableCache = new();
+
+    public VTableManager(TypeRepository typeRepository, TypeResolver typeResolver)
     {
-        if (callee is VariableExpressionNode varNode) return ResolveFunctionByName(varNode.Identifier.Value, currentFunction?.Namespace, context);
-        if (callee is QualifiedAccessExpressionNode qNode)
-        {
-            string qualifier = ResolveQualifier(qNode.Left);
-            var funcName = qNode.Member.Value;
-            string? resolvedNamespace = qualifier;
-            var aliased = context.Usings.FirstOrDefault(u => u.Alias == qualifier);
-            if (aliased != null) resolvedNamespace = aliased.Namespace;
-
-            var globalFunctions = _program.CompilationUnits.SelectMany(cu => cu.Functions);
-            var func = globalFunctions.FirstOrDefault(f => f.OwnerStructName == null && f.Namespace == resolvedNamespace && f.Name == funcName);
-            if (func == null) throw new InvalidOperationException($"Function '{resolvedNamespace}::{funcName}' not found.");
-            return func;
-        }
-        throw new NotSupportedException($"Unsupported callee type for resolution: {callee.GetType().Name}");
+        _typeRepository = typeRepository;
+        _typeResolver = typeResolver;
     }
-
-    private FunctionDeclarationNode ResolveFunctionByName(string name, string? currentNamespace, CompilationUnitNode context)
-    {
-        var globalFunctions = _program.CompilationUnits.SelectMany(cu => cu.Functions);
-        var candidates = globalFunctions.Where(f => f.OwnerStructName == null && f.Name == name)
-            .Where(f => f.Namespace == currentNamespace || f.Namespace == null || context.Usings.Any(u => u.Alias == null && u.Namespace == f.Namespace)).ToList();
-        if (candidates.Count == 0) throw new InvalidOperationException($"Function '{name}' could not be resolved in the current context.");
-        if (candidates.Select(f => f.Namespace).Distinct().Count() > 1) throw new InvalidOperationException($"Function call '{name}' is ambiguous.");
-        return candidates.First();
-    }
-
-    public FunctionDeclarationNode ResolveMethod(StructDefinitionNode owner, string name) => owner.Methods.FirstOrDefault(m => m.Name == name) ?? throw new InvalidOperationException($"Method '{name}' not found on struct '{owner.Name}'");
-
-    public FunctionDeclarationNode? FindMethod(string structFqn, string methodName)
-    {
-        if (!_structs.TryGetValue(structFqn, out var structDef))
-        {
-            return null;
-        }
-        return structDef.Methods.FirstOrDefault(m => m.Name == methodName);
-    }
-
-    public ConstructorDeclarationNode? FindConstructor(string structFqn, List<string> argTypeFqns)
-    {
-        if (!_structs.TryGetValue(structFqn, out var structDef)) return null;
-
-        var ctorUnit = _structUnitMap[structFqn];
-
-        foreach (var ctor in structDef.Constructors)
-        {
-            if (ctor.Parameters.Count != argTypeFqns.Count) continue;
-
-            bool allParamsMatch = true;
-            for (int i = 0; i < argTypeFqns.Count; i++)
-            {
-                var param = ctor.Parameters[i];
-
-                var rawParamType = GetTypeName(param.Type, param.PointerLevel);
-                var baseParamType = rawParamType.TrimEnd('*');
-                var pointerSuffix = new string('*', rawParamType.Length - baseParamType.Length);
-
-                string resolvedParamType;
-                if (param.Type.Type == TokenType.Keyword || baseParamType.Equals("void", StringComparison.OrdinalIgnoreCase))
-                {
-                    resolvedParamType = rawParamType;
-                }
-                else
-                {
-                    // Resolve the type name in the context of the struct's definition.
-                    resolvedParamType = ResolveTypeName(baseParamType, ctor.Namespace, ctorUnit) + pointerSuffix;
-                }
-
-                string argumentType = argTypeFqns[i];
-                bool isMatch = resolvedParamType == argumentType;
-
-                // Allow implicit conversion from int literal to char parameter
-                if (!isMatch && resolvedParamType == "char" && argumentType == "int")
-                {
-                    isMatch = true;
-                }
-
-                if (!isMatch)
-                {
-                    allParamsMatch = false;
-                    break;
-                }
-            }
-
-            if (allParamsMatch) return ctor;
-        }
-
-        return null;
-    }
-
-    public DestructorDeclarationNode? FindDestructor(string fqn) => _structs.ContainsKey(fqn) ? _structs[fqn].Destructors.FirstOrDefault() : null;
 
     public bool HasVTable(string structFqn)
     {
         if (_hasVTableCache.TryGetValue(structFqn, out var hasVTable)) return hasVTable;
-        if (!_structs.TryGetValue(structFqn, out var structDef)) return false;
+
+        var structDef = _typeRepository.FindStruct(structFqn);
+        if (structDef == null) return false;
 
         bool result = structDef.Methods.Any(m => m.IsVirtual) || structDef.Destructors.Any(d => d.IsVirtual);
-        if (result) { _hasVTableCache[structFqn] = true; return true; }
+        if (result)
+        {
+            _hasVTableCache[structFqn] = true;
+            return true;
+        }
 
         if (structDef.BaseStructName != null)
         {
-            var unit = _structUnitMap[structFqn];
-            var baseFqn = ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
+            var baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
             result = HasVTable(baseFqn);
         }
+
         _hasVTableCache[structFqn] = result;
         return result;
     }
@@ -1936,13 +2084,14 @@ public class TypeManager
     public List<AstNode> GetVTable(string structFqn)
     {
         if (_vtableCache.TryGetValue(structFqn, out var vtable)) return vtable;
-        if (!_structs.TryGetValue(structFqn, out var structDef)) throw new InvalidOperationException($"Struct {structFqn} not found.");
+
+        var structDef = _typeRepository.FindStruct(structFqn) ?? throw new InvalidOperationException($"Struct {structFqn} not found.");
 
         var newVTable = new List<AstNode>();
         if (structDef.BaseStructName != null)
         {
-            var unit = _structUnitMap[structFqn];
-            var baseFqn = ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
+            var baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
             newVTable.AddRange(GetVTable(baseFqn));
         }
 
@@ -1977,66 +2126,6 @@ public class TypeManager
         var index = vtable.FindIndex(n => n is FunctionDeclarationNode f && f.Name == methodName);
         if (index == -1) throw new InvalidOperationException($"Method '{methodName}' is not in the vtable for struct '{structFqn}'.");
         return index;
-    }
-
-    public string? ResolveEnumTypeName(string name, string? currentNamespace, CompilationUnitNode context)
-    {
-        if (name.Contains("::"))
-        {
-            var parts = name.Split("::");
-            var aliased = context.Usings.FirstOrDefault(u => u.Alias == parts[0]);
-            var fqn = aliased != null ? $"{aliased.Namespace}::{parts[1]}" : name;
-            return _enums.ContainsKey(fqn) ? fqn : null;
-        }
-        var namespacesToCheck = new List<string?> { currentNamespace }.Concat(context.Usings.Where(u => u.Alias == null).Select(u => u.Namespace)).Append(null);
-        foreach (var ns in namespacesToCheck.Distinct())
-        {
-            var fqn = ns != null ? $"{ns}::{name}" : name;
-            if (_enums.ContainsKey(fqn)) return fqn;
-        }
-        return null;
-    }
-
-    public int? GetEnumValue(string enumFQN, string memberName) => _enums.TryGetValue(enumFQN, out var ed) ? ed.Members.FirstOrDefault(m => m.Name.Value == memberName)?.Value : null;
-
-    public int? ResolveUnqualifiedEnumMember(string memberName, CompilationUnitNode context, string? currentContextNamespace)
-    {
-        var namespacesToCheck = new List<string?> { currentContextNamespace }.Concat(context.Usings.Where(u => u.Alias == null).Select(u => u.Namespace)).Append(null);
-        foreach (var ns in namespacesToCheck.Distinct())
-            foreach (var enumDef in _enums.Values.Where(e => e.Namespace == ns))
-                if (enumDef.Members.Any(m => m.Name.Value == memberName)) return GetEnumValue(GetFullyQualifiedName(enumDef), memberName);
-        return null;
-    }
-    private string GetFullyQualifiedName(EnumDefinitionNode e) => e.Namespace != null ? $"{e.Namespace}::{e.Name}" : e.Name;
-
-    public StructDefinitionNode? FindStruct(string qualifiedName) => _structs.TryGetValue(qualifiedName, out var def) ? def : null;
-
-    public StructDefinitionNode? FindStructByUnqualifiedName(string name, string? currentNamespace)
-    {
-        var fqn = currentNamespace != null ? $"{currentNamespace}::{name}" : name;
-        if (_structs.TryGetValue(fqn, out var def)) return def;
-        if (_structs.TryGetValue(name, out def)) return def; // Check global
-        return null;
-    }
-
-    public (StructDefinitionNode Def, string FullName) GetStructTypeFromFullName(string fullName)
-    {
-        return (_structs.TryGetValue(fullName, out var def) ? def : throw new InvalidOperationException($"Could not find struct definition for '{fullName}'."), fullName);
-    }
-
-    public static string GetTypeName(Token type, int pointerLevel)
-    {
-        return type.Value + new string('*', pointerLevel);
-    }
-
-    public CompilationUnitNode GetCompilationUnitForStruct(string structFqn)
-    {
-        return _structUnitMap[structFqn];
-    }
-
-    public bool IsStruct(string typeName)
-    {
-        return _structs.ContainsKey(typeName.TrimEnd('*'));
     }
 }
 </file>

@@ -238,11 +238,24 @@ public class ExpressionGenerator
 
     private void GenerateCallExpression(CallExpressionNode callExpr, AnalysisContext context)
     {
-        var returnType = SemanticAnalyzer.AnalyzeExpressionType(callExpr, context);
-        bool returnsStruct = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
         int totalArgSize = 0;
+        FunctionDeclarationNode func;
 
-        if (returnsStruct)
+        if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
+        {
+            var ownerTypeName = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context).TrimEnd('*');
+            var ownerStruct = TypeRepository.FindStruct(ownerTypeName) ?? throw new InvalidOperationException($"Could not find struct definition for '{ownerTypeName}'.");
+            func = FunctionResolver.ResolveMethod(ownerStruct, memberAccess.Member.Value);
+        }
+        else
+        {
+            func = FunctionResolver.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
+        }
+
+        var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(func, context);
+        bool returnsStructByValue = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
+
+        if (returnsStructByValue)
         {
             var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
             Builder.AppendInstruction($"sub esp, {size}", "Make space for return value");
@@ -255,32 +268,28 @@ public class ExpressionGenerator
             totalArgSize += PushArgument(arg, context);
         }
 
-        if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
+        if (callExpr.Callee is MemberAccessExpressionNode ma)
         {
-            var ownerTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context).TrimEnd('*');
-            var ownerStruct = TypeRepository.FindStruct(ownerTypeFqn) ?? throw new InvalidOperationException($"Struct '{ownerTypeFqn}' not found.");
-            var method = FunctionResolver.ResolveMethod(ownerStruct, memberAccess.Member.Value);
-
-            if (memberAccess.Operator.Type == TokenType.Arrow) GenerateExpression(memberAccess.Left, context);
-            else GenerateLValueAddress(memberAccess.Left, context);
+            if (ma.Operator.Type == TokenType.Arrow) GenerateExpression(ma.Left, context);
+            else GenerateLValueAddress(ma.Left, context);
 
             Builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
 
-            if (method.IsVirtual || method.IsOverride)
+            if (func.IsVirtual || func.IsOverride)
             {
-                var vtableIndex = VTableManager.GetMethodVTableIndex(ownerTypeFqn, method.Name);
+                var ownerTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(ma.Left, context).TrimEnd('*');
+                var vtableIndex = VTableManager.GetMethodVTableIndex(ownerTypeFqn, func.Name);
                 int thisPtrOffset = totalArgSize - 4; // 'this' is the last thing pushed before call
                 Builder.AppendInstruction($"mov eax, [esp + {thisPtrOffset}]", "Get 'this' from stack");
                 Builder.AppendInstruction("mov eax, [eax]", "Get vtable pointer from object");
                 Builder.AppendInstruction($"mov eax, [eax + {vtableIndex * 4}]", $"Get method address from vtable[{vtableIndex}]");
                 Builder.AppendInstruction("call eax");
             }
-            else { Builder.AppendInstruction($"call {NameMangler.Mangle(method)}"); }
+            else { Builder.AppendInstruction($"call {NameMangler.Mangle(func)}"); }
         }
         else
         {
-            var func = FunctionResolver.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
             string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
             if (func.Body == null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
@@ -288,11 +297,8 @@ public class ExpressionGenerator
 
         Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
 
-        if (returnsStruct)
+        if (returnsStructByValue)
         {
-            // The result (pointer to the returned struct) is what was on top of the stack before cleanup.
-            // It was pushed as the hidden first argument.
-            // After cleanup, we must retrieve it. It's now pointed to by ESP.
             Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
         }
     }
@@ -307,10 +313,10 @@ public class ExpressionGenerator
             var overload = FunctionResolver.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
 
             var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(overload, context);
-            bool returnsStruct = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
+            bool returnsStructByValue = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
             int totalArgSize = 0;
 
-            if (returnsStruct)
+            if (returnsStructByValue)
             {
                 var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
                 Builder.AppendInstruction($"sub esp, {size}", "Make space for op+ return value");
@@ -327,7 +333,7 @@ public class ExpressionGenerator
             Builder.AppendInstruction($"call {NameMangler.Mangle(overload)}");
             Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up op+ args");
 
-            if (returnsStruct)
+            if (returnsStructByValue)
             {
                 Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
             }

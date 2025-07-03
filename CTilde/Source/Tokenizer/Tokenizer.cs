@@ -60,8 +60,7 @@ public class Tokenizer
         "override",
         "new",
         "delete",
-        "operator",
-        "for" // NEW
+        "operator" // NEW
     ];
 
     public static List<Token> Tokenize(string input)

@@ -46,10 +46,9 @@ public record BlockStatementNode(List<StatementNode> Statements) : StatementNode
 public record ReturnStatementNode(ExpressionNode? Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBody, StatementNode? ElseBody) : StatementNode;
-public record ForStatementNode(StatementNode? Initializer, ExpressionNode? Condition, ExpressionNode? Increment, StatementNode Body) : StatementNode; // NEW
 public record DeclarationStatementNode(bool IsConst, Token Type, int PointerLevel, Token Identifier, ExpressionNode? Initializer, List<ExpressionNode>? ConstructorArguments) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
-public record DeleteStatementNode(ExpressionNode Expression) : StatementNode;
+public record DeleteStatementNode(ExpressionNode Expression) : StatementNode; // NEW
 
 
 // Expressions
@@ -63,7 +62,7 @@ public record CallExpressionNode(ExpressionNode Callee, List<ExpressionNode> Arg
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;
 public record MemberAccessExpressionNode(ExpressionNode Left, Token Operator, Token Member) : ExpressionNode;
 public record QualifiedAccessExpressionNode(ExpressionNode Left, Token Member) : ExpressionNode;
-public record NewExpressionNode(Token Type, List<ExpressionNode> Arguments) : ExpressionNode;
+public record NewExpressionNode(Token Type, List<ExpressionNode> Arguments) : ExpressionNode; // NEW
 </file>
 
 <file path="Compiler.cs">
@@ -891,20 +890,7 @@ public class DeclarationGenerator
 
     public void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
-        var tempContext = new AnalysisContext(null, unit, function);
-        var returnTypeFqn = SemanticAnalyzer.AnalyzeFunctionReturnType(function, tempContext);
-        var returnsStructByValue = TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*");
-
-        var parametersWithRetPtr = new List<ParameterNode>(function.Parameters);
-        if (returnsStructByValue)
-        {
-            var retPtrParam = new ParameterNode(new Token(TokenType.Keyword, "void"), 1, new Token(TokenType.Identifier, "__ret_ptr"));
-            parametersWithRetPtr.Add(retPtrParam);
-        }
-
-        var functionForSymbols = function with { Parameters = parametersWithRetPtr };
-        var symbols = new SymbolTable(functionForSymbols, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
-
+        var symbols = new SymbolTable(function, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
         var context = new AnalysisContext(symbols, unit, function);
         var destructibleLocals = symbols.GetDestructibleLocals(FunctionResolver);
 
@@ -1410,42 +1396,33 @@ public class FasmWriter
         builder.AppendDirective("section '.idata' import data readable");
         builder.AppendBlankLine();
 
-        // Define standard libraries and their common functions
         var libraries = new Dictionary<string, List<string>>
         {
             { "kernel32.dll", new List<string> { "ExitProcess" } },
-            { "msvcrt.dll", new List<string> { "printf", "malloc", "free", "strlen", "strcpy", "memcpy" } }
+            { "msvcrt.dll", new List<string> { "printf", "malloc", "free", "strlen", "strcpy", "memcpy" } } // MODIFIED
         };
 
-        // Get a list of all user-imported libraries from #import directives
-        var userLibs = program.Imports.Select(i => i.LibraryName).ToList();
-
-        // Add user-imported libraries to our main dictionary
-        foreach (var lib in userLibs)
+        foreach (var import in program.Imports)
         {
-            if (!libraries.ContainsKey(lib))
-            {
-                libraries[lib] = new List<string>();
-            }
+            if (!libraries.ContainsKey(import.LibraryName)) libraries[import.LibraryName] = new List<string>();
         }
 
-        // Determine the primary user library (heuristic: the first one that isn't standard)
-        var primaryUserLib = userLibs.FirstOrDefault(lib => lib != "kernel32.dll" && lib != "msvcrt.dll");
-
-        // Get lists of functions we know belong to standard libraries
-        var kernel32Funcs = libraries["kernel32.dll"];
-        var msvcrtFuncs = libraries["msvcrt.dll"];
-
-        // Distribute all other external functions to the primary user library
-        if (primaryUserLib != null)
+        foreach (var funcName in externalFunctions)
         {
-            foreach (var funcName in externalFunctions)
+            bool found = false;
+            foreach (var import in program.Imports)
             {
-                // If the function isn't a known standard library function, assign it to the user's library.
-                if (!kernel32Funcs.Contains(funcName) && !msvcrtFuncs.Contains(funcName))
+                if (import.LibraryName != "kernel32.dll" && import.LibraryName != "msvcrt.dll")
                 {
-                    libraries[primaryUserLib].Add(funcName);
+                    libraries[import.LibraryName].Add(funcName);
+                    found = true;
+                    break;
                 }
+            }
+            if (!found && funcName != "printf")
+            {
+                if (!libraries.ContainsKey("user32.dll")) libraries["user32.dll"] = new List<string>();
+                if (!libraries["user32.dll"].Contains(funcName)) libraries["user32.dll"].Add(funcName);
             }
         }
 
@@ -1600,9 +1577,6 @@ public class MemoryLayoutManager
 </file>
 
 <file path="Generator\NameMangler.cs">
-using System.Collections.Generic;
-using System.Linq;
-
 namespace CTilde;
 
 public static class NameMangler
@@ -1614,23 +1588,7 @@ public static class NameMangler
 
     public static string Mangle(ConstructorDeclarationNode c)
     {
-        // Mangle based on parameter types to support overloading.
-        var paramTypeNames = c.Parameters.Select(p =>
-        {
-            // Sanitize type name for label. Replace '::' and add 'p' for pointers.
-            string typeName = p.Type.Value.Replace("::", "__");
-            typeName += new string('p', p.PointerLevel);
-            return typeName;
-        });
-
-        string paramSignature = string.Join("_", paramTypeNames);
-
-        // If there are no parameters, use a simple '0' to avoid a trailing underscore.
-        string name = c.Parameters.Any()
-            ? $"{c.OwnerStructName}_ctor_{paramSignature}"
-            : $"{c.OwnerStructName}_ctor0";
-
-        return MangleName(c.Namespace, c.OwnerStructName, name);
+        return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor{c.Parameters.Count}");
     }
 
     public static string Mangle(DestructorDeclarationNode d)
@@ -1640,10 +1598,7 @@ public static class NameMangler
 
     public static string GetVTableLabel(StructDefinitionNode s)
     {
-        var segments = new List<string> { "vtable" };
-        if (!string.IsNullOrEmpty(s.Namespace)) segments.Add(s.Namespace.Replace("::", "_"));
-        segments.Add(s.Name);
-        return "_" + string.Join("_", segments);
+        return $"_vtable_{s.Namespace?.Replace("::", "_")}_{s.Name}".Replace("__", "_");
     }
 
     public static string MangleOperator(string op)
@@ -1657,12 +1612,7 @@ public static class NameMangler
 
     private static string MangleName(string? ns, string? owner, string name)
     {
-        var segments = new List<string>();
-        if (!string.IsNullOrEmpty(ns)) segments.Add(ns.Replace("::", "_"));
-        if (!string.IsNullOrEmpty(owner)) segments.Add(owner);
-        segments.Add(name);
-
-        return "_" + string.Join("_", segments.Where(s => !string.IsNullOrEmpty(s)));
+        return $"_{ns?.Replace("::", "_")}_{owner}_{name}".Replace("___", "_").Replace("__", "_");
     }
 }
 </file>
@@ -1694,7 +1644,6 @@ public class StatementGenerator
             case ReturnStatementNode ret: GenerateReturn(ret, context); break;
             case BlockStatementNode block: foreach (var s in block.Statements) GenerateStatement(s, context); break;
             case WhileStatementNode w: GenerateWhile(w, context); break;
-            case ForStatementNode f: GenerateForStatement(f, context); break;
             case IfStatementNode i: GenerateIf(i, context); break;
             case DeleteStatementNode d: GenerateDelete(d, context); break;
             case DeclarationStatementNode decl:
@@ -1850,9 +1799,10 @@ public class StatementGenerator
         var returnTypeFqn = _context.SemanticAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
         if (TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
+            // Handle return by value for structs (RVO)
             if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");
 
-            // Get the address of the local object being returned (e.g. &result)
+            // Get the address of the return value object
             ExpressionGenerator.GenerateExpression(ret.Expression, context);
             Builder.AppendInstruction("mov esi, eax", "Source address for return value");
 
@@ -1860,27 +1810,13 @@ public class StatementGenerator
             context.Symbols.TryGetSymbol("__ret_ptr", out var retPtrOffset, out _, out _);
             Builder.AppendInstruction($"mov edi, [ebp + {retPtrOffset}]", "Destination address for return value");
 
-            // Find a copy constructor, e.g. string(string*)
-            var copyCtor = FunctionResolver.FindConstructor(returnTypeFqn, new List<string> { returnTypeFqn + "*" });
-
-            if (copyCtor != null)
-            {
-                Builder.AppendInstruction(null, "Calling copy constructor for return value");
-                Builder.AppendInstruction("push esi", "Push source pointer argument");
-                Builder.AppendInstruction("push edi", "Push destination pointer as 'this'");
-                Builder.AppendInstruction($"call {NameMangler.Mangle(copyCtor)}");
-                Builder.AppendInstruction("add esp, 8", "Clean up copy ctor args");
-            }
-            else
-            {
-                // Fallback to memcpy for POD structs without a copy constructor
-                var size = MemoryLayoutManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
-                Builder.AppendInstruction($"push {size}");
-                Builder.AppendInstruction("push esi");
-                Builder.AppendInstruction("push edi");
-                Builder.AppendInstruction("call [memcpy]");
-                Builder.AppendInstruction("add esp, 12");
-            }
+            // Copy the struct
+            var size = MemoryLayoutManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
+            Builder.AppendInstruction($"push {size}");
+            Builder.AppendInstruction("push esi");
+            Builder.AppendInstruction("push edi");
+            Builder.AppendInstruction("call [memcpy]");
+            Builder.AppendInstruction("add esp, 12");
         }
         else
         {
@@ -1901,48 +1837,6 @@ public class StatementGenerator
         GenerateStatement(w.Body, context);
         Builder.AppendInstruction($"jmp _while_start_{i}");
         Builder.AppendLabel($"_while_end_{i}");
-    }
-
-    private void GenerateForStatement(ForStatementNode f, AnalysisContext context)
-    {
-        int i = _context.GetNextLabelId();
-        string startLabel = $"_for_start_{i}";
-        string incrementLabel = $"_for_increment_{i}";
-        string endLabel = $"_for_end_{i}";
-
-        // 1. Initializer
-        if (f.Initializer != null)
-        {
-            GenerateStatement(f.Initializer, context);
-        }
-        Builder.AppendInstruction($"jmp {startLabel}"); // Jump to first condition check
-        Builder.AppendBlankLine();
-
-        // 3. Increment (placed before body for continue statement)
-        Builder.AppendLabel(incrementLabel);
-        if (f.Increment != null)
-        {
-            ExpressionGenerator.GenerateExpression(f.Increment, context);
-        }
-        Builder.AppendBlankLine();
-
-        // 2. Condition check
-        Builder.AppendLabel(startLabel);
-        if (f.Condition != null)
-        {
-            ExpressionGenerator.GenerateExpression(f.Condition, context);
-            Builder.AppendInstruction("cmp eax, 0");
-            Builder.AppendInstruction($"je {endLabel}");
-        }
-        Builder.AppendBlankLine();
-
-        // 4. Body
-        GenerateStatement(f.Body, context);
-        Builder.AppendInstruction($"jmp {incrementLabel}");
-        Builder.AppendBlankLine();
-
-        // 5. End
-        Builder.AppendLabel(endLabel);
     }
 
     private void GenerateIf(IfStatementNode i, AnalysisContext context)
@@ -2074,11 +1968,6 @@ public class SymbolTable
         else if (node is BlockStatementNode block) foreach (var stmt in block.Statements) CollectDeclarations(stmt, declarations);
         else if (node is IfStatementNode ifStmt) { CollectDeclarations(ifStmt.ThenBody, declarations); CollectDeclarations(ifStmt.ElseBody, declarations); }
         else if (node is WhileStatementNode whileStmt) CollectDeclarations(whileStmt.Body, declarations);
-        else if (node is ForStatementNode forStmt)
-        {
-            CollectDeclarations(forStmt.Initializer, declarations);
-            CollectDeclarations(forStmt.Body, declarations);
-        }
     }
 
     public List<(string Name, int Offset, string TypeFqn)> GetDestructibleLocals(FunctionResolver functionResolver)
@@ -2929,7 +2818,6 @@ internal class StatementParser
                 case "return": return ParseReturnStatement();
                 case "if": return ParseIfStatement();
                 case "while": return ParseWhileStatement();
-                case "for": return ParseForStatement();
                 case "delete": return ParseDeleteStatement();
                 case "const":
                 case "int":
@@ -2958,42 +2846,6 @@ internal class StatementParser
         var expression = _expressionParser.ParseExpression();
         _parser.Eat(TokenType.Semicolon);
         return new ExpressionStatementNode(expression);
-    }
-
-    private ForStatementNode ParseForStatement()
-    {
-        _parser.Eat(TokenType.Keyword); // for
-        _parser.Eat(TokenType.LeftParen);
-
-        StatementNode? initializer = null;
-        if (_parser.Current.Type != TokenType.Semicolon)
-        {
-            // The initializer can be a full declaration or just an expression.
-            // ParseStatement can distinguish these.
-            initializer = ParseStatement();
-        }
-        else
-        {
-            _parser.Eat(TokenType.Semicolon);
-        }
-
-        ExpressionNode? condition = null;
-        if (_parser.Current.Type != TokenType.Semicolon)
-        {
-            condition = _expressionParser.ParseExpression();
-        }
-        _parser.Eat(TokenType.Semicolon);
-
-        ExpressionNode? increment = null;
-        if (_parser.Current.Type != TokenType.RightParen)
-        {
-            increment = _expressionParser.ParseExpression();
-        }
-        _parser.Eat(TokenType.RightParen);
-
-        var body = ParseStatement();
-
-        return new ForStatementNode(initializer, condition, increment, body);
     }
 
     private DeleteStatementNode ParseDeleteStatement()
@@ -3144,8 +2996,7 @@ public class Tokenizer
         "override",
         "new",
         "delete",
-        "operator",
-        "for" // NEW
+        "operator" // NEW
     ];
 
     public static List<Token> Tokenize(string input)
@@ -3271,15 +3122,15 @@ int main()
     const int screenHeight = 600;
 
     rl::Color rayWhite = {245, 245, 245, 255};
+    //rl::Color maroon = {190, 33, 55, 255};
     rl::Color maroon(190, 33, 55, 255);
-    rl::Color lightGray = { 200, 200, 200, 255 };
 
-    rl::InitWindow(screenWidth, screenHeight, "For Loops!");
+    rl::InitWindow(screenWidth, screenHeight, "Operator Overloading!");
     rl::SetTargetFPS(60);
 
     string hello = "Hello ";
     string world = "World!";
-    string message = hello + world; 
+    string message = hello + &world; 
     
     TextObject myText(150, 275, message.c_str(), 40, maroon);
 
@@ -3287,20 +3138,13 @@ int main()
     {
         rl::BeginDrawing();
         rl::ClearBackground(rayWhite);
-
-        // Demonstrate the new for loop
-        for (int i = 0; i < screenWidth; i = i + 20)
-        {
-            rl::DrawLine(i, 0, i, screenHeight, lightGray);
-        }
-
         myText.draw();
         rl::EndDrawing();
     }
     
     rl::CloseWindow();
     
-    return 0;
+    return 0; // All string objects (hello, world, message) are automatically destroyed here.
 }
 </file>
 
@@ -3453,14 +3297,13 @@ enum KeyboardKey
     KEY_DOWN = 264
 };
 
-void InitWindow(int width, int height, char* title);
+void InitWindow(int width, int height, char* title); // MODIFIED
 void SetTargetFPS(int fps);
 int WindowShouldClose();
 void BeginDrawing();
 void EndDrawing();
 void ClearBackground(Color color);
-void DrawText(char* text, int posX, int posY, int fontSize, Color color);
-void DrawLine(int startPosX, int startPosY, int endPosX, int endPosY, Color color); // NEW
+void DrawText(char* text, int posX, int posY, int fontSize, Color color); // MODIFIED
 void CloseWindow();
 int GetFPS();
 int IsKeyDown(int key);
@@ -3507,13 +3350,13 @@ public:
     }
     
     // Concatenation operator
-    string operator+(string other)
+    string operator+(string* other)
     {
-        int new_len = m_length + other.length();
+        int new_len = m_length + other->length();
         char* new_buffer = malloc(new_len + 1);
         
         memcpy(new_buffer, m_data, m_length);
-        memcpy(new_buffer + m_length, other.c_str(), other.length());
+        memcpy(new_buffer + m_length, other->c_str(), other->length());
         
         // Create a new string object from our temporary buffer
         string result(new_buffer);

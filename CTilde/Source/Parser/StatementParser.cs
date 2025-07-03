@@ -32,7 +32,6 @@ internal class StatementParser
                 case "return": return ParseReturnStatement();
                 case "if": return ParseIfStatement();
                 case "while": return ParseWhileStatement();
-                case "for": return ParseForStatement();
                 case "delete": return ParseDeleteStatement();
                 case "const":
                 case "int":
@@ -63,58 +62,6 @@ internal class StatementParser
         return new ExpressionStatementNode(expression);
     }
 
-    private ForStatementNode ParseForStatement()
-    {
-        _parser.Eat(TokenType.Keyword); // for
-        _parser.Eat(TokenType.LeftParen);
-
-        StatementNode? initializer = null;
-        if (_parser.Current.Type != TokenType.Semicolon)
-        {
-            // The initializer can be a declaration or an expression. We must parse it
-            // but NOT consume the following semicolon, which is a separator.
-            bool isDeclaration;
-            int tempPos = _parser._position;
-            try
-            {
-                if (_parser.Current.Type == TokenType.Keyword && _parser.Current.Value == "const") _parser.AdvancePosition(1);
-                _parser.ParseType();
-                isDeclaration = _parser.Current.Type == TokenType.Identifier;
-            }
-            finally { _parser._position = tempPos; }
-
-            if (isDeclaration)
-            {
-                // Parse a declaration, but tell the parser not to eat the trailing semicolon.
-                initializer = ParseDeclarationStatement(false);
-            }
-            else
-            {
-                var expression = _expressionParser.ParseExpression();
-                initializer = new ExpressionStatementNode(expression);
-            }
-        }
-        _parser.Eat(TokenType.Semicolon); // Consume the separator semicolon.
-
-        ExpressionNode? condition = null;
-        if (_parser.Current.Type != TokenType.Semicolon)
-        {
-            condition = _expressionParser.ParseExpression();
-        }
-        _parser.Eat(TokenType.Semicolon);
-
-        ExpressionNode? increment = null;
-        if (_parser.Current.Type != TokenType.RightParen)
-        {
-            increment = _expressionParser.ParseExpression();
-        }
-        _parser.Eat(TokenType.RightParen);
-
-        var body = ParseStatement();
-
-        return new ForStatementNode(initializer, condition, increment, body);
-    }
-
     private DeleteStatementNode ParseDeleteStatement()
     {
         _parser.Eat(TokenType.Keyword); // delete
@@ -139,7 +86,7 @@ internal class StatementParser
         return new IfStatementNode(condition, thenBody, elseBody);
     }
 
-    private StatementNode ParseDeclarationStatement(bool eatSemicolon = true)
+    private StatementNode ParseDeclarationStatement()
     {
         bool isConst = false;
         if (_parser.Current.Type == TokenType.Keyword && _parser.Current.Value == "const")
@@ -175,12 +122,7 @@ internal class StatementParser
         {
             throw new InvalidOperationException($"Constant variable '{identifier.Value}' must be initialized.");
         }
-
-        if (eatSemicolon)
-        {
-            _parser.Eat(TokenType.Semicolon);
-        }
-
+        _parser.Eat(TokenType.Semicolon);
         return new DeclarationStatementNode(isConst, typeToken, pointerLevel, identifier, initializer, ctorArgs);
     }
 

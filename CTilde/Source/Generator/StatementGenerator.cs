@@ -24,7 +24,6 @@ public class StatementGenerator
             case ReturnStatementNode ret: GenerateReturn(ret, context); break;
             case BlockStatementNode block: foreach (var s in block.Statements) GenerateStatement(s, context); break;
             case WhileStatementNode w: GenerateWhile(w, context); break;
-            case ForStatementNode f: GenerateForStatement(f, context); break;
             case IfStatementNode i: GenerateIf(i, context); break;
             case DeleteStatementNode d: GenerateDelete(d, context); break;
             case DeclarationStatementNode decl:
@@ -231,48 +230,6 @@ public class StatementGenerator
         GenerateStatement(w.Body, context);
         Builder.AppendInstruction($"jmp _while_start_{i}");
         Builder.AppendLabel($"_while_end_{i}");
-    }
-
-    private void GenerateForStatement(ForStatementNode f, AnalysisContext context)
-    {
-        int i = _context.GetNextLabelId();
-        string startLabel = $"_for_start_{i}";
-        string incrementLabel = $"_for_increment_{i}";
-        string endLabel = $"_for_end_{i}";
-
-        // 1. Initializer
-        if (f.Initializer != null)
-        {
-            GenerateStatement(f.Initializer, context);
-        }
-        Builder.AppendInstruction($"jmp {startLabel}"); // Jump to first condition check
-        Builder.AppendBlankLine();
-
-        // 3. Increment (placed before body for continue statement)
-        Builder.AppendLabel(incrementLabel);
-        if (f.Increment != null)
-        {
-            ExpressionGenerator.GenerateExpression(f.Increment, context);
-        }
-        Builder.AppendBlankLine();
-
-        // 2. Condition check
-        Builder.AppendLabel(startLabel);
-        if (f.Condition != null)
-        {
-            ExpressionGenerator.GenerateExpression(f.Condition, context);
-            Builder.AppendInstruction("cmp eax, 0");
-            Builder.AppendInstruction($"je {endLabel}");
-        }
-        Builder.AppendBlankLine();
-
-        // 4. Body
-        GenerateStatement(f.Body, context);
-        Builder.AppendInstruction($"jmp {incrementLabel}");
-        Builder.AppendBlankLine();
-
-        // 5. End
-        Builder.AppendLabel(endLabel);
     }
 
     private void GenerateIf(IfStatementNode i, AnalysisContext context)

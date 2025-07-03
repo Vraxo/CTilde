@@ -108,11 +108,6 @@ public class SymbolTable
         else if (node is BlockStatementNode block) foreach (var stmt in block.Statements) CollectDeclarations(stmt, declarations);
         else if (node is IfStatementNode ifStmt) { CollectDeclarations(ifStmt.ThenBody, declarations); CollectDeclarations(ifStmt.ElseBody, declarations); }
         else if (node is WhileStatementNode whileStmt) CollectDeclarations(whileStmt.Body, declarations);
-        else if (node is ForStatementNode forStmt)
-        {
-            CollectDeclarations(forStmt.Initializer, declarations);
-            CollectDeclarations(forStmt.Body, declarations);
-        }
     }
 
     public List<(string Name, int Offset, string TypeFqn)> GetDestructibleLocals(FunctionResolver functionResolver)

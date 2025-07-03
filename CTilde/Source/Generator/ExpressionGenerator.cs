@@ -52,8 +52,11 @@ public class ExpressionGenerator
         {
             try
             {
-                var (Def, FullName) = TypeManager.GetStructTypeFromUnqualifiedName(context.CurrentFunction.OwnerStructName, context.CurrentFunction.Namespace);
-                var (memberOffset, _) = TypeManager.GetMemberInfo(FullName, varExpr.Identifier.Value, context.CompilationUnit);
+                string ownerStructFqn = context.CurrentFunction.Namespace != null
+                    ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}"
+                    : context.CurrentFunction.OwnerStructName;
+
+                var (memberOffset, _) = TypeManager.GetMemberInfo(ownerStructFqn, varExpr.Identifier.Value, context.CompilationUnit);
                 context.Symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
 
                 Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
@@ -307,24 +310,35 @@ public class ExpressionGenerator
             }
         }
 
-        string calleeTarget;
         if (callExpr.Callee is MemberAccessExpressionNode memberAccess) // Method call
         {
-            var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context);
-            var (structDef, _) = TypeManager.GetStructTypeFromFullName(leftType.TrimEnd('*'));
+            var ownerTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context).TrimEnd('*');
+            var (structDef, _) = TypeManager.GetStructTypeFromFullName(ownerTypeFqn);
             var method = TypeManager.ResolveMethod(structDef, memberAccess.Member.Value);
 
-            // Push `this` pointer
-            GenerateLValueAddress(memberAccess.Left, context);
+            // Generate 'this' pointer. For `ptr->member` this is the value of ptr. For `obj.member` this is the address of obj.
+            if (memberAccess.Operator.Type == TokenType.Arrow) GenerateExpression(memberAccess.Left, context);
+            else GenerateLValueAddress(memberAccess.Left, context);
             Builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
 
-            var nameParts = new List<string?> { method.Namespace, method.OwnerStructName, method.Name }.Where(n => n != null);
-            calleeTarget = "_" + string.Join("_", nameParts);
+            if (method.IsVirtual || method.IsOverride)
+            {
+                var vtableIndex = TypeManager.GetMethodVTableIndex(ownerTypeFqn, method.Name);
+                Builder.AppendInstruction("mov eax, [esp]", "Get 'this' from stack without popping");
+                Builder.AppendInstruction("mov eax, [eax]", "Get vtable pointer from object");
+                Builder.AppendInstruction($"mov eax, [eax + {vtableIndex * 4}]", $"Get method address from vtable[{vtableIndex}]");
+                Builder.AppendInstruction("call eax");
+            }
+            else // Static dispatch
+            {
+                Builder.AppendInstruction($"call {TypeManager.Mangle(method)}");
+            }
         }
         else // Global/namespaced function call
         {
             var func = TypeManager.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
+            string calleeTarget;
             if (func.Body == null)
             {
                 ExternalFunctions.Add(func.Name);
@@ -332,12 +346,10 @@ public class ExpressionGenerator
             }
             else
             {
-                var nameParts = new List<string?> { func.Namespace, func.OwnerStructName, func.Name }.Where(n => n != null);
-                calleeTarget = "_" + string.Join("_", nameParts);
+                calleeTarget = TypeManager.Mangle(func);
             }
+            Builder.AppendInstruction($"call {calleeTarget}");
         }
-
-        Builder.AppendInstruction($"call {calleeTarget}");
 
         if (totalArgSize > 0)
         {
@@ -397,15 +409,16 @@ public class ExpressionGenerator
 
         // If it's not an enum, it must be a function name.
         var func = TypeManager.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
+        string calleeTarget;
         if (func.Body == null)
         {
             ExternalFunctions.Add(func.Name);
-            Builder.AppendInstruction($"mov eax, [{func.Name}]");
+            calleeTarget = $"[{func.Name}]";
         }
         else
         {
-            var nameParts = new List<string?> { func.Namespace, func.OwnerStructName, func.Name }.Where(n => n != null);
-            Builder.AppendInstruction($"mov eax, _{string.Join("_", nameParts)}");
+            calleeTarget = TypeManager.Mangle(func);
         }
+        Builder.AppendInstruction($"mov eax, {calleeTarget}");
     }
 }

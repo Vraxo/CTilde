@@ -32,7 +32,7 @@ public enum TokenType
     Arrow,
     Colon,
     DoubleColon,
-    Enum // NEW
+    Enum
 }
 
 public record Token(TokenType Type, string Value);
@@ -54,7 +54,9 @@ public class Tokenizer
         "namespace",
         "using",
         "const",
-        "enum" // MODIFIED
+        "enum",
+        "virtual", // NEW
+        "override" // NEW
     ];
 
     public static List<Token> Tokenize(string input)

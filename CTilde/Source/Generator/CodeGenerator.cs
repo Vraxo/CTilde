@@ -40,7 +40,10 @@ public class CodeGenerator
 
         var fasmWriter = new FasmWriter();
         fasmWriter.WritePreamble(Builder);
+
+        GenerateVTables();
         fasmWriter.WriteDataSection(Builder, _stringLiterals);
+
         fasmWriter.WriteTextSectionHeader(Builder);
         fasmWriter.WriteEntryPoint(Builder);
 
@@ -56,6 +59,29 @@ public class CodeGenerator
         fasmWriter.WriteImportDataSection(Builder, Program, ExternalFunctions);
 
         return Builder.ToString();
+    }
+
+    private void GenerateVTables()
+    {
+        Builder.AppendDirective("section '.rdata' data readable");
+        foreach (var unit in Program.CompilationUnits)
+        {
+            foreach (var s in unit.Structs)
+            {
+                var structFqn = TypeManager.GetFullyQualifiedName(s);
+                if (TypeManager.HasVTable(structFqn))
+                {
+                    Builder.AppendLabel($"_vtable_{TypeManager.Mangle(s)}");
+                    var vtable = TypeManager.GetVTable(structFqn);
+                    foreach (var func in vtable)
+                    {
+                        var mangledFuncName = TypeManager.Mangle(func);
+                        Builder.AppendInstruction($"dd {mangledFuncName}");
+                    }
+                    Builder.AppendBlankLine();
+                }
+            }
+        }
     }
 
     internal int GetNextLabelId() => _labelIdCounter++;
@@ -90,19 +116,7 @@ public class CodeGenerator
         var symbols = new SymbolTable(function, TypeManager, unit);
         var context = new AnalysisContext(symbols, unit, function);
 
-        string mangledName;
-        if (function.Name == "main")
-        {
-            mangledName = "_main";
-        }
-        else
-        {
-            var nameParts = new List<string>();
-            if (function.Namespace != null) nameParts.Add(function.Namespace);
-            if (function.OwnerStructName != null) nameParts.Add(function.OwnerStructName);
-            nameParts.Add(function.Name);
-            mangledName = "_" + string.Join("_", nameParts);
-        }
+        string mangledName = function.Name == "main" ? "_main" : TypeManager.Mangle(function);
 
         Builder.AppendLabel(mangledName);
         Builder.AppendInstruction("push ebp");

@@ -49,8 +49,11 @@ public class SemanticAnalyzer
         {
             try
             {
-                (StructDefinitionNode _, string fullName) = _typeManager.GetStructTypeFromUnqualifiedName(context.CurrentFunction.OwnerStructName, context.CurrentFunction.Namespace);
-                (int _, string memberTypeResolved) = _typeManager.GetMemberInfo(fullName, v.Identifier.Value, context.CompilationUnit);
+                string ownerStructFqn = context.CurrentFunction.Namespace != null
+                    ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}"
+                    : context.CurrentFunction.OwnerStructName;
+
+                (_, string memberTypeResolved) = _typeManager.GetMemberInfo(ownerStructFqn, v.Identifier.Value, context.CompilationUnit);
                 return memberTypeResolved;
             }
             catch (InvalidOperationException) { /* Fall through to the final error */ }

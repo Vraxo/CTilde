@@ -28,7 +28,7 @@ public record UsingDirectiveNode(string Namespace, string? Alias) : AstNode;
 public record MemberVariableNode(bool IsConst, Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode;
 public record StructDefinitionNode(string Name, string? BaseStructName, string? Namespace, List<MemberVariableNode> Members) : AstNode;
 public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
-public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, string? Namespace) : AstNode;
+public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, bool IsVirtual, bool IsOverride, string? Namespace) : AstNode; // MODIFIED
 public record EnumDefinitionNode(string Name, string? Namespace, List<EnumMemberNode> Members) : AstNode;
 public record EnumMemberNode(Token Name, int Value) : AstNode;
 
@@ -56,4 +56,4 @@ public record VariableExpressionNode(Token Identifier) : ExpressionNode;
 public record CallExpressionNode(ExpressionNode Callee, List<ExpressionNode> Arguments) : ExpressionNode;
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;
 public record MemberAccessExpressionNode(ExpressionNode Left, Token Operator, Token Member) : ExpressionNode;
-public record QualifiedAccessExpressionNode(ExpressionNode Left, Token Member) : ExpressionNode; // MODIFIED
+public record QualifiedAccessExpressionNode(ExpressionNode Left, Token Member) : ExpressionNode;

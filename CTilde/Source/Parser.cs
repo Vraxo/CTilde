@@ -199,12 +199,29 @@ public class Parser
                 continue;
             }
 
-            bool isConst = false; // Check for const for member variables
+            bool isConst = false;
+            bool isVirtual = false;
+            bool isOverride = false;
+
             if (Current.Type == TokenType.Keyword && Current.Value == "const")
             {
                 isConst = true;
                 Eat(TokenType.Keyword); // Eat 'const'
             }
+
+            if (Current.Type == TokenType.Keyword && Current.Value == "virtual")
+            {
+                isVirtual = true;
+                Eat(TokenType.Keyword);
+            }
+            else if (Current.Type == TokenType.Keyword && Current.Value == "override")
+            {
+                isOverride = true;
+                Eat(TokenType.Keyword);
+            }
+
+            if (isVirtual && isOverride) throw new InvalidOperationException("A method cannot be both 'virtual' and 'override'.");
+
 
             var (type, pointerLevel) = ParseType();
             var name = Eat(TokenType.Identifier);
@@ -212,12 +229,13 @@ public class Parser
             if (Current.Type == TokenType.LeftParen)
             {
                 // This is a method definition.
-                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value, currentAccess, _currentNamespace);
+                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value, currentAccess, isVirtual, isOverride, _currentNamespace);
                 programFunctions.Add(methodNode);
             }
             else
             {
                 // This is a member variable.
+                if (isVirtual || isOverride) throw new InvalidOperationException("Only methods can be marked 'virtual' or 'override'.");
                 members.Add(new MemberVariableNode(isConst, type, pointerLevel, name, currentAccess)); // Pass isConst
                 Eat(TokenType.Semicolon);
             }
@@ -295,11 +313,11 @@ public class Parser
     {
         var (returnType, returnPointerLevel) = ParseType();
         var identifier = Eat(TokenType.Identifier);
-        // Global functions are implicitly public
-        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null, AccessSpecifier.Public, _currentNamespace);
+        // Global functions are implicitly public and never virtual/override
+        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null, AccessSpecifier.Public, false, false, _currentNamespace);
     }
 
-    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName, AccessSpecifier accessLevel, string? namespaceName)
+    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName, AccessSpecifier accessLevel, bool isVirtual, bool isOverride, string? namespaceName)
     {
         Eat(TokenType.LeftParen);
 
@@ -334,7 +352,7 @@ public class Parser
             Eat(TokenType.Semicolon); // For function prototypes
         }
 
-        return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName, accessLevel, namespaceName);
+        return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName, accessLevel, isVirtual, isOverride, namespaceName);
     }
 
     private BlockStatementNode ParseBlockStatement()

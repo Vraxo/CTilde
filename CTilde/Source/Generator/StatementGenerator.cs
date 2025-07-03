@@ -24,81 +24,64 @@ public class StatementGenerator
             case WhileStatementNode w: GenerateWhile(w, context); break;
             case IfStatementNode i: GenerateIf(i, context); break;
             case DeclarationStatementNode decl:
-                if (decl.Initializer != null)
-                {
-                    if (decl.Initializer is InitializerListExpressionNode initList)
-                    {
-                        string rawTypeName = TypeManager.GetTypeName(decl.Type, decl.PointerLevel);
-
-                        // Resolve the base type name, then append the pointer suffix back if any
-                        string baseTypeName = rawTypeName.TrimEnd('*');
-                        string pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
-                        string resolvedTypeName = TypeManager.ResolveTypeName(baseTypeName, context.CurrentFunction.Namespace, context.CompilationUnit) + pointerSuffix;
-
-                        if (!TypeManager.IsStruct(resolvedTypeName))
-                            throw new InvalidOperationException($"Initializer list can only be used for struct types, not '{rawTypeName}'.");
-
-                        var structDef = TypeManager.FindStruct(resolvedTypeName)
-                            ?? throw new InvalidOperationException($"Could not find struct definition for initializer list type '{resolvedTypeName}'.");
-
-                        if (initList.Values.Count > structDef.Members.Count)
-                            throw new InvalidOperationException($"Too many values in initializer list for struct '{structDef.Name}'.");
-
-                        context.Symbols.TryGetSymbol(decl.Identifier.Value, out var structBaseOffset, out _, out _); // Added out _
-                        int currentMemberOffset = 0;
-
-                        for (int j = 0; j < initList.Values.Count; j++)
-                        {
-                            var member = structDef.Members[j];
-                            var valueExpr = initList.Values[j];
-
-                            // Resolve the member type name before getting its size
-                            var rawMemberTypeName = TypeManager.GetTypeName(member.Type, member.PointerLevel);
-                            var baseMemberName = rawMemberTypeName.TrimEnd('*');
-                            var memberPointerSuffix = new string('*', rawMemberTypeName.Length - baseMemberName.Length);
-
-                            string resolvedMemberTypeName;
-                            if (member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", StringComparison.OrdinalIgnoreCase))
-                            {
-                                resolvedMemberTypeName = rawMemberTypeName; // Primitive types, void don't need resolution
-                            }
-                            else
-                            {
-                                // Resolve member type using the namespace of the *struct definition*, not the current function's context
-                                resolvedMemberTypeName = TypeManager.ResolveTypeName(baseMemberName, structDef.Namespace, context.CompilationUnit) + memberPointerSuffix;
-                            }
-
-                            var memberSize = TypeManager.GetSizeOfType(resolvedMemberTypeName, context.CompilationUnit);
-                            var totalOffset = structBaseOffset + currentMemberOffset;
-
-                            ExpressionGenerator.GenerateExpression(valueExpr, context);
-                            if (memberSize == 1) Builder.AppendInstruction($"mov byte [ebp + {totalOffset}], al", $"Init member {member.Name.Value}");
-                            else Builder.AppendInstruction($"mov dword [ebp + {totalOffset}], eax", $"Init member {member.Name.Value}");
-
-                            currentMemberOffset += memberSize;
-                        }
-                    }
-                    else // Simple variable initialization (e.g., int x = 5; or const int x = 5;)
-                    {
-                        var variableName = decl.Identifier.Value;
-                        var varType = context.Symbols.GetSymbolType(variableName); // Get FQN type from symbol table
-
-                        ExpressionGenerator.GenerateExpression(decl.Initializer, context); // Value to assign is in EAX
-                        context.Symbols.TryGetSymbol(variableName, out var offset, out _, out _); // Added out _
-
-                        if (TypeManager.GetSizeOfType(varType, context.CompilationUnit) == 1)
-                        {
-                            Builder.AppendInstruction($"mov byte [ebp + {offset}], al", $"Initialize {variableName}");
-                        }
-                        else
-                        {
-                            Builder.AppendInstruction($"mov dword [ebp + {offset}], eax", $"Initialize {variableName}");
-                        }
-                    }
-                }
+                GenerateDeclaration(decl, context);
                 break;
             case ExpressionStatementNode exprStmt: ExpressionGenerator.GenerateExpression(exprStmt.Expression, context); break;
             default: throw new NotImplementedException($"Stmt: {statement.GetType().Name}");
+        }
+    }
+
+    private void GenerateDeclaration(DeclarationStatementNode decl, AnalysisContext context)
+    {
+        var variableName = decl.Identifier.Value;
+        var varTypeFqn = context.Symbols.GetSymbolType(variableName);
+        context.Symbols.TryGetSymbol(variableName, out var offset, out _, out _);
+
+        // If it's a struct with a vtable, initialize its vptr
+        if (TypeManager.IsStruct(varTypeFqn) && TypeManager.HasVTable(varTypeFqn))
+        {
+            var structDef = TypeManager.FindStruct(varTypeFqn);
+            var mangledStructName = TypeManager.Mangle(structDef);
+            Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of object '{variableName}'");
+            Builder.AppendInstruction($"mov dword [eax], _vtable_{mangledStructName}", "Set vtable pointer");
+        }
+
+        if (decl.Initializer == null) return;
+
+        if (decl.Initializer is InitializerListExpressionNode initList)
+        {
+            var structDef = TypeManager.FindStruct(varTypeFqn)
+                ?? throw new InvalidOperationException($"Could not find struct definition for initializer list type '{varTypeFqn}'.");
+
+            if (initList.Values.Count > structDef.Members.Count)
+                throw new InvalidOperationException($"Too many values in initializer list for struct '{structDef.Name}'.");
+
+            var allMembers = TypeManager.GetAllMembers(varTypeFqn, context.CompilationUnit);
+
+            for (int j = 0; j < initList.Values.Count; j++)
+            {
+                var (memberName, memberType, memberOffset, _) = allMembers[j];
+                var valueExpr = initList.Values[j];
+                var memberSize = TypeManager.GetSizeOfType(memberType, context.CompilationUnit);
+                var totalOffset = offset + memberOffset;
+
+                ExpressionGenerator.GenerateExpression(valueExpr, context);
+                if (memberSize == 1) Builder.AppendInstruction($"mov byte [ebp + {totalOffset}], al", $"Init member {memberName}");
+                else Builder.AppendInstruction($"mov dword [ebp + {totalOffset}], eax", $"Init member {memberName}");
+            }
+        }
+        else // Simple variable initialization (e.g., int x = 5; or const int x = 5;)
+        {
+            ExpressionGenerator.GenerateExpression(decl.Initializer, context); // Value to assign is in EAX
+
+            if (TypeManager.GetSizeOfType(varTypeFqn, context.CompilationUnit) == 1)
+            {
+                Builder.AppendInstruction($"mov byte [ebp + {offset}], al", $"Initialize {variableName}");
+            }
+            else
+            {
+                Builder.AppendInstruction($"mov dword [ebp + {offset}], eax", $"Initialize {variableName}");
+            }
         }
     }
 

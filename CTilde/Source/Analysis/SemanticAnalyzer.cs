@@ -5,12 +5,16 @@ namespace CTilde;
 
 public class SemanticAnalyzer
 {
-    private readonly TypeManager _typeManager;
+    private readonly TypeRepository _typeRepository;
+    private readonly TypeResolver _typeResolver;
+    private readonly FunctionResolver _functionResolver;
     private readonly MemoryLayoutManager _memoryLayoutManager;
 
-    public SemanticAnalyzer(TypeManager typeManager, MemoryLayoutManager memoryLayoutManager)
+    public SemanticAnalyzer(TypeRepository typeRepository, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager)
     {
-        _typeManager = typeManager;
+        _typeRepository = typeRepository;
+        _typeResolver = typeResolver;
+        _functionResolver = functionResolver;
         _memoryLayoutManager = memoryLayoutManager;
     }
 
@@ -34,21 +38,21 @@ public class SemanticAnalyzer
 
     public string AnalyzeFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
     {
-        var returnTypeNameRaw = TypeManager.GetTypeName(func.ReturnType, func.ReturnPointerLevel);
+        var returnTypeNameRaw = TypeRepository.GetTypeNameFromToken(func.ReturnType, func.ReturnPointerLevel);
         string resolvedReturnName;
 
         if (func.ReturnType.Type != TokenType.Keyword && !returnTypeNameRaw.StartsWith("void"))
         {
             string baseReturnName = returnTypeNameRaw.TrimEnd('*');
             string pointerSuffix = new string('*', returnTypeNameRaw.Length - baseReturnName.Length);
-            resolvedReturnName = _typeManager.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + pointerSuffix;
+            resolvedReturnName = _typeResolver.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + pointerSuffix;
         }
         else
         {
             resolvedReturnName = returnTypeNameRaw;
         }
 
-        if (_typeManager.IsStruct(resolvedReturnName) && !resolvedReturnName.EndsWith("*"))
+        if (_typeRepository.IsStruct(resolvedReturnName) && !resolvedReturnName.EndsWith("*"))
         {
             // A function returning a struct by value actually returns a pointer
             // to a caller-provided location. The type of the expression is a pointer.
@@ -62,12 +66,12 @@ public class SemanticAnalyzer
     {
         var leftTypeFqn = AnalyzeExpressionType(bin.Left, context);
 
-        if (_typeManager.IsStruct(leftTypeFqn))
+        if (_typeRepository.IsStruct(leftTypeFqn))
         {
             try
             {
                 var opName = $"operator_{NameMangler.MangleOperator(bin.Operator.Value)}";
-                var overload = _typeManager.FindMethod(leftTypeFqn, opName);
+                var overload = _functionResolver.FindMethod(leftTypeFqn, opName);
 
                 if (overload != null)
                 {
@@ -88,7 +92,7 @@ public class SemanticAnalyzer
     private string AnalyzeNewExpression(NewExpressionNode n, AnalysisContext context)
     {
         // A new expression always returns a pointer to the type.
-        var typeName = _typeManager.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var typeName = _typeResolver.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
         return typeName + "*";
     }
 
@@ -101,7 +105,7 @@ public class SemanticAnalyzer
         }
 
         // 2. Try resolving as an unqualified enum member (e.g., `KEY_D`).
-        var unqualifiedEnumValue = _typeManager.ResolveUnqualifiedEnumMember(v.Identifier.Value, context.CompilationUnit, context.CurrentFunction.Namespace);
+        var unqualifiedEnumValue = _functionResolver.ResolveUnqualifiedEnumMember(v.Identifier.Value, context.CompilationUnit, context.CurrentFunction.Namespace);
         if (unqualifiedEnumValue.HasValue)
         {
             return "int";
@@ -144,7 +148,7 @@ public class SemanticAnalyzer
                 return operandType + "*";
             }
             // Taking address of a value type (e.g. `string s; &s;` -> `string*`)
-            return _typeManager.IsStruct(operandType) ? operandType + "*" : operandType;
+            return _typeRepository.IsStruct(operandType) ? operandType + "*" : operandType;
         }
 
         if (u.Operator.Type == TokenType.Star) // Dereference operator
@@ -167,25 +171,15 @@ public class SemanticAnalyzer
         if (call.Callee is MemberAccessExpressionNode callMemberAccess) // Method call: myText.draw()
         {
             var ownerTypeName = AnalyzeExpressionType(callMemberAccess.Left, context).TrimEnd('*');
-            var (ownerStruct, _) = _typeManager.GetStructTypeFromFullName(ownerTypeName);
-            func = _typeManager.ResolveMethod(ownerStruct, callMemberAccess.Member.Value);
+            var ownerStruct = _typeRepository.FindStruct(ownerTypeName) ?? throw new InvalidOperationException($"Could not find struct definition for '{ownerTypeName}'.");
+            func = _functionResolver.ResolveMethod(ownerStruct, callMemberAccess.Member.Value);
         }
         else // Global or namespaced function call: DrawText(), rl::DrawText()
         {
-            func = _typeManager.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
+            func = _functionResolver.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
         }
 
         return AnalyzeFunctionReturnType(func, context);
-    }
-
-    private string ResolveQualifier(ExpressionNode expr)
-    {
-        return expr switch
-        {
-            VariableExpressionNode v => v.Identifier.Value,
-            QualifiedAccessExpressionNode q => $"{ResolveQualifier(q.Left)}::{q.Member.Value}",
-            _ => throw new InvalidOperationException($"Cannot resolve qualifier from expression of type {expr.GetType().Name}")
-        };
     }
 
     private string AnalyzeQualifiedAccessExpression(QualifiedAccessExpressionNode q, AnalysisContext context)
@@ -194,13 +188,13 @@ public class SemanticAnalyzer
         // `q.Left` resolves to the enum type (e.g., `raylib::KeyboardKey`)
         // `q.Member` resolves to the enum member (e.g., `KEY_D`)
 
-        string potentialEnumTypeName = ResolveQualifier(q.Left);
+        string potentialEnumTypeName = TypeResolver.ResolveQualifier(q.Left);
         string memberName = q.Member.Value;
 
-        string? enumTypeFQN = _typeManager.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction.Namespace, context.CompilationUnit);
+        string? enumTypeFQN = _typeResolver.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction.Namespace, context.CompilationUnit);
         if (enumTypeFQN != null)
         {
-            if (_typeManager.GetEnumValue(enumTypeFQN, memberName).HasValue)
+            if (_functionResolver.GetEnumValue(enumTypeFQN, memberName).HasValue)
             {
                 return "int"; // Enum members are integers.
             }

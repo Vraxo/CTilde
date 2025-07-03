@@ -17,6 +17,15 @@ public class ExpressionGenerator
         _context = context;
     }
 
+    private string MangleOperator(string op)
+    {
+        return op switch
+        {
+            "+" => "plus",
+            _ => throw new NotImplementedException($"Operator mangling for '{op}' is not implemented.")
+        };
+    }
+
     public int PushArgument(ExpressionNode arg, AnalysisContext context)
     {
         var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, context);
@@ -293,18 +302,38 @@ public class ExpressionGenerator
     {
         var leftTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(binExpr.Left, context);
 
-        var opName = $"operator{binExpr.Operator.Value}";
-        var overload = TypeManager.FindMethod(leftTypeFqn, opName);
-
-        if (overload != null)
+        if (TypeManager.IsStruct(leftTypeFqn))
         {
-            // The argument to the operator should be a pointer to the right-hand side.
-            var argExpr = new UnaryExpressionNode(new Token(TokenType.Ampersand, "&"), binExpr.Right);
+            var opName = $"operator_{MangleOperator(binExpr.Operator.Value)}";
+            var overload = TypeManager.FindMethod(leftTypeFqn, opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
 
-            GenerateCallExpression(new CallExpressionNode(
-                new MemberAccessExpressionNode(binExpr.Left, new Token(TokenType.Dot, "."), new Token(TokenType.Identifier, opName)),
-                new List<ExpressionNode> { argExpr }
-            ), context);
+            var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(overload, context);
+            bool returnsStruct = TypeManager.IsStruct(returnType);
+            int totalArgSize = 0;
+
+            if (returnsStruct)
+            {
+                var size = TypeManager.GetSizeOfType(returnType, context.CompilationUnit);
+                Builder.AppendInstruction($"sub esp, {size}", "Make space for op+ return value");
+                Builder.AppendInstruction("push esp", "Push hidden return value pointer");
+                totalArgSize += 4;
+            }
+
+            GenerateExpression(binExpr.Right, context);
+            Builder.AppendInstruction("push eax", "Push right operand (pointer)");
+            totalArgSize += 4;
+
+            GenerateLValueAddress(binExpr.Left, context);
+            Builder.AppendInstruction("push eax", "Push 'this' pointer");
+            totalArgSize += 4;
+
+            Builder.AppendInstruction($"call {TypeManager.Mangle(overload)}");
+            Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up op+ args");
+
+            if (returnsStruct)
+            {
+                Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
+            }
         }
         else
         {

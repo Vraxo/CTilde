@@ -12,6 +12,15 @@ public class SemanticAnalyzer
         _typeManager = typeManager;
     }
 
+    private string MangleOperator(string op)
+    {
+        return op switch
+        {
+            "+" => "plus",
+            _ => throw new NotImplementedException($"Operator mangling for '{op}' is not implemented.")
+        };
+    }
+
     public string AnalyzeExpressionType(ExpressionNode expr, AnalysisContext context)
     {
         return expr switch
@@ -22,7 +31,7 @@ public class SemanticAnalyzer
             AssignmentExpressionNode a => AnalyzeExpressionType(a.Left, context), // Type of assignment is type of l-value
             MemberAccessExpressionNode ma => AnalyzeMemberAccessExpression(ma, context),
             UnaryExpressionNode u => AnalyzeUnaryExpression(u, context),
-            CallExpressionNode c => AnalyzeCallExpression(c, context), // MODIFIED
+            CallExpressionNode c => AnalyzeCallExpression(c, context),
             QualifiedAccessExpressionNode q => AnalyzeQualifiedAccessExpression(q, context),
             NewExpressionNode n => AnalyzeNewExpression(n, context),
             BinaryExpressionNode bin => AnalyzeBinaryExpression(bin, context),
@@ -47,13 +56,28 @@ public class SemanticAnalyzer
     private string AnalyzeBinaryExpression(BinaryExpressionNode bin, AnalysisContext context)
     {
         var leftTypeFqn = AnalyzeExpressionType(bin.Left, context);
-        var overload = _typeManager.FindMethod(leftTypeFqn, $"operator{bin.Operator.Value}");
 
-        if (overload != null)
+        if (_typeManager.IsStruct(leftTypeFqn))
         {
-            return AnalyzeFunctionReturnType(overload, context);
+            try
+            {
+                var opName = $"operator_{MangleOperator(bin.Operator.Value)}";
+                var overload = _typeManager.FindMethod(leftTypeFqn, opName);
+
+                if (overload != null)
+                {
+                    return AnalyzeFunctionReturnType(overload, context);
+                }
+            }
+            catch (NotImplementedException)
+            {
+                // This operator is not overloadable.
+            }
+            throw new InvalidOperationException($"Operator '{bin.Operator.Value}' is not defined for type '{leftTypeFqn}'.");
         }
-        return "int"; // Default for primitive binary ops
+
+        // For primitive types like int, the result is always int.
+        return "int";
     }
 
     private string AnalyzeNewExpression(NewExpressionNode n, AnalysisContext context)

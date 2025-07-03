@@ -29,7 +29,38 @@ public class StatementGenerator
             case DeclarationStatementNode decl:
                 GenerateDeclaration(decl, context);
                 break;
-            case ExpressionStatementNode exprStmt: ExpressionGenerator.GenerateExpression(exprStmt.Expression, context); break;
+            case ExpressionStatementNode exprStmt:
+                ExpressionGenerator.GenerateExpression(exprStmt.Expression, context);
+                // Check if the expression statement was a function call that returned a temporary struct
+                var exprType = _context.SemanticAnalyzer.AnalyzeExpressionType(exprStmt.Expression, context);
+                if (_context.TypeRepository.IsStruct(exprType) && !exprType.EndsWith("*"))
+                {
+                    if (exprStmt.Expression is CallExpressionNode or BinaryExpressionNode)
+                    {
+                        // The temporary is on the stack but its value is unused. We must destroy it.
+                        var tempDtor = FunctionResolver.FindDestructor(exprType);
+                        if (tempDtor != null)
+                        {
+                            Builder.AppendInstruction(null, "Destroying temporary from expression statement");
+                            Builder.AppendInstruction("lea eax, [esp]"); // Address of temporary is at ESP
+                            Builder.AppendInstruction("push eax"); // Push 'this'
+                            if (tempDtor.IsVirtual)
+                            {
+                                Builder.AppendInstruction("mov eax, [eax]", "Get vtable ptr");
+                                Builder.AppendInstruction("mov eax, [eax]", "Get dtor from vtable[0]");
+                                Builder.AppendInstruction("call eax");
+                            }
+                            else
+                            {
+                                Builder.AppendInstruction($"call {NameMangler.Mangle(tempDtor)}");
+                            }
+                            Builder.AppendInstruction("add esp, 4"); // Clean up 'this'
+                        }
+                        var size = MemoryLayoutManager.GetSizeOfType(exprType, context.CompilationUnit);
+                        Builder.AppendInstruction($"add esp, {size}", "Clean up temporary return object from stack");
+                    }
+                }
+                break;
             default: throw new NotImplementedException($"Stmt: {statement.GetType().Name}");
         }
     }
@@ -143,15 +174,15 @@ public class StatementGenerator
                     int totalArgSize;
                     if (takeAddressOfInitializer)
                     {
-                        // The initializer expression (e.g., an operator+ call or another variable) 
-                        // returns a struct. GenerateExpression correctly places the address of this 
-                        // struct (whether a temporary or existing var) into EAX.
+                        // We need the address of the initializer object. `GenerateExpression` on a struct-type expression gives its address.
                         ExpressionGenerator.GenerateExpression(decl.Initializer, context);
-                        Builder.AppendInstruction("push eax");
+                        Builder.AppendInstruction("push eax", "Push pointer to initializer object for copy ctor");
                         totalArgSize = 4;
                     }
                     else
                     {
+                        // The constructor takes the initializer by value (either a primitive/pointer, or a struct).
+                        // PushArgument handles both cases correctly (pushing value, or member-wise copy).
                         totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
                     }
 
@@ -161,6 +192,32 @@ public class StatementGenerator
 
                     Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
                     Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
+
+                    // CRITICAL FIX: If the initializer created a temporary, it's still on the stack. Destroy it.
+                    if (decl.Initializer is CallExpressionNode or BinaryExpressionNode &&
+                        _context.TypeRepository.IsStruct(initializerType) && !initializerType.EndsWith("*"))
+                    {
+                        var tempDtor = FunctionResolver.FindDestructor(initializerType);
+                        if (tempDtor != null)
+                        {
+                            Builder.AppendInstruction(null, "Destroying temporary from initialization");
+                            Builder.AppendInstruction("lea eax, [esp]"); // Address of temporary is now at ESP
+                            Builder.AppendInstruction("push eax"); // Push 'this'
+                            if (tempDtor.IsVirtual)
+                            {
+                                Builder.AppendInstruction("mov eax, [eax]", "Get vtable ptr");
+                                Builder.AppendInstruction("mov eax, [eax]", "Get dtor from vtable[0]");
+                                Builder.AppendInstruction("call eax");
+                            }
+                            else
+                            {
+                                Builder.AppendInstruction($"call {NameMangler.Mangle(tempDtor)}");
+                            }
+                            Builder.AppendInstruction("add esp, 4"); // Clean up 'this'
+                        }
+                        var size = MemoryLayoutManager.GetSizeOfType(initializerType, context.CompilationUnit);
+                        Builder.AppendInstruction($"add esp, {size}", "Clean up temporary return object from stack");
+                    }
                 }
             }
         }

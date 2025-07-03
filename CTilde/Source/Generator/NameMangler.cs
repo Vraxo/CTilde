@@ -7,9 +7,31 @@ public static class NameMangler
         return MangleName(f.Namespace, f.OwnerStructName, f.Name);
     }
 
+    private static string MangleType(Token type, int pointerLevel)
+    {
+        var typeName = type.Value;
+        string mangled;
+        if (type.Type == TokenType.Keyword)
+        {
+            mangled = typeName[0].ToString();
+        }
+        else // Identifier, could be qualified
+        {
+            var cleanName = typeName.Replace("::", "_");
+            mangled = $"{cleanName.Length}{cleanName}";
+        }
+
+        for (int i = 0; i < pointerLevel; i++)
+        {
+            mangled = "p" + mangled;
+        }
+        return mangled;
+    }
+
     public static string Mangle(ConstructorDeclarationNode c)
     {
-        return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor{c.Parameters.Count}");
+        var paramSignature = string.Concat(c.Parameters.Select(p => MangleType(p.Type, p.PointerLevel)));
+        return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor_{paramSignature}");
     }
 
     public static string Mangle(DestructorDeclarationNode d)
@@ -33,6 +55,10 @@ public static class NameMangler
 
     private static string MangleName(string? ns, string? owner, string name)
     {
-        return $"_{ns?.Replace("::", "_")}_{owner}_{name}".Replace("___", "_").Replace("__", "_");
+        var parts = new List<string?> { ns, owner, name }
+            .Where(p => !string.IsNullOrEmpty(p))
+            .Select(p => p!.Replace("::", "_"));
+
+        return $"_{string.Join("_", parts)}";
     }
 }

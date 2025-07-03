@@ -388,6 +388,20 @@ public class SemanticAnalyzer
     private string AnalyzeBinaryExpression(BinaryExpressionNode bin, AnalysisContext context)
     {
         var leftTypeFqn = AnalyzeExpressionType(bin.Left, context);
+        var rightTypeFqn = AnalyzeExpressionType(bin.Right, context);
+
+        // Handle pointer arithmetic
+        if (bin.Operator.Type is TokenType.Plus or TokenType.Minus)
+        {
+            if (leftTypeFqn.EndsWith("*") && rightTypeFqn == "int")
+            {
+                return leftTypeFqn; // e.g., char* + int -> char*
+            }
+            if (leftTypeFqn == "int" && rightTypeFqn.EndsWith("*") && bin.Operator.Type == TokenType.Plus)
+            {
+                return rightTypeFqn; // e.g., int + char* -> char*
+            }
+        }
 
         if (_typeRepository.IsStruct(leftTypeFqn))
         {
@@ -408,7 +422,7 @@ public class SemanticAnalyzer
             throw new InvalidOperationException($"Operator '{bin.Operator.Value}' is not defined for type '{leftTypeFqn}'.");
         }
 
-        // For primitive types like int, the result is always int.
+        // For other primitive operations (int + int, comparisons, etc.), the result is always int.
         return "int";
     }
 
@@ -471,7 +485,7 @@ public class SemanticAnalyzer
                 return operandType + "*";
             }
             // Taking address of a value type (e.g. `string s; &s;` -> `string*`)
-            return _typeRepository.IsStruct(operandType) ? operandType + "*" : operandType;
+            return operandType + "*";
         }
 
         if (u.Operator.Type == TokenType.Star) // Dereference operator
@@ -890,7 +904,20 @@ public class DeclarationGenerator
 
     public void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
-        var symbols = new SymbolTable(function, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
+        var tempContext = new AnalysisContext(null, unit, function);
+        var returnTypeFqn = SemanticAnalyzer.AnalyzeFunctionReturnType(function, tempContext);
+        var returnsStructByValue = TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*");
+
+        var parametersWithRetPtr = new List<ParameterNode>(function.Parameters);
+        if (returnsStructByValue)
+        {
+            var retPtrParam = new ParameterNode(new Token(TokenType.Keyword, "void"), 1, new Token(TokenType.Identifier, "__ret_ptr"));
+            parametersWithRetPtr.Add(retPtrParam);
+        }
+
+        var functionForSymbols = function with { Parameters = parametersWithRetPtr };
+        var symbols = new SymbolTable(functionForSymbols, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
+
         var context = new AnalysisContext(symbols, unit, function);
         var destructibleLocals = symbols.GetDestructibleLocals(FunctionResolver);
 
@@ -1263,7 +1290,7 @@ public class ExpressionGenerator
 
         if (returnsStructByValue)
         {
-            Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
+            Builder.AppendInstruction("lea eax, [esp]", "Get address of hidden return temporary");
         }
     }
 
@@ -1299,15 +1326,16 @@ public class ExpressionGenerator
 
             if (returnsStructByValue)
             {
-                Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
+                Builder.AppendInstruction("lea eax, [esp]", "Get address of hidden return temporary");
             }
         }
         else
         {
-            GenerateExpression(binExpr.Right, context);
-            Builder.AppendInstruction("push eax");
             GenerateExpression(binExpr.Left, context);
-            Builder.AppendInstruction("pop ecx");
+            Builder.AppendInstruction("push eax");
+            GenerateExpression(binExpr.Right, context);
+            Builder.AppendInstruction("mov ecx, eax");
+            Builder.AppendInstruction("pop eax");
 
             switch (binExpr.Operator.Type)
             {
@@ -1396,48 +1424,60 @@ public class FasmWriter
         builder.AppendDirective("section '.idata' import data readable");
         builder.AppendBlankLine();
 
-        var libraries = new Dictionary<string, List<string>>
+        var libraries = new Dictionary<string, HashSet<string>>
         {
-            { "kernel32.dll", new List<string> { "ExitProcess" } },
-            { "msvcrt.dll", new List<string> { "printf", "malloc", "free", "strlen", "strcpy", "memcpy" } } // MODIFIED
+            { "kernel32.dll", new HashSet<string> { "ExitProcess" } },
+            { "msvcrt.dll", new HashSet<string> { "printf", "malloc", "free", "strlen", "strcpy", "memcpy" } }
         };
 
+        // Register all libraries from #import directives
         foreach (var import in program.Imports)
         {
-            if (!libraries.ContainsKey(import.LibraryName)) libraries[import.LibraryName] = new List<string>();
+            if (!libraries.ContainsKey(import.LibraryName))
+            {
+                libraries[import.LibraryName] = new HashSet<string>();
+            }
         }
 
-        foreach (var funcName in externalFunctions)
+        // Get all functions that are already assigned to a default library
+        var claimedFunctions = new HashSet<string>(libraries.SelectMany(kvp => kvp.Value));
+
+        // Distribute all other external functions among the imported libraries
+        foreach (var funcName in externalFunctions.Except(claimedFunctions))
         {
-            bool found = false;
-            foreach (var import in program.Imports)
+            // Assign the function to the first non-standard DLL found in the #import list.
+            var ownerLib = program.Imports
+                .Select(i => i.LibraryName)
+                .FirstOrDefault(lib => lib != "kernel32.dll" && lib != "msvcrt.dll");
+
+            if (ownerLib != null)
             {
-                if (import.LibraryName != "kernel32.dll" && import.LibraryName != "msvcrt.dll")
-                {
-                    libraries[import.LibraryName].Add(funcName);
-                    found = true;
-                    break;
-                }
+                libraries[ownerLib].Add(funcName);
             }
-            if (!found && funcName != "printf")
+            else // Fallback for functions if only standard libs are imported (e.g. user32 functions)
             {
-                if (!libraries.ContainsKey("user32.dll")) libraries["user32.dll"] = new List<string>();
-                if (!libraries["user32.dll"].Contains(funcName)) libraries["user32.dll"].Add(funcName);
+                if (!libraries.ContainsKey("user32.dll")) libraries["user32.dll"] = new HashSet<string>();
+                libraries["user32.dll"].Add(funcName);
             }
         }
 
-        var libDefs = libraries.Keys.Select(lib => $"{lib.Split('.')[0]},'{lib}'");
+        // Filter out libraries that have no functions to import
+        var finalLibraries = libraries
+            .Where(kvp => kvp.Value.Any())
+            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value.ToList());
+
+        if (!finalLibraries.Any()) return;
+
+        var libDefs = finalLibraries.Keys.OrderBy(k => k).Select(lib => $"{lib.Split('.')[0]},'{lib}'");
         builder.AppendDirective($"    library {string.Join(", ", libDefs)}");
         builder.AppendBlankLine();
 
-        foreach (var (libName, functions) in libraries)
+        foreach (var (libName, functions) in finalLibraries.OrderBy(kvp => kvp.Key))
         {
-            if (functions.Count > 0)
-            {
-                var libAlias = libName.Split('.')[0];
-                var importDefs = functions.Distinct().Select(f => $"{f},'{f}'");
-                builder.AppendDirective($"    import {libAlias}, {string.Join(", ", importDefs)}");
-            }
+            var libAlias = libName.Split('.')[0];
+            functions.Sort();
+            var importDefs = functions.Select(f => $"{f},'{f}'");
+            builder.AppendDirective($"    import {libAlias}, {string.Join(", ", importDefs)}");
         }
     }
 
@@ -1586,9 +1626,31 @@ public static class NameMangler
         return MangleName(f.Namespace, f.OwnerStructName, f.Name);
     }
 
+    private static string MangleType(Token type, int pointerLevel)
+    {
+        var typeName = type.Value;
+        string mangled;
+        if (type.Type == TokenType.Keyword)
+        {
+            mangled = typeName[0].ToString();
+        }
+        else // Identifier, could be qualified
+        {
+            var cleanName = typeName.Replace("::", "_");
+            mangled = $"{cleanName.Length}{cleanName}";
+        }
+
+        for (int i = 0; i < pointerLevel; i++)
+        {
+            mangled = "p" + mangled;
+        }
+        return mangled;
+    }
+
     public static string Mangle(ConstructorDeclarationNode c)
     {
-        return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor{c.Parameters.Count}");
+        var paramSignature = string.Concat(c.Parameters.Select(p => MangleType(p.Type, p.PointerLevel)));
+        return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor_{paramSignature}");
     }
 
     public static string Mangle(DestructorDeclarationNode d)
@@ -1612,7 +1674,11 @@ public static class NameMangler
 
     private static string MangleName(string? ns, string? owner, string name)
     {
-        return $"_{ns?.Replace("::", "_")}_{owner}_{name}".Replace("___", "_").Replace("__", "_");
+        var parts = new List<string?> { ns, owner, name }
+            .Where(p => !string.IsNullOrEmpty(p))
+            .Select(p => p!.Replace("::", "_"));
+
+        return $"_{string.Join("_", parts)}";
     }
 }
 </file>
@@ -1649,7 +1715,38 @@ public class StatementGenerator
             case DeclarationStatementNode decl:
                 GenerateDeclaration(decl, context);
                 break;
-            case ExpressionStatementNode exprStmt: ExpressionGenerator.GenerateExpression(exprStmt.Expression, context); break;
+            case ExpressionStatementNode exprStmt:
+                ExpressionGenerator.GenerateExpression(exprStmt.Expression, context);
+                // Check if the expression statement was a function call that returned a temporary struct
+                var exprType = _context.SemanticAnalyzer.AnalyzeExpressionType(exprStmt.Expression, context);
+                if (_context.TypeRepository.IsStruct(exprType) && !exprType.EndsWith("*"))
+                {
+                    if (exprStmt.Expression is CallExpressionNode or BinaryExpressionNode)
+                    {
+                        // The temporary is on the stack but its value is unused. We must destroy it.
+                        var tempDtor = FunctionResolver.FindDestructor(exprType);
+                        if (tempDtor != null)
+                        {
+                            Builder.AppendInstruction(null, "Destroying temporary from expression statement");
+                            Builder.AppendInstruction("lea eax, [esp]"); // Address of temporary is at ESP
+                            Builder.AppendInstruction("push eax"); // Push 'this'
+                            if (tempDtor.IsVirtual)
+                            {
+                                Builder.AppendInstruction("mov eax, [eax]", "Get vtable ptr");
+                                Builder.AppendInstruction("mov eax, [eax]", "Get dtor from vtable[0]");
+                                Builder.AppendInstruction("call eax");
+                            }
+                            else
+                            {
+                                Builder.AppendInstruction($"call {NameMangler.Mangle(tempDtor)}");
+                            }
+                            Builder.AppendInstruction("add esp, 4"); // Clean up 'this'
+                        }
+                        var size = MemoryLayoutManager.GetSizeOfType(exprType, context.CompilationUnit);
+                        Builder.AppendInstruction($"add esp, {size}", "Clean up temporary return object from stack");
+                    }
+                }
+                break;
             default: throw new NotImplementedException($"Stmt: {statement.GetType().Name}");
         }
     }
@@ -1760,19 +1857,18 @@ public class StatementGenerator
                         throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
                     }
 
+                    ExpressionGenerator.GenerateExpression(decl.Initializer, context);
                     int totalArgSize;
-                    if (takeAddressOfInitializer)
+
+                    if (takeAddressOfInitializer || (TypeRepository.IsStruct(initializerType) && !initializerType.EndsWith("*")))
                     {
-                        // The initializer expression (e.g., an operator+ call or another variable) 
-                        // returns a struct. GenerateExpression correctly places the address of this 
-                        // struct (whether a temporary or existing var) into EAX.
-                        ExpressionGenerator.GenerateExpression(decl.Initializer, context);
-                        Builder.AppendInstruction("push eax");
+                        Builder.AppendInstruction("push eax"); // Push address of initializer struct
                         totalArgSize = 4;
                     }
                     else
                     {
-                        totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
+                        // PushArgument will have already pushed the value
+                        totalArgSize = MemoryLayoutManager.GetSizeOfType(initializerType, context.CompilationUnit);
                     }
 
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
@@ -1781,6 +1877,32 @@ public class StatementGenerator
 
                     Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
                     Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
+
+                    // CRITICAL FIX: If the initializer created a temporary, it's still on the stack. Destroy it.
+                    if (decl.Initializer is CallExpressionNode or BinaryExpressionNode &&
+                        _context.TypeRepository.IsStruct(initializerType) && !initializerType.EndsWith("*"))
+                    {
+                        var tempDtor = FunctionResolver.FindDestructor(initializerType);
+                        if (tempDtor != null)
+                        {
+                            Builder.AppendInstruction(null, "Destroying temporary from initialization");
+                            Builder.AppendInstruction("lea eax, [esp]"); // Address of temporary is now at ESP
+                            Builder.AppendInstruction("push eax"); // Push 'this'
+                            if (tempDtor.IsVirtual)
+                            {
+                                Builder.AppendInstruction("mov eax, [eax]", "Get vtable ptr");
+                                Builder.AppendInstruction("mov eax, [eax]", "Get dtor from vtable[0]");
+                                Builder.AppendInstruction("call eax");
+                            }
+                            else
+                            {
+                                Builder.AppendInstruction($"call {NameMangler.Mangle(tempDtor)}");
+                            }
+                            Builder.AppendInstruction("add esp, 4"); // Clean up 'this'
+                        }
+                        var size = MemoryLayoutManager.GetSizeOfType(initializerType, context.CompilationUnit);
+                        Builder.AppendInstruction($"add esp, {size}", "Clean up temporary return object from stack");
+                    }
                 }
             }
         }
@@ -1799,10 +1921,9 @@ public class StatementGenerator
         var returnTypeFqn = _context.SemanticAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
         if (TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
-            // Handle return by value for structs (RVO)
             if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");
 
-            // Get the address of the return value object
+            // Get the address of the local object being returned (e.g. &result)
             ExpressionGenerator.GenerateExpression(ret.Expression, context);
             Builder.AppendInstruction("mov esi, eax", "Source address for return value");
 
@@ -1810,13 +1931,27 @@ public class StatementGenerator
             context.Symbols.TryGetSymbol("__ret_ptr", out var retPtrOffset, out _, out _);
             Builder.AppendInstruction($"mov edi, [ebp + {retPtrOffset}]", "Destination address for return value");
 
-            // Copy the struct
-            var size = MemoryLayoutManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
-            Builder.AppendInstruction($"push {size}");
-            Builder.AppendInstruction("push esi");
-            Builder.AppendInstruction("push edi");
-            Builder.AppendInstruction("call [memcpy]");
-            Builder.AppendInstruction("add esp, 12");
+            // Find a copy constructor, e.g. string(string*)
+            var copyCtor = FunctionResolver.FindConstructor(returnTypeFqn, new List<string> { returnTypeFqn + "*" });
+
+            if (copyCtor != null)
+            {
+                Builder.AppendInstruction(null, "Calling copy constructor for return value");
+                Builder.AppendInstruction("push esi", "Push source pointer argument");
+                Builder.AppendInstruction("push edi", "Push destination pointer as 'this'");
+                Builder.AppendInstruction($"call {NameMangler.Mangle(copyCtor)}");
+                Builder.AppendInstruction("add esp, 8", "Clean up copy ctor args");
+            }
+            else
+            {
+                // Fallback to memcpy for POD structs without a copy constructor
+                var size = MemoryLayoutManager.GetSizeOfType(returnTypeFqn, context.CompilationUnit);
+                Builder.AppendInstruction($"push {size}");
+                Builder.AppendInstruction("push esi");
+                Builder.AppendInstruction("push edi");
+                Builder.AppendInstruction("call [memcpy]");
+                Builder.AppendInstruction("add esp, 12");
+            }
         }
         else
         {
@@ -3108,7 +3243,7 @@ public class Tokenizer
 #import "raylib.dll"
 #import "msvcrt.dll"
 #include "raylib.c"
-#include "string.c"
+//#include "string.c"
 #include "position.c"
 #include "text_object.c"
 
@@ -3122,17 +3257,17 @@ int main()
     const int screenHeight = 600;
 
     rl::Color rayWhite = {245, 245, 245, 255};
-    //rl::Color maroon = {190, 33, 55, 255};
-    rl::Color maroon(190, 33, 55, 255);
+    rl::Color maroon = {190, 33, 55, 255};
+    //rl::Color maroon(190, 33, 55, 255);
 
     rl::InitWindow(screenWidth, screenHeight, "Operator Overloading!");
     rl::SetTargetFPS(60);
 
-    string hello = "Hello ";
-    string world = "World!";
-    string message = hello + &world; 
+    //string hello = "Hello ";
+    //string world = "World!";
+    //string message = hello + &world; 
     
-    TextObject myText(150, 275, message.c_str(), 40, maroon);
+    TextObject myText(150, 275, "GO FUCK YOURSELF", 40, maroon);
 
     while (rl::WindowShouldClose() == 0) 
     {
@@ -3276,13 +3411,13 @@ struct Color
     char b;
     char a;
 
-    Color(char r, char g, char b, char a) 
-    {
-        this.r = r;
-        this.g = g;
-        this.b = b;
-        this.a = a;
-    }
+    //Color(char r, char g, char b, char a) 
+    //{
+    //    this.r = r;
+    //    this.g = g;
+    //    this.b = b;
+    //    this.a = a;
+    //}
 };
 
 enum KeyboardKey 
@@ -3297,13 +3432,14 @@ enum KeyboardKey
     KEY_DOWN = 264
 };
 
-void InitWindow(int width, int height, char* title); // MODIFIED
+void InitWindow(int width, int height, char* title);
 void SetTargetFPS(int fps);
 int WindowShouldClose();
 void BeginDrawing();
 void EndDrawing();
 void ClearBackground(Color color);
-void DrawText(char* text, int posX, int posY, int fontSize, Color color); // MODIFIED
+void DrawText(char* text, int posX, int posY, int fontSize, Color color);
+void DrawLine(int startPosX, int startPosY, int endPosX, int endPosY, Color color); // NEW
 void CloseWindow();
 int GetFPS();
 int IsKeyDown(int key);
@@ -3357,6 +3493,7 @@ public:
         
         memcpy(new_buffer, m_data, m_length);
         memcpy(new_buffer + m_length, other->c_str(), other->length());
+        *(new_buffer + new_len) = 0; // BUG FIX: Null-terminate the new buffer
         
         // Create a new string object from our temporary buffer
         string result(new_buffer);
@@ -3388,7 +3525,7 @@ struct TextObject : Position
 {
 private:
     int speed; 
-    string* m_text;
+    char* m_text;
 
 public:
     int fontSize;
@@ -3397,7 +3534,8 @@ public:
     TextObject(int startX, int startY, char* literal, int fSize, Color newColor) // MODIFIED
         : Position(startX, startY)
     {
-        m_text = new string(literal); 
+        //m_text = new string(literal); 
+        m_text = literal;
         fontSize = fSize;
         color = newColor;
         speed = 100; 
@@ -3410,7 +3548,7 @@ public:
 
     void draw() 
     {
-        DrawText(m_text->c_str(), x, y, fontSize, color);
+        DrawText(m_text, x, y, fontSize, color);
     }
     
     void move_right(int deltaTime) 

@@ -58,6 +58,20 @@ public class SemanticAnalyzer
     private string AnalyzeBinaryExpression(BinaryExpressionNode bin, AnalysisContext context)
     {
         var leftTypeFqn = AnalyzeExpressionType(bin.Left, context);
+        var rightTypeFqn = AnalyzeExpressionType(bin.Right, context);
+
+        // Handle pointer arithmetic
+        if (bin.Operator.Type is TokenType.Plus or TokenType.Minus)
+        {
+            if (leftTypeFqn.EndsWith("*") && rightTypeFqn == "int")
+            {
+                return leftTypeFqn; // e.g., char* + int -> char*
+            }
+            if (leftTypeFqn == "int" && rightTypeFqn.EndsWith("*") && bin.Operator.Type == TokenType.Plus)
+            {
+                return rightTypeFqn; // e.g., int + char* -> char*
+            }
+        }
 
         if (_typeRepository.IsStruct(leftTypeFqn))
         {
@@ -78,7 +92,7 @@ public class SemanticAnalyzer
             throw new InvalidOperationException($"Operator '{bin.Operator.Value}' is not defined for type '{leftTypeFqn}'.");
         }
 
-        // For primitive types like int, the result is always int.
+        // For other primitive operations (int + int, comparisons, etc.), the result is always int.
         return "int";
     }
 
@@ -141,7 +155,7 @@ public class SemanticAnalyzer
                 return operandType + "*";
             }
             // Taking address of a value type (e.g. `string s; &s;` -> `string*`)
-            return _typeRepository.IsStruct(operandType) ? operandType + "*" : operandType;
+            return operandType + "*";
         }
 
         if (u.Operator.Type == TokenType.Star) // Dereference operator

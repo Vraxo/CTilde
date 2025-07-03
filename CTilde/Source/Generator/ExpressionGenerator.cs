@@ -299,7 +299,7 @@ public class ExpressionGenerator
 
         if (returnsStructByValue)
         {
-            Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
+            Builder.AppendInstruction("lea eax, [esp]", "Get address of hidden return temporary");
         }
     }
 
@@ -335,15 +335,16 @@ public class ExpressionGenerator
 
             if (returnsStructByValue)
             {
-                Builder.AppendInstruction("mov eax, [esp]", "Get hidden return ptr back into eax");
+                Builder.AppendInstruction("lea eax, [esp]", "Get address of hidden return temporary");
             }
         }
         else
         {
-            GenerateExpression(binExpr.Right, context);
-            Builder.AppendInstruction("push eax");
             GenerateExpression(binExpr.Left, context);
-            Builder.AppendInstruction("pop ecx");
+            Builder.AppendInstruction("push eax");
+            GenerateExpression(binExpr.Right, context);
+            Builder.AppendInstruction("mov ecx, eax");
+            Builder.AppendInstruction("pop eax");
 
             switch (binExpr.Operator.Type)
             {

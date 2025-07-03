@@ -49,7 +49,7 @@ public class FasmWriter
         var libraries = new Dictionary<string, List<string>>
         {
             { "kernel32.dll", new List<string> { "ExitProcess" } },
-            { "msvcrt.dll", new List<string> { "printf" } }
+            { "msvcrt.dll", new List<string> { "printf", "malloc", "free" } } // MODIFIED
         };
 
         foreach (var import in program.Imports)

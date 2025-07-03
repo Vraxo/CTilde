@@ -33,7 +33,7 @@ public enum TokenType
     Colon,
     DoubleColon,
     Enum,
-    Tilde // NEW
+    Tilde
 }
 
 public record Token(TokenType Type, string Value);
@@ -57,7 +57,9 @@ public class Tokenizer
         "const",
         "enum",
         "virtual",
-        "override"
+        "override",
+        "new",      // NEW
+        "delete"    // NEW
     ];
 
     public static List<Token> Tokenize(string input)
@@ -100,7 +102,7 @@ public class Tokenizer
 
             switch (c)
             {
-                case '~': tokens.Add(new(TokenType.Tilde, "~")); i++; continue; // NEW
+                case '~': tokens.Add(new(TokenType.Tilde, "~")); i++; continue;
                 case '#': tokens.Add(new(TokenType.Hash, "#")); i++; continue;
                 case '.': tokens.Add(new(TokenType.Dot, ".")); i++; continue;
                 case ':':

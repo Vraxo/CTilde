@@ -23,12 +23,43 @@ public class StatementGenerator
             case BlockStatementNode block: foreach (var s in block.Statements) GenerateStatement(s, context); break;
             case WhileStatementNode w: GenerateWhile(w, context); break;
             case IfStatementNode i: GenerateIf(i, context); break;
+            case DeleteStatementNode d: GenerateDelete(d, context); break;
             case DeclarationStatementNode decl:
                 GenerateDeclaration(decl, context);
                 break;
             case ExpressionStatementNode exprStmt: ExpressionGenerator.GenerateExpression(exprStmt.Expression, context); break;
             default: throw new NotImplementedException($"Stmt: {statement.GetType().Name}");
         }
+    }
+
+    private void GenerateDelete(DeleteStatementNode deleteNode, AnalysisContext context)
+    {
+        ExpressionGenerator.GenerateExpression(deleteNode.Expression, context);
+        Builder.AppendInstruction("mov edi, eax", "Save pointer to be deleted in edi");
+        Builder.AppendInstruction("push edi", "Push 'this' pointer for destructor call");
+
+        var pointerType = _context.SemanticAnalyzer.AnalyzeExpressionType(deleteNode.Expression, context);
+        var objectType = pointerType.TrimEnd('*');
+        var dtor = TypeManager.FindDestructor(objectType);
+
+        if (dtor != null)
+        {
+            if (dtor.IsVirtual)
+            {
+                Builder.AppendInstruction("mov eax, [edi]", "Get vtable pointer from object");
+                Builder.AppendInstruction("mov eax, [eax]", "Get destructor from vtable[0]");
+                Builder.AppendInstruction("call eax");
+            }
+            else
+            {
+                Builder.AppendInstruction($"call {TypeManager.Mangle(dtor)}");
+            }
+        }
+
+        Builder.AppendInstruction("add esp, 4", "Clean up 'this' from dtor call");
+        Builder.AppendInstruction("push edi", "Push pointer for free()");
+        Builder.AppendInstruction("call [free]");
+        Builder.AppendInstruction("add esp, 4", "Clean up pointer from free() call");
     }
 
     private void GenerateDeclaration(DeclarationStatementNode decl, AnalysisContext context)

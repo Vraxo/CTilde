@@ -71,7 +71,7 @@ public class ExpressionGenerator
             }
             catch (InvalidOperationException) { /* Fall through */ }
         }
-        throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'");
+        throw new InvalidOperationException($"Undefined variable '{varExpr.Identifier.Value}'.");
     }
 
     private void GenerateLValueForMemberAccess(MemberAccessExpressionNode memberAccess, AnalysisContext context)
@@ -99,8 +99,43 @@ public class ExpressionGenerator
             case BinaryExpressionNode binExpr: GenerateBinaryExpression(binExpr, context); break;
             case CallExpressionNode callExpr: GenerateCallExpression(callExpr, context); break;
             case QualifiedAccessExpressionNode qNode: GenerateQualifiedAccessExpression(qNode, context); break;
+            case NewExpressionNode n: GenerateNewExpression(n, context); break;
             default: throw new NotImplementedException($"Expr: {expression.GetType().Name}");
         }
+    }
+
+    private void GenerateNewExpression(NewExpressionNode n, AnalysisContext context)
+    {
+        var typeFqn = TypeManager.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var size = TypeManager.GetSizeOfType(typeFqn, context.CompilationUnit);
+
+        Builder.AppendInstruction($"push {size}", "Push size for malloc");
+        Builder.AppendInstruction("call [malloc]");
+        Builder.AppendInstruction("add esp, 4", "Clean up malloc arg");
+        Builder.AppendInstruction("mov edi, eax", "Save new'd pointer in edi");
+
+        var ctor = TypeManager.FindConstructor(typeFqn, n.Arguments.Count) ?? throw new InvalidOperationException($"No matching constructor for 'new {typeFqn}'");
+
+        if (TypeManager.HasVTable(typeFqn))
+        {
+            var structDef = TypeManager.FindStruct(typeFqn);
+            var vtableLabel = TypeManager.GetVTableLabel(structDef);
+            Builder.AppendInstruction($"mov dword [edi], {vtableLabel}", "Set vtable pointer on heap object");
+        }
+
+        int totalArgSize = 0;
+        foreach (var arg in n.Arguments.AsEnumerable().Reverse())
+        {
+            totalArgSize += PushArgument(arg, context);
+        }
+
+        Builder.AppendInstruction("push edi", "Push 'this' pointer for constructor");
+        totalArgSize += 4;
+
+        Builder.AppendInstruction($"call {TypeManager.Mangle(ctor)}");
+        Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
+
+        Builder.AppendInstruction("mov eax, edi", "Return pointer to new object in eax");
     }
 
     private void GenerateIntegerLiteral(IntegerLiteralNode literal) => Builder.AppendInstruction($"mov eax, {literal.Value}");

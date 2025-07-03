@@ -430,6 +430,7 @@ public class Parser
                 case "return": return ParseReturnStatement();
                 case "if": return ParseIfStatement();
                 case "while": return ParseWhileStatement();
+                case "delete": return ParseDeleteStatement(); // NEW
                 case "const":
                 case "int":
                 case "char":
@@ -457,6 +458,14 @@ public class Parser
         var expression = ParseExpression();
         Eat(TokenType.Semicolon);
         return new ExpressionStatementNode(expression);
+    }
+
+    private DeleteStatementNode ParseDeleteStatement()
+    {
+        Eat(TokenType.Keyword); // delete
+        var expr = ParseExpression();
+        Eat(TokenType.Semicolon);
+        return new DeleteStatementNode(expr);
     }
 
     private IfStatementNode ParseIfStatement()
@@ -612,12 +621,33 @@ public class Parser
 
     private ExpressionNode ParseUnaryExpression()
     {
+        if (Current.Type == TokenType.Keyword && Current.Value == "new")
+        {
+            return ParseNewExpression();
+        }
         if (Current.Type is TokenType.Minus or TokenType.Plus or TokenType.Star or TokenType.Ampersand)
         {
             var op = Current; _position++;
             return new UnaryExpressionNode(op, ParseUnaryExpression());
         }
         return ParsePostfixExpression();
+    }
+
+    private NewExpressionNode ParseNewExpression()
+    {
+        Eat(TokenType.Keyword); // new
+        var typeToken = Eat(TokenType.Identifier);
+
+        Eat(TokenType.LeftParen);
+        var arguments = new List<ExpressionNode>();
+        if (Current.Type != TokenType.RightParen)
+        {
+            do { arguments.Add(ParseExpression()); }
+            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+        }
+        Eat(TokenType.RightParen);
+
+        return new NewExpressionNode(typeToken, arguments);
     }
 
     private ExpressionNode ParsePostfixExpression()

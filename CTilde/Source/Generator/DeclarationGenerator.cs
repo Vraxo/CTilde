@@ -9,7 +9,7 @@ public class DeclarationGenerator
     private FunctionResolver FunctionResolver => _context.FunctionResolver;
     private VTableManager VTableManager => _context.VTableManager;
     private MemoryLayoutManager MemoryLayoutManager => _context.MemoryLayoutManager;
-    private SemanticAnalyzer SemanticAnalyzer => _context.SemanticAnalyzer;
+    private ExpressionTypeAnalyzer ExpressionTypeAnalyzer => _context.ExpressionTypeAnalyzer;
     private StatementGenerator StatementGenerator => _context.StatementGenerator;
     private ExpressionGenerator ExpressionGenerator => _context.ExpressionGenerator;
 
@@ -37,7 +37,7 @@ public class DeclarationGenerator
             var ownerStruct = TypeRepository.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
 
             var argTypes = ctor.Initializer.Arguments
-                .Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, analysisContext))
+                .Select(arg => ExpressionTypeAnalyzer.AnalyzeExpressionType(arg, analysisContext))
                 .ToList();
             var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, ownerStruct.BaseStructName!, -1, -1));
             var baseFqn = TypeResolver.ResolveType(baseTypeNode, ownerStruct.Namespace, unit);
@@ -84,7 +84,7 @@ public class DeclarationGenerator
     public void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
         var tempContext = new AnalysisContext(null, unit, function);
-        var returnTypeFqn = SemanticAnalyzer.AnalyzeFunctionReturnType(function, tempContext);
+        var returnTypeFqn = ExpressionTypeAnalyzer.AnalyzeFunctionReturnType(function, tempContext);
         var returnsStructByValue = TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*");
 
         var parametersWithRetPtr = new List<ParameterNode>(function.Parameters);

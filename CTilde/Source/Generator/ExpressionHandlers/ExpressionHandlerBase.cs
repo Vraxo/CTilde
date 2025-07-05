@@ -13,7 +13,7 @@ public abstract class ExpressionHandlerBase : IExpressionHandler
     protected FunctionResolver FunctionResolver => CodeGenerator.FunctionResolver;
     protected VTableManager VTableManager => CodeGenerator.VTableManager;
     protected MemoryLayoutManager MemoryLayoutManager => CodeGenerator.MemoryLayoutManager;
-    protected SemanticAnalyzer SemanticAnalyzer => CodeGenerator.SemanticAnalyzer;
+    protected ExpressionTypeAnalyzer ExpressionTypeAnalyzer => CodeGenerator.ExpressionTypeAnalyzer;
     protected HashSet<string> ExternalFunctions => CodeGenerator.ExternalFunctions;
 
 

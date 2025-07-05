@@ -8,7 +8,7 @@ public class LValueGenerator
     private AssemblyBuilder Builder => _codeGenerator.Builder;
     private TypeRepository TypeRepository => _codeGenerator.TypeRepository;
     private MemoryLayoutManager MemoryLayoutManager => _codeGenerator.MemoryLayoutManager;
-    private SemanticAnalyzer SemanticAnalyzer => _codeGenerator.SemanticAnalyzer;
+    private ExpressionTypeAnalyzer ExpressionTypeAnalyzer => _codeGenerator.ExpressionTypeAnalyzer;
 
     public LValueGenerator(CodeGenerator codeGenerator)
     {
@@ -57,7 +57,7 @@ public class LValueGenerator
 
     private void GenerateLValueForMemberAccess(MemberAccessExpressionNode memberAccess, AnalysisContext context)
     {
-        var leftType = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context);
+        var leftType = ExpressionTypeAnalyzer.AnalyzeExpressionType(memberAccess.Left, context);
         string baseStructType = leftType.TrimEnd('*');
         var (memberOffset, _) = MemoryLayoutManager.GetMemberInfo(baseStructType, memberAccess.Member.Value, context.CompilationUnit);
 

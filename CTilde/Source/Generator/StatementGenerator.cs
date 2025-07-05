@@ -32,7 +32,7 @@ public class StatementGenerator
             case ExpressionStatementNode exprStmt:
                 ExpressionGenerator.GenerateExpression(exprStmt.Expression, context);
                 // Check if the expression statement was a function call that returned a temporary struct
-                var exprType = _context.SemanticAnalyzer.AnalyzeExpressionType(exprStmt.Expression, context);
+                var exprType = _context.ExpressionTypeAnalyzer.AnalyzeExpressionType(exprStmt.Expression, context);
                 if (_context.TypeRepository.IsStruct(exprType) && !exprType.EndsWith("*"))
                 {
                     if (exprStmt.Expression is CallExpressionNode or BinaryExpressionNode)
@@ -70,7 +70,7 @@ public class StatementGenerator
         ExpressionGenerator.GenerateExpression(deleteNode.Expression, context);
         Builder.AppendInstruction("mov edi, eax", "Save pointer to be deleted in edi");
 
-        var pointerType = _context.SemanticAnalyzer.AnalyzeExpressionType(deleteNode.Expression, context);
+        var pointerType = _context.ExpressionTypeAnalyzer.AnalyzeExpressionType(deleteNode.Expression, context);
         var objectType = pointerType.TrimEnd('*');
 
         // If the object's type has a vtable, its destructor MUST be called virtually.
@@ -117,7 +117,7 @@ public class StatementGenerator
             if (decl.ConstructorArguments != null) // e.g. string s("hello");
             {
                 var argTypes = decl.ConstructorArguments
-                    .Select(arg => _context.SemanticAnalyzer.AnalyzeExpressionType(arg, context))
+                    .Select(arg => _context.ExpressionTypeAnalyzer.AnalyzeExpressionType(arg, context))
                     .ToList();
                 var ctor = FunctionResolver.FindConstructor(varTypeFqn, argTypes) ?? throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' matching signature.");
 
@@ -155,7 +155,7 @@ public class StatementGenerator
                 }
                 else // Covers implicit constructor calls AND pointer initialization
                 {
-                    string initializerType = _context.SemanticAnalyzer.AnalyzeExpressionType(decl.Initializer, context);
+                    string initializerType = _context.ExpressionTypeAnalyzer.AnalyzeExpressionType(decl.Initializer, context);
 
                     if (varTypeFqn.EndsWith("*"))
                     {
@@ -255,7 +255,7 @@ public class StatementGenerator
 
     private void GenerateReturn(ReturnStatementNode ret, AnalysisContext context)
     {
-        var returnTypeFqn = _context.SemanticAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
+        var returnTypeFqn = _context.ExpressionTypeAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
         if (TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
             if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");

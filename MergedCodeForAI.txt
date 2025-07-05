@@ -42,11 +42,14 @@ public class Compiler
 
         // 3. Create analysis services ONCE
         var typeRepository = new TypeRepository(programNode);
-        var typeResolver = new TypeResolver(typeRepository);
+        var monomorphizer = new Monomorphizer(typeRepository);
+        var typeResolver = new TypeResolver(typeRepository, monomorphizer);
+        monomorphizer.SetResolver(typeResolver); // Break circular dependency
         var vtableManager = new VTableManager(typeRepository, typeResolver);
         var memoryLayoutManager = new MemoryLayoutManager(typeRepository, typeResolver, vtableManager);
         var functionResolver = new FunctionResolver(typeRepository, typeResolver, programNode);
         var semanticAnalyzer = new SemanticAnalyzer(typeRepository, typeResolver, functionResolver, memoryLayoutManager);
+        functionResolver.SetSemanticAnalyzer(semanticAnalyzer); // Break circular dependency
 
         // 4. Perform Semantic Analysis
         var runner = new SemanticAnalyzerRunner(programNode, typeRepository, typeResolver, functionResolver, memoryLayoutManager, semanticAnalyzer);
@@ -155,6 +158,147 @@ public record AnalysisContext(
 );
 </file>
 
+<file path="Analysis\AstCloner.cs">
+using System.Collections.Generic;
+using System.Linq;
+
+namespace CTilde;
+
+/// <summary>
+/// A visitor that performs a deep clone of an AST subtree.
+/// It can replace TypeNodes on the fly based on a provided dictionary.
+/// </summary>
+public class AstCloner
+{
+    private readonly Dictionary<string, TypeNode> _replacements;
+
+    public AstCloner(Dictionary<string, TypeNode> replacements)
+    {
+        _replacements = replacements;
+    }
+
+    public T Clone<T>(T? node) where T : AstNode
+    {
+        if (node == null) return null!;
+        return (T)Visit((dynamic)node);
+    }
+
+    private AstNode Visit(AstNode node) => node; // Fallback for unknown nodes
+
+    private TypeNode Visit(TypeNode node)
+    {
+        // This is the core substitution logic
+        if (node is SimpleTypeNode stn && _replacements.TryGetValue(stn.TypeToken.Value, out var replacement))
+        {
+            return Clone(replacement); // Clone the replacement to ensure the new tree is fully independent
+        }
+
+        // Standard cloning for other TypeNodes
+        return node switch
+        {
+            SimpleTypeNode s => new SimpleTypeNode(s.TypeToken),
+            PointerTypeNode p => new PointerTypeNode(Visit(p.BaseType)),
+            GenericInstantiationTypeNode g => new GenericInstantiationTypeNode(g.BaseType, g.TypeArguments.Select(Visit).ToList()),
+            _ => throw new System.NotImplementedException($"Clone not implemented for TypeNode: {node.GetType().Name}")
+        };
+    }
+
+    // --- Expression Nodes ---
+    private ExpressionNode Visit(ExpressionNode node)
+    {
+        return node switch
+        {
+            InitializerListExpressionNode il => new InitializerListExpressionNode(il.OpeningBrace, il.Values.Select(Clone).ToList()),
+            IntegerLiteralNode i => i, // Immutable
+            StringLiteralNode s => s, // Immutable
+            UnaryExpressionNode u => new UnaryExpressionNode(u.Operator, Clone(u.Right)),
+            AssignmentExpressionNode a => new AssignmentExpressionNode(Clone(a.Left), Clone(a.Right)),
+            VariableExpressionNode v => new VariableExpressionNode(v.Identifier),
+            CallExpressionNode c => new CallExpressionNode(Clone(c.Callee), c.Arguments.Select(Clone).ToList()),
+            BinaryExpressionNode b => new BinaryExpressionNode(Clone(b.Left), b.Operator, Clone(b.Right)),
+            MemberAccessExpressionNode ma => new MemberAccessExpressionNode(Clone(ma.Left), ma.Operator, ma.Member),
+            QualifiedAccessExpressionNode qa => new QualifiedAccessExpressionNode(Clone(qa.Left), qa.Member),
+            NewExpressionNode n => new NewExpressionNode(Visit(n.Type), n.Arguments.Select(Clone).ToList()),
+            SizeofExpressionNode s => new SizeofExpressionNode(s.SizeofToken, Visit(s.Type)),
+            _ => throw new System.NotImplementedException($"Clone not implemented for ExpressionNode: {node.GetType().Name}")
+        };
+    }
+
+    // --- Statement Nodes ---
+    private StatementNode Visit(StatementNode node)
+    {
+        return node switch
+        {
+            BlockStatementNode b => new BlockStatementNode(b.Statements.Select(Clone).ToList()),
+            ReturnStatementNode r => new ReturnStatementNode(Clone(r.Expression)),
+            WhileStatementNode w => new WhileStatementNode(Clone(w.Condition), Clone(w.Body)),
+            IfStatementNode i => new IfStatementNode(Clone(i.Condition), Clone(i.ThenBody), Clone(i.ElseBody)),
+            DeclarationStatementNode d => new DeclarationStatementNode(d.IsConst, Visit(d.Type), d.Identifier, Clone(d.Initializer), d.ConstructorArguments?.Select(Clone).ToList()),
+            ExpressionStatementNode e => new ExpressionStatementNode(Clone(e.Expression)),
+            DeleteStatementNode del => new DeleteStatementNode(Clone(del.Expression)),
+            _ => throw new System.NotImplementedException($"Clone not implemented for StatementNode: {node.GetType().Name}")
+        };
+    }
+
+    // --- Top Level & Definitions ---
+    public StructDefinitionNode Visit(StructDefinitionNode node)
+    {
+        return new StructDefinitionNode(
+            node.Name,
+            node.GenericParameters, // These are kept for now and cleared in the Monomorphizer
+            node.BaseStructName,
+            node.Namespace,
+            node.Members.Select(Clone).ToList(),
+            node.Methods.Select(Clone).ToList(),
+            node.Constructors.Select(Clone).ToList(),
+            node.Destructors.Select(Clone).ToList()
+        );
+    }
+
+    private MemberVariableNode Visit(MemberVariableNode node) => new(node.IsConst, Visit(node.Type), node.Name, node.AccessLevel);
+    private ParameterNode Visit(ParameterNode node) => new(Visit(node.Type), node.Name);
+    private BaseInitializerNode Visit(BaseInitializerNode node) => new(node.Arguments.Select(Clone).ToList());
+
+    private FunctionDeclarationNode Visit(FunctionDeclarationNode node)
+    {
+        return new FunctionDeclarationNode(
+            Visit(node.ReturnType),
+            node.Name,
+            node.Parameters.Select(Clone).ToList(),
+            Clone(node.Body),
+            node.OwnerStructName,
+            node.AccessLevel,
+            node.IsVirtual,
+            node.IsOverride,
+            node.Namespace
+        );
+    }
+
+    private ConstructorDeclarationNode Visit(ConstructorDeclarationNode node)
+    {
+        return new ConstructorDeclarationNode(
+            node.OwnerStructName,
+            node.Namespace,
+            node.AccessLevel,
+            node.Parameters.Select(Clone).ToList(),
+            Clone(node.Initializer),
+            Clone(node.Body)
+        );
+    }
+
+    private DestructorDeclarationNode Visit(DestructorDeclarationNode node)
+    {
+        return new DestructorDeclarationNode(
+            node.OwnerStructName,
+            node.Namespace,
+            node.AccessLevel,
+            node.IsVirtual,
+            Clone(node.Body)
+        );
+    }
+}
+</file>
+
 <file path="Analysis\FunctionResolver.cs">
 using System;
 using System.Collections.Generic;
@@ -167,6 +311,7 @@ public class FunctionResolver
     private readonly TypeRepository _typeRepository;
     private readonly TypeResolver _typeResolver;
     private readonly ProgramNode _program; // For accessing all functions
+    private SemanticAnalyzer _semanticAnalyzer = null!;
 
     public FunctionResolver(TypeRepository typeRepository, TypeResolver typeResolver, ProgramNode program)
     {
@@ -175,9 +320,39 @@ public class FunctionResolver
         _program = program;
     }
 
-    public FunctionDeclarationNode ResolveFunctionCall(ExpressionNode callee, CompilationUnitNode context, FunctionDeclarationNode? currentFunction)
+    public void SetSemanticAnalyzer(SemanticAnalyzer analyzer) => _semanticAnalyzer = analyzer;
+
+    public FunctionDeclarationNode ResolveFunctionCall(ExpressionNode callee, AnalysisContext analysisContext)
     {
-        if (callee is VariableExpressionNode varNode) return ResolveFunctionByName(varNode.Identifier.Value, currentFunction?.Namespace, context);
+        var currentFunction = analysisContext.CurrentFunction;
+        var context = analysisContext.CompilationUnit;
+
+        if (callee is MemberAccessExpressionNode ma)
+        {
+            var ownerTypeFqn = _semanticAnalyzer.AnalyzeExpressionType(ma.Left, analysisContext).TrimEnd('*');
+            var method = ResolveMethod(ownerTypeFqn, ma.Member.Value);
+            return method ?? throw new InvalidOperationException($"Method '{ma.Member.Value}' not found on type '{ownerTypeFqn}'.");
+        }
+
+        if (callee is VariableExpressionNode varNode)
+        {
+            // If inside a method, first try resolving as an implicit 'this' call.
+            if (currentFunction?.OwnerStructName != null)
+            {
+                var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(currentFunction);
+                if (ownerFqn != null)
+                {
+                    var method = ResolveMethod(ownerFqn, varNode.Identifier.Value);
+                    if (method != null)
+                    {
+                        return method;
+                    }
+                }
+            }
+            // Fallback to global/namespaced function resolution.
+            return ResolveFunctionByName(varNode.Identifier.Value, currentFunction?.Namespace, context);
+        }
+
         if (callee is QualifiedAccessExpressionNode qNode)
         {
             string qualifier = TypeResolver.ResolveQualifier(qNode.Left);
@@ -218,7 +393,8 @@ public class FunctionResolver
             if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
 
             var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            structFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            structFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
         }
         return null;
     }
@@ -244,19 +420,7 @@ public class FunctionResolver
             for (int i = 0; i < argTypeFqns.Count; i++)
             {
                 var param = ctor.Parameters[i];
-                var rawParamType = TypeRepository.GetTypeNameFromNode(param.Type);
-                var baseParamType = rawParamType.TrimEnd('*');
-                var pointerSuffix = new string('*', rawParamType.Length - baseParamType.Length);
-
-                string resolvedParamType;
-                if (param.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseParamType.Equals("void", StringComparison.OrdinalIgnoreCase))
-                {
-                    resolvedParamType = rawParamType;
-                }
-                else
-                {
-                    resolvedParamType = _typeResolver.ResolveTypeName(baseParamType, ctor.Namespace, ctorUnit) + pointerSuffix;
-                }
+                var resolvedParamType = _typeResolver.ResolveType(param.Type, ctor.Namespace, ctorUnit);
 
                 string argumentType = argTypeFqns[i];
                 bool isMatch = resolvedParamType == argumentType;
@@ -314,6 +478,139 @@ public class FunctionResolver
             }
         }
         return null;
+    }
+}
+</file>
+
+<file path="Analysis\Monomorphizer.cs">
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+
+namespace CTilde;
+
+public class Monomorphizer
+{
+    private readonly TypeRepository _typeRepository;
+    private TypeResolver _typeResolver = null!; // Set via SetResolver to break circular dependency
+    private readonly Dictionary<string, StructDefinitionNode> _instantiationCache = new();
+
+    public Monomorphizer(TypeRepository typeRepository)
+    {
+        _typeRepository = typeRepository;
+    }
+
+    public void SetResolver(TypeResolver resolver)
+    {
+        _typeResolver = resolver;
+    }
+
+    public StructDefinitionNode Instantiate(GenericInstantiationTypeNode typeNode, string? currentNamespace, CompilationUnitNode contextForResolution)
+    {
+        // 1. Resolve the base generic type (e.g., 'List' -> 'std::List')
+        var templateFqn = _typeResolver.ResolveSimpleTypeName(typeNode.BaseType.Value, currentNamespace, contextForResolution);
+        var templateStruct = _typeRepository.FindStruct(templateFqn) ?? throw new System.InvalidOperationException($"Generic template '{templateFqn}' not found.");
+        var templateUnit = _typeRepository.GetCompilationUnitForStruct(templateFqn);
+
+        // 2. Resolve all type arguments
+        var resolvedArgNodes = typeNode.TypeArguments.Select(arg =>
+        {
+            // Recursively resolve the type argument itself. This supports things like List<List<int>>.
+            var argFqn = _typeResolver.ResolveType(arg, currentNamespace, contextForResolution);
+
+            // We need a TypeNode representation of the resolved FQN.
+            // This is a bit of a hack, but it works for now.
+            var lastPart = argFqn.Split("::").Last();
+            var pointerLevel = argFqn.Count(c => c == '*');
+            var baseName = lastPart.TrimEnd('*');
+            TypeNode resolvedArgNode = new SimpleTypeNode(new Token(TokenType.Identifier, baseName, -1, -1));
+            for (int i = 0; i < pointerLevel; i++)
+            {
+                resolvedArgNode = new PointerTypeNode(resolvedArgNode);
+            }
+            return resolvedArgNode;
+
+        }).ToList();
+
+        // 3. Generate mangled name and check cache
+        var mangledName = NameMangler.MangleGenericInstance(templateFqn, resolvedArgNodes);
+        if (_instantiationCache.TryGetValue(mangledName, out var cachedStruct))
+        {
+            return cachedStruct;
+        }
+
+        // 4. Create replacement map for the cloner
+        if (templateStruct.GenericParameters.Count != resolvedArgNodes.Count)
+        {
+            throw new System.InvalidOperationException($"Incorrect number of type arguments for generic type '{templateFqn}'.");
+        }
+        var replacements = new Dictionary<string, TypeNode>();
+        for (int i = 0; i < templateStruct.GenericParameters.Count; i++)
+        {
+            var paramName = templateStruct.GenericParameters[i].Value;
+            var concreteType = resolvedArgNodes[i];
+            replacements[paramName] = concreteType;
+        }
+
+        // 5. Clone the template's AST, substituting generic parameters
+        var cloner = new AstCloner(replacements);
+        var clonedStruct = cloner.Clone(templateStruct);
+
+        // 6. Update the cloned struct's name and clear its generic parameters and namespace.
+        // The mangled name is now the FQN.
+        var concreteStruct = clonedStruct with
+        {
+            Name = mangledName,
+            Namespace = null,
+            GenericParameters = new List<Token>()
+        };
+
+        // 6a. Update the owner name, namespace, and `this` parameter type on all nested members.
+        var updatedMethods = concreteStruct.Methods.Select(m =>
+        {
+            // The first parameter of a method is always 'this'.
+            var thisParam = m.Parameters.First();
+            var newThisType = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, mangledName, -1, -1)));
+            var newThisParam = thisParam with { Type = newThisType };
+
+            var newParams = new List<ParameterNode> { newThisParam };
+            newParams.AddRange(m.Parameters.Skip(1));
+
+            return m with
+            {
+                OwnerStructName = mangledName,
+                Namespace = null,
+                Parameters = newParams
+            };
+        }).ToList();
+
+        var updatedConstructors = concreteStruct.Constructors
+            .Select(c => c with { OwnerStructName = mangledName, Namespace = null })
+            .ToList();
+        var updatedDestructors = concreteStruct.Destructors
+            .Select(d => d with { OwnerStructName = mangledName, Namespace = null })
+            .ToList();
+
+        concreteStruct = concreteStruct with
+        {
+            Methods = updatedMethods,
+            Constructors = updatedConstructors,
+            Destructors = updatedDestructors
+        };
+
+
+        // 7. Register the new struct with the TypeRepository and its compilation unit
+        _typeRepository.RegisterInstantiatedStruct(concreteStruct, templateUnit);
+        templateUnit.Structs.Add(concreteStruct); // Add to the original unit's list of structs
+
+        // 8. Set parents for the new AST subtree
+        var parser = new Parser(new List<Token>()); // Dummy parser for SetParents
+        parser.SetParents(concreteStruct, templateUnit);
+
+
+        // 9. Cache and return
+        _instantiationCache[mangledName] = concreteStruct;
+        return concreteStruct;
     }
 }
 </file>
@@ -395,8 +692,11 @@ public class SemanticAnalyzer
         bool isIntToPointerConversion = leftType.EndsWith("*") && rightType == "int";
         // Allow int literal to char conversion
         bool isIntToCharLiteralConversion = leftType == "char" && rightType == "int" && a.Right is IntegerLiteralNode;
+        // HACK: Allow assignments to/from a generic type parameter inside a monomorphized method.
+        // This happens because the analyzer sometimes resolves a member to `T` and a parameter to `ConcreteType`.
+        bool isGenericAssignment = (leftType.Length == 1 && char.IsUpper(leftType[0])) || (rightType.Length == 1 && char.IsUpper(rightType[0]));
 
-        if (rightType != "unknown" && leftType != "unknown" && leftType != rightType && !isIntToPointerConversion && !isIntToCharLiteralConversion)
+        if (rightType != "unknown" && leftType != "unknown" && leftType != rightType && !isIntToPointerConversion && !isIntToCharLiteralConversion && !isGenericAssignment)
         {
             var token = AstHelper.GetFirstToken(a.Right);
             diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{rightType}' to '{leftType}'.", token.Line, token.Column));
@@ -417,27 +717,15 @@ public class SemanticAnalyzer
     public void AnalyzeDeclarationStatement(DeclarationStatementNode decl, AnalysisContext context, List<Diagnostic> diagnostics)
     {
         string declaredTypeFqn;
-        var rawTypeName = TypeRepository.GetTypeNameFromNode(decl.Type);
-        var baseTypeName = rawTypeName.TrimEnd('*');
-        var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
-
-        if (decl.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
+        try
         {
-            declaredTypeFqn = rawTypeName; // For primitives like int, char, void
+            declaredTypeFqn = _typeResolver.ResolveType(decl.Type, context.CurrentFunction.Namespace, context.CompilationUnit);
         }
-        else
+        catch (InvalidOperationException ex)
         {
-            try
-            {
-                // For user-defined types (structs), resolve their FQN
-                declaredTypeFqn = _typeResolver.ResolveTypeName(baseTypeName, context.CurrentFunction.Namespace, context.CompilationUnit) + pointerSuffix;
-            }
-            catch (InvalidOperationException ex)
-            {
-                var token = decl.Type.GetFirstToken();
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
-                declaredTypeFqn = "unknown"; // Sentinel type
-            }
+            var token = decl.Type.GetFirstToken();
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
+            declaredTypeFqn = "unknown"; // Sentinel type
         }
 
         if (declaredTypeFqn == "unknown") return; // Stop analysis if type resolution failed
@@ -506,21 +794,7 @@ public class SemanticAnalyzer
 
     public string AnalyzeFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
     {
-        var returnTypeNameRaw = TypeRepository.GetTypeNameFromNode(func.ReturnType);
-        string resolvedReturnName;
-
-        if (func.ReturnType is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
-        {
-            resolvedReturnName = returnTypeNameRaw;
-        }
-        else
-        {
-            string baseReturnName = returnTypeNameRaw.TrimEnd('*');
-            string pointerSuffix = new string('*', returnTypeNameRaw.Length - baseReturnName.Length);
-            resolvedReturnName = _typeResolver.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + pointerSuffix;
-        }
-
-        return resolvedReturnName;
+        return _typeResolver.ResolveType(func.ReturnType, func.Namespace, context.CompilationUnit);
     }
 
     private string AnalyzeBinaryExpression(BinaryExpressionNode bin, AnalysisContext context, List<Diagnostic> diagnostics)
@@ -546,6 +820,21 @@ public class SemanticAnalyzer
             {
                 // TODO: Check if base types are compatible
                 return "int";
+            }
+        }
+
+        // Handle pointer comparisons
+        if (bin.Operator.Type is TokenType.DoubleEquals or TokenType.NotEquals or TokenType.LessThan or TokenType.GreaterThan)
+        {
+            bool leftIsPtr = leftTypeFqn.EndsWith("*");
+            bool rightIsPtr = rightTypeFqn.EndsWith("*");
+            bool leftIsInt = leftTypeFqn == "int";
+            bool rightIsInt = rightTypeFqn == "int";
+
+            // Allow ptr <=> ptr and ptr <=> int
+            if ((leftIsPtr && rightIsPtr) || (leftIsPtr && rightIsInt) || (leftIsInt && rightIsPtr))
+            {
+                return "int"; // Result of any comparison is an int.
             }
         }
 
@@ -576,31 +865,24 @@ public class SemanticAnalyzer
 
     private string AnalyzeNewExpression(NewExpressionNode n, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        // A new expression always returns a pointer to the type.
         string typeName;
-        var rawTypeName = TypeRepository.GetTypeNameFromNode(n.Type);
-        string baseTypeName = rawTypeName.TrimEnd('*');
-        string pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
+        try
+        {
+            typeName = _typeResolver.ResolveType(n.Type, context.CurrentFunction.Namespace, context.CompilationUnit);
+        }
+        catch (InvalidOperationException ex)
+        {
+            var token = n.Type.GetFirstToken();
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
+            typeName = "unknown";
+        }
 
-        // 'new' can only be used with identifiers (struct types), not keywords like 'int'
+        // 'new' can only be used with struct types, not primitives like 'int'
         if (n.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
         {
             var token = n.Type.GetFirstToken();
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"'new' cannot be used with primitive type '{rawTypeName}'.", token.Line, token.Column));
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"'new' cannot be used with primitive type '{stn.TypeToken.Value}'.", token.Line, token.Column));
             return "unknown";
-        }
-        else
-        {
-            try
-            {
-                typeName = _typeResolver.ResolveTypeName(baseTypeName, context.CurrentFunction.Namespace, context.CompilationUnit) + pointerSuffix;
-            }
-            catch (InvalidOperationException ex)
-            {
-                var token = n.Type.GetFirstToken();
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
-                typeName = "unknown";
-            }
         }
 
         // Analyze constructor arguments to mark variables as used and check for other errors.
@@ -632,9 +914,7 @@ public class SemanticAnalyzer
         // 3. If in a method, try resolving as an implicit `this->member`.
         if (context.CurrentFunction.OwnerStructName != null)
         {
-            string ownerStructFqn = context.CurrentFunction.Namespace != null
-                ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}"
-                : context.CurrentFunction.OwnerStructName;
+            string ownerStructFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
 
             // Walk up the inheritance chain to find the member
             string? currentStructFqn = ownerStructFqn;
@@ -656,7 +936,8 @@ public class SemanticAnalyzer
                 if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
 
                 var unit = _typeRepository.GetCompilationUnitForStruct(currentStructFqn);
-                currentStructFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+                var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+                currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
             }
 
             if (member != null && definingStruct != null)
@@ -715,7 +996,8 @@ public class SemanticAnalyzer
             if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
 
             var unit = _typeRepository.GetCompilationUnitForStruct(currentStructFqn);
-            currentStructFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
         }
 
         if (member == null || definingStruct == null)
@@ -770,62 +1052,39 @@ public class SemanticAnalyzer
 
     private string AnalyzeCallExpression(CallExpressionNode call, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        FunctionDeclarationNode? func;
+        FunctionDeclarationNode? func = null;
         string funcNameForDiags;
 
-        if (call.Callee is MemberAccessExpressionNode callMemberAccess) // Method call: myText.draw()
+        try
         {
-            funcNameForDiags = callMemberAccess.Member.Value;
-            var ownerTypeName = AnalyzeExpressionType(callMemberAccess.Left, context, diagnostics).TrimEnd('*');
-            if (ownerTypeName == "unknown") return "unknown";
-
-            var ownerStruct = _typeRepository.FindStruct(ownerTypeName);
-            if (ownerStruct == null)
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Could not find struct definition for '{ownerTypeName}'.", AstHelper.GetFirstToken(callMemberAccess.Left).Line, AstHelper.GetFirstToken(callMemberAccess.Left).Column));
-                return "unknown";
-            }
-
-            func = _functionResolver.ResolveMethod(ownerTypeName, callMemberAccess.Member.Value);
-            if (func == null)
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Method '{callMemberAccess.Member.Value}' not found on struct '{ownerStruct.Name}' or its base classes.", callMemberAccess.Member.Line, callMemberAccess.Member.Column));
-                return "unknown";
-            }
-
-            // ** ENFORCE ACCESS SPECIFIER FOR METHODS **
-            if (func.AccessLevel == AccessSpecifier.Private)
-            {
-                var definingStructFqn = func.OwnerStructName != null ? (func.Namespace != null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName) : null;
-                var definingStruct = definingStructFqn != null ? _typeRepository.FindStruct(definingStructFqn) : null;
-
-                if (definingStruct == null || context.CurrentFunction.OwnerStructName != definingStruct.Name || context.CurrentFunction.Namespace != definingStruct.Namespace)
-                {
-                    diagnostics.Add(new Diagnostic(
-                        context.CompilationUnit.FilePath,
-                        $"Method '{ownerStruct.Name}::{func.Name}' is private and cannot be accessed from this context.",
-                        callMemberAccess.Member.Line,
-                        callMemberAccess.Member.Column
-                    ));
-                }
-            }
+            func = _functionResolver.ResolveFunctionCall(call.Callee, context);
+            funcNameForDiags = func.Name;
         }
-        else // Global or namespaced function call: DrawText(), rl::DrawText()
+        catch (InvalidOperationException ex)
         {
-            funcNameForDiags = (call.Callee as VariableExpressionNode)?.Identifier.Value ?? "function";
-            try
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, AstHelper.GetFirstToken(call.Callee).Line, AstHelper.GetFirstToken(call.Callee).Column));
+            return "unknown";
+        }
+
+        // ** ENFORCE ACCESS SPECIFIER FOR METHODS **
+        if (func.OwnerStructName != null && func.AccessLevel == AccessSpecifier.Private)
+        {
+            var definingStructFqn = _typeRepository.GetFullyQualifiedOwnerName(func);
+            var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction);
+
+            if (definingStructFqn != ownerFqn)
             {
-                func = _functionResolver.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
-            }
-            catch (InvalidOperationException ex)
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, AstHelper.GetFirstToken(call.Callee).Line, AstHelper.GetFirstToken(call.Callee).Column));
-                return "unknown";
+                diagnostics.Add(new Diagnostic(
+                   context.CompilationUnit.FilePath,
+                   $"Method '{func.Name}' is private and cannot be accessed from this context.",
+                   AstHelper.GetFirstToken(call.Callee).Line,
+                   AstHelper.GetFirstToken(call.Callee).Column
+               ));
             }
         }
 
         // ** VALIDATE ARGUMENT COUNT **
-        int expectedArgs = call.Callee is MemberAccessExpressionNode
+        int expectedArgs = func.OwnerStructName != null
             ? func.Parameters.Count - 1 // Don't count implicit 'this'
             : func.Parameters.Count;
 
@@ -833,7 +1092,7 @@ public class SemanticAnalyzer
         {
             diagnostics.Add(new Diagnostic(
                 context.CompilationUnit.FilePath,
-                $"Wrong number of arguments for call to '{funcNameForDiags}'. Expected {expectedArgs}, but got {call.Arguments.Count}.",
+                $"Wrong number of arguments for call to '{func.Name}'. Expected {expectedArgs}, but got {call.Arguments.Count}.",
                 AstHelper.GetFirstToken(call).Line,
                 AstHelper.GetFirstToken(call).Column
             ));
@@ -873,7 +1132,7 @@ public class SemanticAnalyzer
         // We resolve it here, but its "type" for now is just void*.
         try
         {
-            _functionResolver.ResolveFunctionCall(q, context.CompilationUnit, context.CurrentFunction);
+            _functionResolver.ResolveFunctionCall(q, context);
             return "void*"; // Represents a function pointer type
         }
         catch (InvalidOperationException)
@@ -911,7 +1170,10 @@ public class SemanticAnalyzer
         {
             // Allow int to char conversion
             bool isIntToCharLiteralConversion = funcReturnType == "char" && exprType == "int" && ret.Expression is IntegerLiteralNode;
-            if (!isIntToCharLiteralConversion)
+            // HACK: Allow returning a generic type T where a concrete type is expected (or vice versa)
+            bool isGenericReturn = (funcReturnType.Length == 1 && char.IsUpper(funcReturnType[0])) || (exprType.Length == 1 && char.IsUpper(exprType[0]));
+
+            if (!isIntToCharLiteralConversion && !isGenericReturn)
             {
                 var token = AstHelper.GetFirstToken(ret.Expression);
                 diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert return type '{exprType}' to '{funcReturnType}'.", token.Line, token.Column));
@@ -958,60 +1220,77 @@ public class SemanticAnalyzerRunner
 
     public void Analyze()
     {
-        foreach (var unit in _program.CompilationUnits)
+        // Iterate over a copy of the compilation units, as monomorphization might add new structs
+        // to them, which in turn adds new methods that need analysis.
+        // A more sophisticated approach might use a worklist, but this is simpler for now.
+        bool changed;
+        do
         {
-            foreach (var function in unit.Functions)
-            {
-                if (function.Body == null) continue;
-                var symbols = new SymbolTable(function, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
-                var context = new AnalysisContext(symbols, unit, function);
-                WalkStatement(function.Body, context);
-                CheckForUnusedVariables(function, context);
-            }
+            changed = false;
+            var currentStructs = _program.CompilationUnits.SelectMany(cu => cu.Structs).ToList();
 
-            foreach (var s in unit.Structs)
+            foreach (var unit in _program.CompilationUnits.ToList())
             {
-                // If it's a generic template (e.g. struct List<T>), skip analysis.
-                // It will be monomorphized and analyzed on-demand when instantiated.
-                if (s.GenericParameters.Any())
+                foreach (var function in unit.Functions.ToList())
                 {
-                    continue;
+                    if (function.Body == null) continue;
+                    var symbols = new SymbolTable(function, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
+                    var context = new AnalysisContext(symbols, unit, function);
+                    WalkStatement(function.Body, context);
+                    CheckForUnusedVariables(function, context);
                 }
 
-                foreach (var method in s.Methods)
+                foreach (var s in unit.Structs.ToList())
                 {
-                    if (method.Body == null) continue;
-                    var symbols = new SymbolTable(method, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
-                    var context = new AnalysisContext(symbols, unit, method);
-                    WalkStatement(method.Body, context);
-                    CheckForUnusedVariables(method, context);
-                }
-                foreach (var ctor in s.Constructors)
-                {
-                    var dummyFunctionForContext = new FunctionDeclarationNode(
-                        new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), ctor.OwnerStructName,
-                        ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
-                        false, false, ctor.Namespace
-                    );
-                    var symbols = new SymbolTable(ctor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
-                    var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
-                    WalkStatement(ctor.Body, context);
-                    CheckForUnusedVariables(dummyFunctionForContext, context);
-                }
-                foreach (var dtor in s.Destructors)
-                {
-                    var dummyFunctionForContext = new FunctionDeclarationNode(
-                        new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), dtor.OwnerStructName,
-                        new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
-                        dtor.IsVirtual, false, dtor.Namespace
-                    );
-                    var symbols = new SymbolTable(dtor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
-                    var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
-                    WalkStatement(dtor.Body, context);
-                    CheckForUnusedVariables(dummyFunctionForContext, context);
+                    // If it's a generic template (e.g. struct List<T>), skip analysis.
+                    // It will be monomorphized and analyzed on-demand when instantiated.
+                    if (s.GenericParameters.Any())
+                    {
+                        continue;
+                    }
+
+                    foreach (var method in s.Methods.ToList())
+                    {
+                        if (method.Body == null) continue;
+                        var symbols = new SymbolTable(method, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
+                        var context = new AnalysisContext(symbols, unit, method);
+                        WalkStatement(method.Body, context);
+                        CheckForUnusedVariables(method, context);
+                    }
+                    foreach (var ctor in s.Constructors.ToList())
+                    {
+                        var dummyFunctionForContext = new FunctionDeclarationNode(
+                            new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), ctor.OwnerStructName,
+                            ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
+                            false, false, ctor.Namespace
+                        );
+                        var symbols = new SymbolTable(ctor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
+                        var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
+                        WalkStatement(ctor.Body, context);
+                        CheckForUnusedVariables(dummyFunctionForContext, context);
+                    }
+                    foreach (var dtor in s.Destructors.ToList())
+                    {
+                        var dummyFunctionForContext = new FunctionDeclarationNode(
+                            new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), dtor.OwnerStructName,
+                            new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
+                            dtor.IsVirtual, false, dtor.Namespace
+                        );
+                        var symbols = new SymbolTable(dtor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
+                        var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
+                        WalkStatement(dtor.Body, context);
+                        CheckForUnusedVariables(dummyFunctionForContext, context);
+                    }
                 }
             }
-        }
+
+            var newStructs = _program.CompilationUnits.SelectMany(cu => cu.Structs).ToList();
+            if (newStructs.Count > currentStructs.Count)
+            {
+                changed = true;
+            }
+
+        } while (changed);
     }
 
     private void CheckForUnusedVariables(FunctionDeclarationNode function, AnalysisContext context)
@@ -1126,10 +1405,12 @@ namespace CTilde;
 public class TypeResolver
 {
     private readonly TypeRepository _typeRepository;
+    private readonly Monomorphizer _monomorphizer;
 
-    public TypeResolver(TypeRepository typeRepository)
+    public TypeResolver(TypeRepository typeRepository, Monomorphizer monomorphizer)
     {
         _typeRepository = typeRepository;
+        _monomorphizer = monomorphizer;
     }
 
     public static string ResolveQualifier(ExpressionNode expr)
@@ -1142,9 +1423,35 @@ public class TypeResolver
         };
     }
 
-    public string ResolveTypeName(string name, string? currentNamespace, CompilationUnitNode context)
+    public string ResolveType(TypeNode node, string? currentNamespace, CompilationUnitNode context)
+    {
+        switch (node)
+        {
+            case PointerTypeNode ptn:
+                return ResolveType(ptn.BaseType, currentNamespace, context) + "*";
+
+            case GenericInstantiationTypeNode gitn:
+                var concreteStruct = _monomorphizer.Instantiate(gitn, currentNamespace, context);
+                return TypeRepository.GetFullyQualifiedName(concreteStruct);
+
+            case SimpleTypeNode stn:
+                return ResolveSimpleTypeName(stn.GetBaseTypeName(), currentNamespace, context);
+
+            default:
+                throw new NotImplementedException($"ResolveType not implemented for {node.GetType().Name}");
+        }
+    }
+
+    public string ResolveSimpleTypeName(string name, string? currentNamespace, CompilationUnitNode context)
     {
         if (name is "int" or "char" or "void")
+        {
+            return name;
+        }
+
+        // Heuristic: if a type name is a single uppercase char, assume it's a generic parameter
+        // from an uninstantiated template, which shouldn't be resolved. Return its name directly.
+        if (name.Length == 1 && char.IsUpper(name[0]))
         {
             return name;
         }
@@ -1686,7 +1993,8 @@ public class DeclarationGenerator
             var argTypes = ctor.Initializer.Arguments
                 .Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, analysisContext))
                 .ToList();
-            var baseFqn = TypeResolver.ResolveTypeName(ownerStruct.BaseStructName!, ownerStruct.Namespace, unit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, ownerStruct.BaseStructName!, -1, -1));
+            var baseFqn = TypeResolver.ResolveType(baseTypeNode, ownerStruct.Namespace, unit);
             var baseCtor = FunctionResolver.FindConstructor(baseFqn, argTypes) ?? throw new InvalidOperationException("Base constructor not found for given argument types.");
 
 
@@ -1883,7 +2191,8 @@ public class ExpressionGenerator
         {
             try
             {
-                string ownerStructFqn = context.CurrentFunction.Namespace != null ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}" : context.CurrentFunction.OwnerStructName;
+                string ownerStructFqn = TypeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
+
                 var (memberOffset, _) = MemoryLayoutManager.GetMemberInfo(ownerStructFqn, varExpr.Identifier.Value, context.CompilationUnit);
                 context.Symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
                 Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
@@ -1921,14 +2230,21 @@ public class ExpressionGenerator
             case CallExpressionNode callExpr: GenerateCallExpression(callExpr, context); break;
             case QualifiedAccessExpressionNode qNode: GenerateQualifiedAccessExpression(qNode, context); break;
             case NewExpressionNode n: GenerateNewExpression(n, context); break;
+            case SizeofExpressionNode s: GenerateSizeofExpression(s, context); break;
             default: throw new NotImplementedException($"Expr: {expression.GetType().Name}");
         }
     }
 
+    private void GenerateSizeofExpression(SizeofExpressionNode s, AnalysisContext context)
+    {
+        var typeFqn = TypeResolver.ResolveType(s.Type, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var size = MemoryLayoutManager.GetSizeOfType(typeFqn, context.CompilationUnit);
+        Builder.AppendInstruction($"mov eax, {size}");
+    }
+
     private void GenerateNewExpression(NewExpressionNode n, AnalysisContext context)
     {
-        var baseTypeName = n.Type.GetBaseTypeName();
-        var typeFqn = TypeResolver.ResolveTypeName(baseTypeName, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var typeFqn = TypeResolver.ResolveType(n.Type, context.CurrentFunction.Namespace, context.CompilationUnit);
         var size = MemoryLayoutManager.GetSizeOfType(typeFqn, context.CompilationUnit);
 
         Builder.AppendInstruction($"push {size}", "Push size for malloc");
@@ -2056,22 +2372,13 @@ public class ExpressionGenerator
     private void GenerateCallExpression(CallExpressionNode callExpr, AnalysisContext context)
     {
         int totalArgSize = 0;
-        FunctionDeclarationNode func;
 
-        if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
-        {
-            var ownerTypeName = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context).TrimEnd('*');
-            var ownerStruct = TypeRepository.FindStruct(ownerTypeName) ?? throw new InvalidOperationException($"Could not find struct definition for '{ownerTypeName}'.");
-            func = FunctionResolver.ResolveMethod(ownerTypeName, memberAccess.Member.Value);
-        }
-        else
-        {
-            func = FunctionResolver.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
-        }
+        // Phase 1: Resolve the function to be called.
+        var func = FunctionResolver.ResolveFunctionCall(callExpr.Callee, context);
 
+        // Phase 2: Handle struct return values (if any).
         var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(func, context);
         bool returnsStructByValue = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
-
         if (returnsStructByValue)
         {
             var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
@@ -2080,39 +2387,60 @@ public class ExpressionGenerator
             totalArgSize += 4;
         }
 
+        // Phase 3: Push all regular arguments.
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
             totalArgSize += PushArgument(arg, context);
         }
 
-        if (callExpr.Callee is MemberAccessExpressionNode ma)
+        // Phase 4: Push `this` pointer (if it's a method) and dispatch the call.
+        bool isMethodCall = func.OwnerStructName != null;
+        if (isMethodCall)
         {
-            if (ma.Operator.Type == TokenType.Arrow) GenerateExpression(ma.Left, context);
-            else GenerateLValueAddress(ma.Left, context);
-
+            if (callExpr.Callee is MemberAccessExpressionNode ma)
+            {
+                // Explicit call (obj.method() or ptr->method())
+                if (ma.Operator.Type == TokenType.Arrow) GenerateExpression(ma.Left, context);
+                else GenerateLValueAddress(ma.Left, context);
+            }
+            else
+            {
+                // Implicit `this` call (method() from within another method)
+                context.Symbols.TryGetSymbol("this", out int thisOffset, out _, out _);
+                Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get implicit 'this' pointer");
+            }
             Builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
 
+            // Dispatch (virtual or static)
             if (func.IsVirtual || func.IsOverride)
             {
-                var ownerTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(ma.Left, context).TrimEnd('*');
+                var ownerTypeFqn = TypeRepository.GetFullyQualifiedOwnerName(func)!;
                 var vtableIndex = VTableManager.GetMethodVTableIndex(ownerTypeFqn, func.Name);
-                int thisPtrOffset = totalArgSize - 4; // 'this' is the last thing pushed before call
-                Builder.AppendInstruction($"mov eax, [esp + {thisPtrOffset}]", "Get 'this' from stack");
+                int thisPtrOnStackOffset = totalArgSize - 4;
+                Builder.AppendInstruction($"mov eax, [esp + {thisPtrOnStackOffset}]", "Get 'this' from stack for vcall");
                 Builder.AppendInstruction("mov eax, [eax]", "Get vtable pointer from object");
                 Builder.AppendInstruction($"mov eax, [eax + {vtableIndex * 4}]", $"Get method address from vtable[{vtableIndex}]");
                 Builder.AppendInstruction("call eax");
             }
-            else { Builder.AppendInstruction($"call {NameMangler.Mangle(func)}"); }
+            else
+            {
+                Builder.AppendInstruction($"call {NameMangler.Mangle(func)}");
+            }
         }
         else
         {
+            // Global function dispatch
             string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
             if (func.Body == null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
         }
 
-        Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
+        // Phase 5: Cleanup stack.
+        if (totalArgSize > 0)
+        {
+            Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
+        }
 
         if (returnsStructByValue)
         {
@@ -2170,13 +2498,13 @@ public class ExpressionGenerator
         {
             if (leftTypeFqn.EndsWith("*") && rightTypeFqn == "int")
             {
-                var baseType = leftTypeFqn.TrimEnd('*');
+                var baseType = leftTypeFqn[..^1]; // Remove one level of indirection
                 var elementSize = MemoryLayoutManager.GetSizeOfType(baseType, context.CompilationUnit);
                 if (elementSize > 1) Builder.AppendInstruction($"imul ecx, {elementSize}");
             }
             else if (leftTypeFqn == "int" && rightTypeFqn.EndsWith("*"))
             {
-                var baseType = rightTypeFqn.TrimEnd('*');
+                var baseType = rightTypeFqn[..^1]; // Remove one level of indirection
                 var elementSize = MemoryLayoutManager.GetSizeOfType(baseType, context.CompilationUnit);
                 if (elementSize > 1) Builder.AppendInstruction($"imul eax, {elementSize}");
             }
@@ -2213,7 +2541,7 @@ public class ExpressionGenerator
             }
         }
 
-        var func = FunctionResolver.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
+        var func = FunctionResolver.ResolveFunctionCall(qNode, context);
         string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
         if (func.Body == null) ExternalFunctions.Add(func.Name);
         Builder.AppendInstruction($"mov eax, {calleeTarget}");
@@ -2379,6 +2707,13 @@ public class MemoryLayoutManager
         if (typeNameFqn == "char") return 1;
         if (typeNameFqn == "void") return 0; // Void has no size
 
+        // Heuristic: If it's a single uppercase letter, assume it's a generic type parameter.
+        // In the current implementation, generic types are treated like pointers/references.
+        if (typeNameFqn.Length == 1 && char.IsUpper(typeNameFqn[0]))
+        {
+            return 4; // Treat as a pointer size.
+        }
+
         // If it's not a primitive, try to find it as a struct
         if (_typeRepository.FindStruct(typeNameFqn) is { } structDef)
         {
@@ -2386,7 +2721,9 @@ public class MemoryLayoutManager
             var structUnit = _typeRepository.GetCompilationUnitForStruct(typeNameFqn);
             if (structDef.BaseStructName != null)
             {
-                string baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+                var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+                string baseFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, structUnit);
+
                 // The baseUnit might be different if the base struct is in another file/namespace
                 var baseUnit = _typeRepository.GetCompilationUnitForStruct(baseFqn);
                 size += GetSizeOfType(baseFqn, baseUnit);
@@ -2398,19 +2735,7 @@ public class MemoryLayoutManager
 
             foreach (var member in structDef.Members)
             {
-                var rawMemberType = TypeRepository.GetTypeNameFromNode(member.Type);
-                string baseMemberName = rawMemberType.TrimEnd('*');
-                string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
-
-                string resolvedMemberType;
-                if (member.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
-                {
-                    resolvedMemberType = rawMemberType;
-                }
-                else
-                {
-                    resolvedMemberType = _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, structUnit) + pointerSuffix;
-                }
+                var resolvedMemberType = _typeResolver.ResolveType(member.Type, structDef.Namespace, structUnit);
 
                 var memberUnit = _typeRepository.IsStruct(resolvedMemberType)
                     ? _typeRepository.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
@@ -2439,7 +2764,8 @@ public class MemoryLayoutManager
         if (structDef.BaseStructName != null)
         {
             var structUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            string baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            string baseFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, structUnit);
             var baseUnit = _typeRepository.GetCompilationUnitForStruct(baseFqn);
             allMembers.AddRange(GetAllMembers(baseFqn, baseUnit));
             currentOffset = GetSizeOfType(baseFqn, baseUnit);
@@ -2452,19 +2778,7 @@ public class MemoryLayoutManager
         foreach (var mem in structDef.Members)
         {
             var ownUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            var rawMemberType = TypeRepository.GetTypeNameFromNode(mem.Type);
-            var baseMemberName = rawMemberType.TrimEnd('*');
-            var pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
-
-            string resolvedMemberType;
-            if (mem.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
-            {
-                resolvedMemberType = rawMemberType;
-            }
-            else
-            {
-                resolvedMemberType = _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
-            }
+            string resolvedMemberType = _typeResolver.ResolveType(mem.Type, structDef.Namespace, ownUnit);
 
             allMembers.Add((mem.Name.Value, resolvedMemberType, currentOffset, mem.IsConst));
 
@@ -2479,12 +2793,21 @@ public class MemoryLayoutManager
 </file>
 
 <file path="Generator\NameMangler.cs">
+using System.Linq;
+using System.Text;
+
 namespace CTilde;
 
 public static class NameMangler
 {
     public static string Mangle(FunctionDeclarationNode f)
     {
+        var ownerName = f.OwnerStructName;
+        // If the owner is a mangled generic name already, don't re-mangle it.
+        if (ownerName != null && ownerName.Contains("__"))
+        {
+            return $"_{ownerName}_{f.Name}";
+        }
         return MangleName(f.Namespace, f.OwnerStructName, f.Name);
     }
 
@@ -2509,24 +2832,58 @@ public static class NameMangler
             }
         }
 
+        if (type is GenericInstantiationTypeNode gitn)
+        {
+            var sb = new StringBuilder();
+            sb.Append(MangleType(new SimpleTypeNode(gitn.BaseType)));
+            foreach (var arg in gitn.TypeArguments)
+            {
+                sb.Append(MangleType(arg));
+            }
+            return sb.ToString();
+        }
+
         // TODO: Mangle generic types properly
         return "T";
     }
 
+    public static string MangleGenericInstance(string templateFqn, List<TypeNode> concreteTypeNodes)
+    {
+        var sb = new StringBuilder();
+        sb.Append(templateFqn.Replace("::", "__"));
+        foreach (var typeNode in concreteTypeNodes)
+        {
+            sb.Append('_');
+            sb.Append(MangleType(typeNode));
+        }
+        return sb.ToString();
+    }
+
+
     public static string Mangle(ConstructorDeclarationNode c)
     {
         var paramSignature = string.Concat(c.Parameters.Select(p => MangleType(p.Type)));
+        var ownerName = c.OwnerStructName;
+        if (ownerName.Contains("__"))
+        {
+            return $"_{ownerName}_ctor_{paramSignature}";
+        }
         return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor_{paramSignature}");
     }
 
     public static string Mangle(DestructorDeclarationNode d)
     {
+        var ownerName = d.OwnerStructName;
+        if (ownerName.Contains("__"))
+        {
+            return $"_{ownerName}_dtor";
+        }
         return MangleName(d.Namespace, d.OwnerStructName, $"{d.OwnerStructName}_dtor");
     }
 
     public static string GetVTableLabel(string structFqn)
     {
-        return $"_vtable_{structFqn.Replace("::", "_")}";
+        return $"_vtable_{structFqn.Replace("::", "_").Replace("<", "_").Replace(">", "").Replace("*", "p")}";
     }
 
     public static string MangleOperator(string op)
@@ -2910,7 +3267,11 @@ public class SymbolTable
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(ctor.Body, allLocalDeclarations);
 
-        var thisTypeName = ctor.Namespace != null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName;
+        // If the owner's name is mangled, it's already an FQN. Otherwise, construct the FQN.
+        string thisTypeName = ctor.OwnerStructName.Contains("__")
+            ? ctor.OwnerStructName
+            : (ctor.Namespace != null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName);
+
         var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
         var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
 
@@ -2925,7 +3286,11 @@ public class SymbolTable
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(dtor.Body, allLocalDeclarations);
 
-        var thisTypeName = dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName;
+        // If the owner's name is mangled, it's already an FQN. Otherwise, construct the FQN.
+        string thisTypeName = dtor.OwnerStructName.Contains("__")
+            ? dtor.OwnerStructName
+            : (dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName);
+
         var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
         var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
 
@@ -2940,22 +3305,7 @@ public class SymbolTable
             var baseTypeName = d.Type.GetBaseTypeName();
             if (baseTypeName == "unknown") continue;
 
-            var rawTypeName = TypeRepository.GetTypeNameFromNode(d.Type);
-            var pointerSuffix = new string('*', d.Type.GetPointerLevel());
-
-            string resolvedTypeName;
-            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else if (d.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else
-            {
-                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
-            }
+            string resolvedTypeName = typeResolver.ResolveType(d.Type, currentNamespace, currentUnit);
             TotalLocalSize += memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
         }
 
@@ -2965,27 +3315,7 @@ public class SymbolTable
             var baseTypeName = param.Type.GetBaseTypeName();
             if (baseTypeName == "unknown") continue;
 
-            var rawTypeName = TypeRepository.GetTypeNameFromNode(param.Type);
-            var pointerSuffix = new string('*', param.Type.GetPointerLevel());
-            string resolvedTypeName;
-
-            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else if (param.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else if (rawTypeName.Contains("::"))
-            {
-                // This correctly handles the pre-qualified 'this' parameter type.
-                resolvedTypeName = rawTypeName;
-            }
-            else
-            {
-                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
-            }
+            string resolvedTypeName = typeResolver.ResolveType(param.Type, currentNamespace, currentUnit);
 
             _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false, false); // isRead = false
             currentParamOffset += Math.Max(4, memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit));
@@ -2997,22 +3327,7 @@ public class SymbolTable
             var baseTypeName = decl.Type.GetBaseTypeName();
             if (baseTypeName == "unknown") continue;
 
-            var rawTypeName = TypeRepository.GetTypeNameFromNode(decl.Type);
-            var pointerSuffix = new string('*', decl.Type.GetPointerLevel());
-            string resolvedTypeName;
-
-            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else if (decl.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else
-            {
-                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
-            }
+            string resolvedTypeName = typeResolver.ResolveType(decl.Type, currentNamespace, currentUnit);
 
             int size = memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;
@@ -3117,13 +3432,39 @@ public class TypeRepository
                 _enumUnitMap[GetFullyQualifiedName(e)] = cu;
     }
 
+    public void RegisterInstantiatedStruct(StructDefinitionNode newStruct, CompilationUnitNode originalUnit)
+    {
+        var fqn = GetFullyQualifiedName(newStruct);
+        if (_structs.ContainsKey(fqn)) return; // Already registered
+
+        _structs[fqn] = newStruct;
+        _structUnitMap[fqn] = originalUnit;
+    }
+
     public static string GetFullyQualifiedName(StructDefinitionNode s) => s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name;
     public static string GetFullyQualifiedName(EnumDefinitionNode e) => e.Namespace != null ? $"{e.Namespace}::{e.Name}" : e.Name;
+
+    public string? GetFullyQualifiedOwnerName(FunctionDeclarationNode func)
+    {
+        if (func.OwnerStructName == null) return null;
+
+        // If the owner's name is mangled (contains "__"), it's already the FQN.
+        if (func.OwnerStructName.Contains("__"))
+        {
+            return func.OwnerStructName;
+        }
+
+        // Otherwise, construct the FQN from the namespace and name.
+        return func.Namespace != null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName;
+    }
 
     public StructDefinitionNode? FindStruct(string qualifiedName) => _structs.TryGetValue(qualifiedName, out var def) ? def : null;
 
     public StructDefinitionNode? FindStructByUnqualifiedName(string name, string? currentNamespace)
     {
+        // Handle already-mangled names from monomorphization
+        if (name.Contains("__")) return FindStruct(name);
+
         var fqn = currentNamespace != null ? $"{currentNamespace}::{name}" : name;
         if (_structs.TryGetValue(fqn, out var def)) return def;
         return _structs.TryGetValue(name, out def) ? def : null;
@@ -3190,7 +3531,8 @@ public class VTableManager
         if (structDef.BaseStructName != null)
         {
             var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            var baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            var baseFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
             result = HasVTable(baseFqn);
         }
 
@@ -3208,7 +3550,8 @@ public class VTableManager
         if (structDef.BaseStructName != null)
         {
             var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            var baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            var baseFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
             newVTable.AddRange(GetVTable(baseFqn));
         }
 
@@ -3611,7 +3954,7 @@ public class Parser
         }
 
         var unitNode = new CompilationUnitNode(filePath, usings, structs, functions, enums);
-        SetParents(unitNode);
+        SetParents(unitNode, null);
         return unitNode;
     }
 
@@ -3855,24 +4198,21 @@ public class Parser
     }
 
 
-    private void SetParents(AstNode node)
+    public void SetParents(AstNode node, AstNode? parent)
     {
+        node.Parent = parent;
         foreach (var property in node.GetType().GetProperties())
         {
             if (property.CanWrite && property.Name == "Parent") continue;
             if (property.GetValue(node) is AstNode child)
             {
-                var parentProp = child.GetType().GetProperty("Parent");
-                if (parentProp != null && parentProp.CanWrite) parentProp.SetValue(child, node);
-                SetParents(child);
+                SetParents(child, node);
             }
             else if (property.GetValue(node) is IEnumerable<AstNode> children)
             {
                 foreach (var c in children.ToList()) // ToList to avoid mutation issues
                 {
-                    var parentProp = c.GetType().GetProperty("Parent");
-                    if (parentProp != null && parentProp.CanWrite) parentProp.SetValue(c, node);
-                    SetParents(c);
+                    SetParents(c, node);
                 }
             }
         }
@@ -4409,19 +4749,25 @@ private:
         if (m_capacity < min_capacity)
         {
             int new_capacity = m_capacity * 2;
-            if (new_capacity < min_capacity) {
+        
+            if (new_capacity < min_capacity) 
+            {
                 new_capacity = min_capacity;
             }
-            if (new_capacity < 4) {
+        
+            if (new_capacity < 4) 
+            {
                 new_capacity = 4;
             }
 
             T* new_data = malloc(new_capacity * sizeof(T)); 
+        
             if (m_data != 0)
             {
                 memcpy(new_data, m_data, m_count * sizeof(T));
                 free(m_data);
             }
+        
             m_data = new_data;
             m_capacity = new_capacity;
         }
@@ -4471,6 +4817,7 @@ public:
         {
             memcpy(m_data + index, m_data + index + 1, (m_count - index - 1) * sizeof(T));
         }
+
         m_count = m_count - 1;
     }
     

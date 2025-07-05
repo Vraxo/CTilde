@@ -78,6 +78,25 @@ public class Monomorphizer
             GenericParameters = new List<Token>()
         };
 
+        // 6a. Update the owner name on all nested members (methods, ctors, dtors)
+        var updatedMethods = concreteStruct.Methods
+            .Select(m => m with { OwnerStructName = mangledName })
+            .ToList();
+        var updatedConstructors = concreteStruct.Constructors
+            .Select(c => c with { OwnerStructName = mangledName })
+            .ToList();
+        var updatedDestructors = concreteStruct.Destructors
+            .Select(d => d with { OwnerStructName = mangledName })
+            .ToList();
+
+        concreteStruct = concreteStruct with
+        {
+            Methods = updatedMethods,
+            Constructors = updatedConstructors,
+            Destructors = updatedDestructors
+        };
+
+
         // 7. Register the new struct with the TypeRepository and its compilation unit
         _typeRepository.RegisterInstantiatedStruct(concreteStruct, templateUnit);
         templateUnit.Structs.Add(concreteStruct); // Add to the original unit's list of structs

@@ -66,8 +66,7 @@ public class ExpressionGenerator
         {
             try
             {
-                string ownerStructFqn = TypeRepository.GetMangledNameForOwner(context.CurrentFunction) ??
-                                        (context.CurrentFunction.Namespace != null ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}" : context.CurrentFunction.OwnerStructName);
+                string ownerStructFqn = TypeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
 
                 var (memberOffset, _) = MemoryLayoutManager.GetMemberInfo(ownerStructFqn, varExpr.Identifier.Value, context.CompilationUnit);
                 context.Symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
@@ -106,8 +105,16 @@ public class ExpressionGenerator
             case CallExpressionNode callExpr: GenerateCallExpression(callExpr, context); break;
             case QualifiedAccessExpressionNode qNode: GenerateQualifiedAccessExpression(qNode, context); break;
             case NewExpressionNode n: GenerateNewExpression(n, context); break;
+            case SizeofExpressionNode s: GenerateSizeofExpression(s, context); break;
             default: throw new NotImplementedException($"Expr: {expression.GetType().Name}");
         }
+    }
+
+    private void GenerateSizeofExpression(SizeofExpressionNode s, AnalysisContext context)
+    {
+        var typeFqn = TypeResolver.ResolveType(s.Type, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var size = MemoryLayoutManager.GetSizeOfType(typeFqn, context.CompilationUnit);
+        Builder.AppendInstruction($"mov eax, {size}");
     }
 
     private void GenerateNewExpression(NewExpressionNode n, AnalysisContext context)

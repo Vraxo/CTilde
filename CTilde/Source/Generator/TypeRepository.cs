@@ -41,10 +41,10 @@ public class TypeRepository
     public static string GetFullyQualifiedName(StructDefinitionNode s) => s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name;
     public static string GetFullyQualifiedName(EnumDefinitionNode e) => e.Namespace != null ? $"{e.Namespace}::{e.Name}" : e.Name;
 
-    public string? GetMangledNameForOwner(FunctionDeclarationNode func)
+    public string? GetFullyQualifiedOwnerName(FunctionDeclarationNode func)
     {
         if (func.OwnerStructName == null) return null;
-        if (func.OwnerStructName.Contains("__")) return func.OwnerStructName; // Already mangled
+        // The owner name, whether mangled or not, must be combined with the namespace to form the FQN.
         return func.Namespace != null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName;
     }
 

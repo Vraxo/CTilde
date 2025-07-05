@@ -281,10 +281,7 @@ public class SemanticAnalyzer
         // 3. If in a method, try resolving as an implicit `this->member`.
         if (context.CurrentFunction.OwnerStructName != null)
         {
-            string ownerStructFqn = _typeRepository.GetMangledNameForOwner(context.CurrentFunction) ??
-                                    (context.CurrentFunction.Namespace != null
-                                    ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}"
-                                    : context.CurrentFunction.OwnerStructName);
+            string ownerStructFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
 
             // Walk up the inheritance chain to find the member
             string? currentStructFqn = ownerStructFqn;
@@ -469,7 +466,7 @@ public class SemanticAnalyzer
             // First, try resolving as an implicit `this` method call
             if (context.CurrentFunction.OwnerStructName != null)
             {
-                var ownerFqn = _typeRepository.GetMangledNameForOwner(context.CurrentFunction)!;
+                var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
                 var methodOnThis = _functionResolver.ResolveMethod(ownerFqn, funcNameForDiags);
                 if (methodOnThis != null)
                 {

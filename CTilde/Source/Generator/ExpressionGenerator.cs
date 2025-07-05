@@ -373,13 +373,13 @@ public class ExpressionGenerator
         {
             if (leftTypeFqn.EndsWith("*") && rightTypeFqn == "int")
             {
-                var baseType = leftTypeFqn.TrimEnd('*');
+                var baseType = leftTypeFqn[..^1]; // Remove one level of indirection
                 var elementSize = MemoryLayoutManager.GetSizeOfType(baseType, context.CompilationUnit);
                 if (elementSize > 1) Builder.AppendInstruction($"imul ecx, {elementSize}");
             }
             else if (leftTypeFqn == "int" && rightTypeFqn.EndsWith("*"))
             {
-                var baseType = rightTypeFqn.TrimEnd('*');
+                var baseType = rightTypeFqn[..^1]; // Remove one level of indirection
                 var elementSize = MemoryLayoutManager.GetSizeOfType(baseType, context.CompilationUnit);
                 if (elementSize > 1) Builder.AppendInstruction($"imul eax, {elementSize}");
             }

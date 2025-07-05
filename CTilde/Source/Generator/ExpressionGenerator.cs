@@ -14,7 +14,7 @@ public class ExpressionGenerator
 
     private AssemblyBuilder Builder => _codeGenerator.Builder;
     private TypeRepository TypeRepository => _codeGenerator.TypeRepository;
-    private ExpressionTypeAnalyzer ExpressionTypeAnalyzer => _codeGenerator.ExpressionTypeAnalyzer;
+    private SemanticAnalyzer SemanticAnalyzer => _codeGenerator.SemanticAnalyzer;
     private MemoryLayoutManager MemoryLayoutManager => _codeGenerator.MemoryLayoutManager;
 
     public ExpressionGenerator(CodeGenerator codeGenerator)
@@ -51,7 +51,7 @@ public class ExpressionGenerator
 
     public int PushArgument(ExpressionNode arg, AnalysisContext context)
     {
-        var argType = ExpressionTypeAnalyzer.AnalyzeExpressionType(arg, context);
+        var argType = SemanticAnalyzer.AnalyzeExpressionType(arg, context);
         GenerateExpression(arg, context); // Result is address (for struct) or value (for primitive) in EAX
 
         if (TypeRepository.IsStruct(argType) && !argType.EndsWith("*"))

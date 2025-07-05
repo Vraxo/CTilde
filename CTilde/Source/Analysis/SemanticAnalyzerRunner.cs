@@ -7,21 +7,19 @@ namespace CTilde;
 public class SemanticAnalyzerRunner
 {
     private readonly ProgramNode _program;
-    private readonly ExpressionTypeAnalyzer _expressionTypeAnalyzer;
-    private readonly StatementValidator _statementValidator;
+    private readonly SemanticAnalyzer _analyzer;
     private readonly TypeResolver _typeResolver;
     private readonly FunctionResolver _functionResolver;
     private readonly MemoryLayoutManager _memoryLayoutManager;
     public List<Diagnostic> Diagnostics { get; } = new();
 
-    public SemanticAnalyzerRunner(ProgramNode program, TypeRepository typeRepository, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager, ExpressionTypeAnalyzer expressionTypeAnalyzer, StatementValidator statementValidator)
+    public SemanticAnalyzerRunner(ProgramNode program, TypeRepository typeRepository, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager, SemanticAnalyzer analyzer)
     {
         _program = program;
+        _analyzer = analyzer;
         _typeResolver = typeResolver;
         _functionResolver = functionResolver;
         _memoryLayoutManager = memoryLayoutManager;
-        _expressionTypeAnalyzer = expressionTypeAnalyzer;
-        _statementValidator = statementValidator;
     }
 
     public void Analyze()
@@ -175,26 +173,26 @@ public class SemanticAnalyzerRunner
                 }
                 break;
             case ExpressionStatementNode exprStmt:
-                _expressionTypeAnalyzer.AnalyzeExpressionType(exprStmt.Expression, context, Diagnostics);
+                _analyzer.AnalyzeExpressionType(exprStmt.Expression, context, Diagnostics);
                 break;
             case ReturnStatementNode retStmt:
-                _statementValidator.AnalyzeReturnStatement(retStmt, context, Diagnostics);
+                _analyzer.AnalyzeReturnStatement(retStmt, context, Diagnostics);
                 break;
             case IfStatementNode ifStmt:
-                _expressionTypeAnalyzer.AnalyzeExpressionType(ifStmt.Condition, context, Diagnostics);
+                _analyzer.AnalyzeExpressionType(ifStmt.Condition, context, Diagnostics);
                 WalkStatement(ifStmt.ThenBody, context);
                 if (ifStmt.ElseBody != null) WalkStatement(ifStmt.ElseBody, context);
                 break;
             case WhileStatementNode whileStmt:
-                _expressionTypeAnalyzer.AnalyzeExpressionType(whileStmt.Condition, context, Diagnostics);
+                _analyzer.AnalyzeExpressionType(whileStmt.Condition, context, Diagnostics);
                 WalkStatement(whileStmt.Body, context);
                 break;
             case DeclarationStatementNode decl:
                 // Special handling for declarations since initializer lists are not standalone expressions.
-                _statementValidator.AnalyzeDeclarationStatement(decl, context, Diagnostics);
+                _analyzer.AnalyzeDeclarationStatement(decl, context, Diagnostics);
                 break;
             case DeleteStatementNode deleteStmt:
-                _statementValidator.AnalyzeDeleteStatement(deleteStmt, context, Diagnostics);
+                _analyzer.AnalyzeDeleteStatement(deleteStmt, context, Diagnostics);
                 break;
         }
     }

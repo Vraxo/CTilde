@@ -7,7 +7,7 @@ echo Scanning folders:
 echo   - D:\Parsa Stuff\Visual Studio\DirectUI\DirectUI\Source
 echo ==================================================
 
-Fuse.exe "D:\Parsa Stuff\Visual Studio\CTilde\MergedCodeForAI.txt" "D:\Parsa Stuff\Visual Studio\CTilde\CTilde\Source" "D:\Parsa Stuff\Visual Studio\CTilde\CTilde\bin\Debug\net9.0\Code"
+Fuse.exe "D:\Parsa Stuff\Visual Studio\CTilde\MergedCodeForAI.txt" "D:\Parsa Stuff\Visual Studio\CTilde\CTilde\Source" "D:\Parsa Stuff\Visual Studio\CTilde\CTilde\bin\Debug\net9.0\Output"
 
 echo ==================================================
 echo Fuse process finished. Press any key to close this window.

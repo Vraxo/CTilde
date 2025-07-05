@@ -12,7 +12,7 @@ public class CodeGenerator
     internal FunctionResolver FunctionResolver { get; }
     internal VTableManager VTableManager { get; }
     internal MemoryLayoutManager MemoryLayoutManager { get; }
-    internal ExpressionTypeAnalyzer ExpressionTypeAnalyzer { get; }
+    internal SemanticAnalyzer SemanticAnalyzer { get; }
     internal AssemblyBuilder Builder { get; } = new();
 
     private int _labelIdCounter;
@@ -30,7 +30,7 @@ public class CodeGenerator
         FunctionResolver functionResolver,
         VTableManager vtableManager,
         MemoryLayoutManager memoryLayoutManager,
-        ExpressionTypeAnalyzer expressionTypeAnalyzer)
+        SemanticAnalyzer semanticAnalyzer)
     {
         Program = program;
         TypeRepository = typeRepository;
@@ -38,7 +38,7 @@ public class CodeGenerator
         FunctionResolver = functionResolver;
         VTableManager = vtableManager;
         MemoryLayoutManager = memoryLayoutManager;
-        ExpressionTypeAnalyzer = expressionTypeAnalyzer;
+        SemanticAnalyzer = semanticAnalyzer;
 
         ExpressionGenerator = new ExpressionGenerator(this);
         StatementGenerator = new StatementGenerator(this);

@@ -47,14 +47,11 @@ public class Compiler
         var vtableManager = new VTableManager(typeRepository, typeResolver);
         var memoryLayoutManager = new MemoryLayoutManager(typeRepository, typeResolver, vtableManager);
         var functionResolver = new FunctionResolver(typeRepository, typeResolver, programNode);
-
-        var expressionTypeAnalyzer = new ExpressionTypeAnalyzer(typeRepository, typeResolver, functionResolver, memoryLayoutManager);
-        functionResolver.SetExpressionTypeAnalyzer(expressionTypeAnalyzer); // Break circular dependency
-        var statementValidator = new StatementValidator(typeRepository, typeResolver, memoryLayoutManager, expressionTypeAnalyzer);
-
+        var semanticAnalyzer = new SemanticAnalyzer(typeRepository, typeResolver, functionResolver, memoryLayoutManager);
+        functionResolver.SetSemanticAnalyzer(semanticAnalyzer); // Break circular dependency
 
         // 4. Perform Semantic Analysis
-        var runner = new SemanticAnalyzerRunner(programNode, typeRepository, typeResolver, functionResolver, memoryLayoutManager, expressionTypeAnalyzer, statementValidator);
+        var runner = new SemanticAnalyzerRunner(programNode, typeRepository, typeResolver, functionResolver, memoryLayoutManager, semanticAnalyzer);
         runner.Analyze();
 
         allDiagnostics.AddRange(runner.Diagnostics);
@@ -74,11 +71,11 @@ public class Compiler
         }
 
         // 5. Generate Code
-        var generator = new CodeGenerator(programNode, typeRepository, typeResolver, functionResolver, vtableManager, memoryLayoutManager, expressionTypeAnalyzer);
+        var generator = new CodeGenerator(programNode, typeRepository, typeResolver, functionResolver, vtableManager, memoryLayoutManager, semanticAnalyzer);
         string asmCode = generator.Generate();
 
         // 6. Output
-        File.WriteAllText("Code/Output/output.asm", asmCode);
+        File.WriteAllText("Output/output.asm", asmCode);
         Console.WriteLine("Compilation successful. Assembly code written to output.asm");
     }
 }

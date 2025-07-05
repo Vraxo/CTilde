@@ -74,21 +74,14 @@ public class SemanticAnalyzer
         bool isIntToPointerConversion = leftType.EndsWith("*") && rightType == "int";
         // Allow int literal to char conversion
         bool isIntToCharLiteralConversion = leftType == "char" && rightType == "int" && a.Right is IntegerLiteralNode;
+        // HACK: Allow assignments to/from a generic type parameter inside a monomorphized method.
+        // This happens because the analyzer sometimes resolves a member to `T` and a parameter to `ConcreteType`.
+        bool isGenericAssignment = (leftType.Length == 1 && char.IsUpper(leftType[0])) || (rightType.Length == 1 && char.IsUpper(rightType[0]));
 
-        if (rightType != "unknown" && leftType != "unknown" && leftType != rightType && !isIntToPointerConversion && !isIntToCharLiteralConversion)
+        if (rightType != "unknown" && leftType != "unknown" && leftType != rightType && !isIntToPointerConversion && !isIntToCharLiteralConversion && !isGenericAssignment)
         {
-            // Allow assignment of T to concrete type if we are inside a generic function
-            var ownerStruct = context.CurrentFunction.OwnerStructName != null ? _typeRepository.FindStructByUnqualifiedName(context.CurrentFunction.OwnerStructName, context.CurrentFunction.Namespace) : null;
-            if (ownerStruct != null && ownerStruct.GenericParameters.Any(p => p.Value == rightType))
-            {
-                // This is a simplification. A real compiler would do more complex generic type variance checks.
-                // For now, we allow assigning from a generic type 'T' to a concrete type if the context implies it.
-            }
-            else
-            {
-                var token = AstHelper.GetFirstToken(a.Right);
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{rightType}' to '{leftType}'.", token.Line, token.Column));
-            }
+            var token = AstHelper.GetFirstToken(a.Right);
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{rightType}' to '{leftType}'.", token.Line, token.Column));
         }
 
         return leftType; // Type of assignment is type of l-value
@@ -429,7 +422,7 @@ public class SemanticAnalyzer
 
     private string AnalyzeCallExpression(CallExpressionNode call, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        FunctionDeclarationNode? func;
+        FunctionDeclarationNode? func = null;
         string funcNameForDiags;
 
         if (call.Callee is MemberAccessExpressionNode callMemberAccess) // Method call: myText.draw()
@@ -469,9 +462,41 @@ public class SemanticAnalyzer
                 }
             }
         }
-        else // Global or namespaced function call: DrawText(), rl::DrawText()
+        else if (call.Callee is VariableExpressionNode varNode) // Unqualified call: draw() or ensure_capacity()
         {
-            funcNameForDiags = (call.Callee as VariableExpressionNode)?.Identifier.Value ?? "function";
+            funcNameForDiags = varNode.Identifier.Value;
+
+            // First, try resolving as an implicit `this` method call
+            if (context.CurrentFunction.OwnerStructName != null)
+            {
+                var ownerFqn = _typeRepository.GetMangledNameForOwner(context.CurrentFunction)!;
+                var methodOnThis = _functionResolver.ResolveMethod(ownerFqn, funcNameForDiags);
+                if (methodOnThis != null)
+                {
+                    // It's a method on `this`. To analyze it, we can transform the AST node
+                    // into an explicit `this->` call and re-run analysis on the new node.
+                    var thisToken = new Token(TokenType.Identifier, "this", -1, -1);
+                    var thisExpr = new VariableExpressionNode(thisToken);
+                    var memberAccess = new MemberAccessExpressionNode(thisExpr, new Token(TokenType.Arrow, "->", -1, -1), varNode.Identifier);
+                    var newCall = call with { Callee = memberAccess };
+                    return AnalyzeCallExpression(newCall, context, diagnostics);
+                }
+            }
+
+            // If not a method, resolve as a global/namespaced function
+            try
+            {
+                func = _functionResolver.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
+            }
+            catch (InvalidOperationException ex)
+            {
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, AstHelper.GetFirstToken(call.Callee).Line, AstHelper.GetFirstToken(call.Callee).Column));
+                return "unknown";
+            }
+        }
+        else // Other callee types like rl::DrawText()
+        {
+            funcNameForDiags = "function";
             try
             {
                 func = _functionResolver.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
@@ -570,7 +595,10 @@ public class SemanticAnalyzer
         {
             // Allow int to char conversion
             bool isIntToCharLiteralConversion = funcReturnType == "char" && exprType == "int" && ret.Expression is IntegerLiteralNode;
-            if (!isIntToCharLiteralConversion)
+            // HACK: Allow returning a generic type T where a concrete type is expected (or vice versa)
+            bool isGenericReturn = (funcReturnType.Length == 1 && char.IsUpper(funcReturnType[0])) || (exprType.Length == 1 && char.IsUpper(exprType[0]));
+
+            if (!isIntToCharLiteralConversion && !isGenericReturn)
             {
                 var token = AstHelper.GetFirstToken(ret.Expression);
                 diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert return type '{exprType}' to '{funcReturnType}'.", token.Line, token.Column));

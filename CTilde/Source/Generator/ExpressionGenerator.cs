@@ -247,22 +247,13 @@ public class ExpressionGenerator
     private void GenerateCallExpression(CallExpressionNode callExpr, AnalysisContext context)
     {
         int totalArgSize = 0;
-        FunctionDeclarationNode func;
 
-        if (callExpr.Callee is MemberAccessExpressionNode memberAccess)
-        {
-            var ownerTypeName = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context).TrimEnd('*');
-            var ownerStruct = TypeRepository.FindStruct(ownerTypeName) ?? throw new InvalidOperationException($"Could not find struct definition for '{ownerTypeName}'.");
-            func = FunctionResolver.ResolveMethod(ownerTypeName, memberAccess.Member.Value);
-        }
-        else
-        {
-            func = FunctionResolver.ResolveFunctionCall(callExpr.Callee, context.CompilationUnit, context.CurrentFunction);
-        }
+        // Phase 1: Resolve the function to be called.
+        var func = FunctionResolver.ResolveFunctionCall(callExpr.Callee, context);
 
+        // Phase 2: Handle struct return values (if any).
         var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(func, context);
         bool returnsStructByValue = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
-
         if (returnsStructByValue)
         {
             var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
@@ -271,39 +262,60 @@ public class ExpressionGenerator
             totalArgSize += 4;
         }
 
+        // Phase 3: Push all regular arguments.
         foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
         {
             totalArgSize += PushArgument(arg, context);
         }
 
-        if (callExpr.Callee is MemberAccessExpressionNode ma)
+        // Phase 4: Push `this` pointer (if it's a method) and dispatch the call.
+        bool isMethodCall = func.OwnerStructName != null;
+        if (isMethodCall)
         {
-            if (ma.Operator.Type == TokenType.Arrow) GenerateExpression(ma.Left, context);
-            else GenerateLValueAddress(ma.Left, context);
-
+            if (callExpr.Callee is MemberAccessExpressionNode ma)
+            {
+                // Explicit call (obj.method() or ptr->method())
+                if (ma.Operator.Type == TokenType.Arrow) GenerateExpression(ma.Left, context);
+                else GenerateLValueAddress(ma.Left, context);
+            }
+            else
+            {
+                // Implicit `this` call (method() from within another method)
+                context.Symbols.TryGetSymbol("this", out int thisOffset, out _, out _);
+                Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get implicit 'this' pointer");
+            }
             Builder.AppendInstruction("push eax", "Push 'this' pointer");
             totalArgSize += 4;
 
+            // Dispatch (virtual or static)
             if (func.IsVirtual || func.IsOverride)
             {
-                var ownerTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(ma.Left, context).TrimEnd('*');
+                var ownerTypeFqn = TypeRepository.GetFullyQualifiedOwnerName(func)!;
                 var vtableIndex = VTableManager.GetMethodVTableIndex(ownerTypeFqn, func.Name);
-                int thisPtrOffset = totalArgSize - 4; // 'this' is the last thing pushed before call
-                Builder.AppendInstruction($"mov eax, [esp + {thisPtrOffset}]", "Get 'this' from stack");
+                int thisPtrOnStackOffset = totalArgSize - 4;
+                Builder.AppendInstruction($"mov eax, [esp + {thisPtrOnStackOffset}]", "Get 'this' from stack for vcall");
                 Builder.AppendInstruction("mov eax, [eax]", "Get vtable pointer from object");
                 Builder.AppendInstruction($"mov eax, [eax + {vtableIndex * 4}]", $"Get method address from vtable[{vtableIndex}]");
                 Builder.AppendInstruction("call eax");
             }
-            else { Builder.AppendInstruction($"call {NameMangler.Mangle(func)}"); }
+            else
+            {
+                Builder.AppendInstruction($"call {NameMangler.Mangle(func)}");
+            }
         }
         else
         {
+            // Global function dispatch
             string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
             if (func.Body == null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
         }
 
-        Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
+        // Phase 5: Cleanup stack.
+        if (totalArgSize > 0)
+        {
+            Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
+        }
 
         if (returnsStructByValue)
         {
@@ -404,7 +416,7 @@ public class ExpressionGenerator
             }
         }
 
-        var func = FunctionResolver.ResolveFunctionCall(qNode, context.CompilationUnit, context.CurrentFunction);
+        var func = FunctionResolver.ResolveFunctionCall(qNode, context);
         string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
         if (func.Body == null) ExternalFunctions.Add(func.Name);
         Builder.AppendInstruction($"mov eax, {calleeTarget}");

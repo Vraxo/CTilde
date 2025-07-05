@@ -437,91 +437,36 @@ public class SemanticAnalyzer
         FunctionDeclarationNode? func = null;
         string funcNameForDiags;
 
-        if (call.Callee is MemberAccessExpressionNode callMemberAccess) // Method call: myText.draw()
+        try
         {
-            funcNameForDiags = callMemberAccess.Member.Value;
-            var ownerTypeName = AnalyzeExpressionType(callMemberAccess.Left, context, diagnostics).TrimEnd('*');
-            if (ownerTypeName == "unknown") return "unknown";
-
-            var ownerStruct = _typeRepository.FindStruct(ownerTypeName);
-            if (ownerStruct == null)
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Could not find struct definition for '{ownerTypeName}'.", AstHelper.GetFirstToken(callMemberAccess.Left).Line, AstHelper.GetFirstToken(callMemberAccess.Left).Column));
-                return "unknown";
-            }
-
-            func = _functionResolver.ResolveMethod(ownerTypeName, callMemberAccess.Member.Value);
-            if (func == null)
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Method '{callMemberAccess.Member.Value}' not found on struct '{ownerStruct.Name}' or its base classes.", callMemberAccess.Member.Line, callMemberAccess.Member.Column));
-                return "unknown";
-            }
-
-            // ** ENFORCE ACCESS SPECIFIER FOR METHODS **
-            if (func.AccessLevel == AccessSpecifier.Private)
-            {
-                var definingStructFqn = func.OwnerStructName != null ? (func.Namespace != null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName) : null;
-                var definingStruct = definingStructFqn != null ? _typeRepository.FindStruct(definingStructFqn) : null;
-
-                if (definingStruct == null || context.CurrentFunction.OwnerStructName != definingStruct.Name || context.CurrentFunction.Namespace != definingStruct.Namespace)
-                {
-                    diagnostics.Add(new Diagnostic(
-                        context.CompilationUnit.FilePath,
-                        $"Method '{ownerStruct.Name}::{func.Name}' is private and cannot be accessed from this context.",
-                        callMemberAccess.Member.Line,
-                        callMemberAccess.Member.Column
-                    ));
-                }
-            }
+            func = _functionResolver.ResolveFunctionCall(call.Callee, context);
+            funcNameForDiags = func.Name;
         }
-        else if (call.Callee is VariableExpressionNode varNode) // Unqualified call: draw() or ensure_capacity()
+        catch (InvalidOperationException ex)
         {
-            funcNameForDiags = varNode.Identifier.Value;
-
-            // First, try resolving as an implicit `this` method call
-            if (context.CurrentFunction.OwnerStructName != null)
-            {
-                var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
-                var methodOnThis = _functionResolver.ResolveMethod(ownerFqn, funcNameForDiags);
-                if (methodOnThis != null)
-                {
-                    // It's a method on `this`. To analyze it, we can transform the AST node
-                    // into an explicit `this->` call and re-run analysis on the new node.
-                    var thisToken = new Token(TokenType.Identifier, "this", -1, -1);
-                    var thisExpr = new VariableExpressionNode(thisToken);
-                    var memberAccess = new MemberAccessExpressionNode(thisExpr, new Token(TokenType.Arrow, "->", -1, -1), varNode.Identifier);
-                    var newCall = call with { Callee = memberAccess };
-                    return AnalyzeCallExpression(newCall, context, diagnostics);
-                }
-            }
-
-            // If not a method, resolve as a global/namespaced function
-            try
-            {
-                func = _functionResolver.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
-            }
-            catch (InvalidOperationException ex)
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, AstHelper.GetFirstToken(call.Callee).Line, AstHelper.GetFirstToken(call.Callee).Column));
-                return "unknown";
-            }
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, AstHelper.GetFirstToken(call.Callee).Line, AstHelper.GetFirstToken(call.Callee).Column));
+            return "unknown";
         }
-        else // Other callee types like rl::DrawText()
+
+        // ** ENFORCE ACCESS SPECIFIER FOR METHODS **
+        if (func.OwnerStructName != null && func.AccessLevel == AccessSpecifier.Private)
         {
-            funcNameForDiags = "function";
-            try
+            var definingStructFqn = _typeRepository.GetFullyQualifiedOwnerName(func);
+            var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction);
+
+            if (definingStructFqn != ownerFqn)
             {
-                func = _functionResolver.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
-            }
-            catch (InvalidOperationException ex)
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, AstHelper.GetFirstToken(call.Callee).Line, AstHelper.GetFirstToken(call.Callee).Column));
-                return "unknown";
+                diagnostics.Add(new Diagnostic(
+                   context.CompilationUnit.FilePath,
+                   $"Method '{func.Name}' is private and cannot be accessed from this context.",
+                   AstHelper.GetFirstToken(call.Callee).Line,
+                   AstHelper.GetFirstToken(call.Callee).Column
+               ));
             }
         }
 
         // ** VALIDATE ARGUMENT COUNT **
-        int expectedArgs = call.Callee is MemberAccessExpressionNode
+        int expectedArgs = func.OwnerStructName != null
             ? func.Parameters.Count - 1 // Don't count implicit 'this'
             : func.Parameters.Count;
 
@@ -529,7 +474,7 @@ public class SemanticAnalyzer
         {
             diagnostics.Add(new Diagnostic(
                 context.CompilationUnit.FilePath,
-                $"Wrong number of arguments for call to '{funcNameForDiags}'. Expected {expectedArgs}, but got {call.Arguments.Count}.",
+                $"Wrong number of arguments for call to '{func.Name}'. Expected {expectedArgs}, but got {call.Arguments.Count}.",
                 AstHelper.GetFirstToken(call).Line,
                 AstHelper.GetFirstToken(call).Column
             ));
@@ -569,7 +514,7 @@ public class SemanticAnalyzer
         // We resolve it here, but its "type" for now is just void*.
         try
         {
-            _functionResolver.ResolveFunctionCall(q, context.CompilationUnit, context.CurrentFunction);
+            _functionResolver.ResolveFunctionCall(q, context);
             return "void*"; // Represents a function pointer type
         }
         catch (InvalidOperationException)

@@ -9,6 +9,7 @@ public class FunctionResolver
     private readonly TypeRepository _typeRepository;
     private readonly TypeResolver _typeResolver;
     private readonly ProgramNode _program; // For accessing all functions
+    private SemanticAnalyzer _semanticAnalyzer = null!;
 
     public FunctionResolver(TypeRepository typeRepository, TypeResolver typeResolver, ProgramNode program)
     {
@@ -17,9 +18,39 @@ public class FunctionResolver
         _program = program;
     }
 
-    public FunctionDeclarationNode ResolveFunctionCall(ExpressionNode callee, CompilationUnitNode context, FunctionDeclarationNode? currentFunction)
+    public void SetSemanticAnalyzer(SemanticAnalyzer analyzer) => _semanticAnalyzer = analyzer;
+
+    public FunctionDeclarationNode ResolveFunctionCall(ExpressionNode callee, AnalysisContext analysisContext)
     {
-        if (callee is VariableExpressionNode varNode) return ResolveFunctionByName(varNode.Identifier.Value, currentFunction?.Namespace, context);
+        var currentFunction = analysisContext.CurrentFunction;
+        var context = analysisContext.CompilationUnit;
+
+        if (callee is MemberAccessExpressionNode ma)
+        {
+            var ownerTypeFqn = _semanticAnalyzer.AnalyzeExpressionType(ma.Left, analysisContext).TrimEnd('*');
+            var method = ResolveMethod(ownerTypeFqn, ma.Member.Value);
+            return method ?? throw new InvalidOperationException($"Method '{ma.Member.Value}' not found on type '{ownerTypeFqn}'.");
+        }
+
+        if (callee is VariableExpressionNode varNode)
+        {
+            // If inside a method, first try resolving as an implicit 'this' call.
+            if (currentFunction?.OwnerStructName != null)
+            {
+                var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(currentFunction);
+                if (ownerFqn != null)
+                {
+                    var method = ResolveMethod(ownerFqn, varNode.Identifier.Value);
+                    if (method != null)
+                    {
+                        return method;
+                    }
+                }
+            }
+            // Fallback to global/namespaced function resolution.
+            return ResolveFunctionByName(varNode.Identifier.Value, currentFunction?.Namespace, context);
+        }
+
         if (callee is QualifiedAccessExpressionNode qNode)
         {
             string qualifier = TypeResolver.ResolveQualifier(qNode.Left);

@@ -80,15 +80,30 @@ public class Monomorphizer
             GenericParameters = new List<Token>()
         };
 
-        // 6a. Update the owner name on all nested members (methods, ctors, dtors)
-        var updatedMethods = concreteStruct.Methods
-            .Select(m => m with { OwnerStructName = mangledName })
-            .ToList();
+        // 6a. Update the owner name, namespace, and `this` parameter type on all nested members.
+        var updatedMethods = concreteStruct.Methods.Select(m =>
+        {
+            // The first parameter of a method is always 'this'.
+            var thisParam = m.Parameters.First();
+            var newThisType = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, mangledName, -1, -1)));
+            var newThisParam = thisParam with { Type = newThisType };
+
+            var newParams = new List<ParameterNode> { newThisParam };
+            newParams.AddRange(m.Parameters.Skip(1));
+
+            return m with
+            {
+                OwnerStructName = mangledName,
+                Namespace = null,
+                Parameters = newParams
+            };
+        }).ToList();
+
         var updatedConstructors = concreteStruct.Constructors
-            .Select(c => c with { OwnerStructName = mangledName })
+            .Select(c => c with { OwnerStructName = mangledName, Namespace = null })
             .ToList();
         var updatedDestructors = concreteStruct.Destructors
-            .Select(d => d with { OwnerStructName = mangledName })
+            .Select(d => d with { OwnerStructName = mangledName, Namespace = null })
             .ToList();
 
         concreteStruct = concreteStruct with

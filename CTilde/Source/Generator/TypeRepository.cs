@@ -44,7 +44,14 @@ public class TypeRepository
     public string? GetFullyQualifiedOwnerName(FunctionDeclarationNode func)
     {
         if (func.OwnerStructName == null) return null;
-        // The owner name, whether mangled or not, must be combined with the namespace to form the FQN.
+
+        // If the owner's name is mangled (contains "__"), it's already the FQN.
+        if (func.OwnerStructName.Contains("__"))
+        {
+            return func.OwnerStructName;
+        }
+
+        // Otherwise, construct the FQN from the namespace and name.
         return func.Namespace != null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName;
     }
 

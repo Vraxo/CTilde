@@ -48,6 +48,7 @@ public class Compiler
         var memoryLayoutManager = new MemoryLayoutManager(typeRepository, typeResolver, vtableManager);
         var functionResolver = new FunctionResolver(typeRepository, typeResolver, programNode);
         var semanticAnalyzer = new SemanticAnalyzer(typeRepository, typeResolver, functionResolver, memoryLayoutManager);
+        functionResolver.SetSemanticAnalyzer(semanticAnalyzer); // Break circular dependency
 
         // 4. Perform Semantic Analysis
         var runner = new SemanticAnalyzerRunner(programNode, typeRepository, typeResolver, functionResolver, memoryLayoutManager, semanticAnalyzer);

@@ -7,6 +7,6 @@ public class Program
     public static void Main(string[] args)
     {
         var compiler = new Compiler();
-        compiler.Compile("Output/main.c");
+        compiler.Compile("Code/main.c");
     }
 }

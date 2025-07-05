@@ -75,7 +75,7 @@ public class Compiler
         string asmCode = generator.Generate();
 
         // 6. Output
-        File.WriteAllText("Output/output.asm", asmCode);
+        File.WriteAllText("Code/Output/output.asm", asmCode);
         Console.WriteLine("Compilation successful. Assembly code written to output.asm");
     }
 }

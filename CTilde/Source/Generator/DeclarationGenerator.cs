@@ -84,7 +84,7 @@ public class DeclarationGenerator
     public void GenerateFunction(FunctionDeclarationNode function, CompilationUnitNode unit, StructDefinitionNode? owner)
     {
         var tempContext = new AnalysisContext(null, unit, function);
-        var returnTypeFqn = SemanticAnalyzer.AnalyzeFunctionReturnType(function, tempContext);
+        var returnTypeFqn = SemanticAnalyzer.GetFunctionReturnType(function, tempContext);
         var returnsStructByValue = TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*");
 
         var parametersWithRetPtr = new List<ParameterNode>(function.Parameters);

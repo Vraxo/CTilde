@@ -1,6 +1,4 @@
-﻿using System;
-
-namespace CTilde;
+﻿namespace CTilde;
 
 public class Program
 {

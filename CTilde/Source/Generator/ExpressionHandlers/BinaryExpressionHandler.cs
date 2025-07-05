@@ -21,7 +21,7 @@ public class BinaryExpressionHandler : ExpressionHandlerBase
             var opName = $"operator_{NameMangler.MangleOperator(binExpr.Operator.Value)}";
             var overload = FunctionResolver.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
 
-            var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(overload, context);
+            var returnType = SemanticAnalyzer.GetFunctionReturnType(overload, context);
             bool returnsStructByValue = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
             int totalArgSize = 0;
 

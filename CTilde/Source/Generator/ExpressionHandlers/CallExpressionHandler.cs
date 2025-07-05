@@ -1,89 +1,78 @@
-﻿using System.Linq;
-using CTilde.Generator;
+﻿using System; // Added for InvalidOperationException
+using System.Collections.Generic; // Added for List
+using System.Linq;
+using CTilde.Diagnostics; // Added for Diagnostic
 
-namespace CTilde.Generator.ExpressionHandlers;
+namespace CTilde.Analysis.ExpressionAnalyzers; // Corrected namespace
 
-public class CallExpressionHandler : ExpressionHandlerBase
+public class CallExpressionAnalyzer : ExpressionAnalyzerBase // Corrected class name
 {
-    public CallExpressionHandler(CodeGenerator codeGenerator) : base(codeGenerator) { }
+    public CallExpressionAnalyzer( // Corrected constructor name
+        SemanticAnalyzer semanticAnalyzer,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        MemoryLayoutManager memoryLayoutManager)
+        : base(semanticAnalyzer, typeRepository, typeResolver, functionResolver, memoryLayoutManager) { }
 
-    public override void Generate(ExpressionNode expression, AnalysisContext context)
+    public override string Analyze(ExpressionNode expr, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        var callExpr = (CallExpressionNode)expression;
-        int totalArgSize = 0;
+        var call = (CallExpressionNode)expr;
+        FunctionDeclarationNode? func = null;
+        string funcNameForDiags;
 
-        // Phase 1: Resolve the function to be called.
-        var func = FunctionResolver.ResolveFunctionCall(callExpr.Callee, context);
-
-        // Phase 2: Handle struct return values (if any).
-        var returnType = SemanticAnalyzer.AnalyzeFunctionReturnType(func, context);
-        bool returnsStructByValue = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
-        if (returnsStructByValue)
+        try
         {
-            var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
-            Builder.AppendInstruction($"sub esp, {size}", "Make space for return value");
-            Builder.AppendInstruction("push esp", "Push hidden return value pointer");
-            totalArgSize += 4;
+            func = _functionResolver.ResolveFunctionCall(call.Callee, context);
+            funcNameForDiags = func.Name;
+        }
+        catch (InvalidOperationException ex)
+        {
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, AstHelper.GetFirstToken(call.Callee).Line, AstHelper.GetFirstToken(call.Callee).Column));
+            return "unknown";
         }
 
-        // Phase 3: Push all regular arguments.
-        foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
+        // ** ENFORCE ACCESS SPECIFIER FOR METHODS **
+        if (func.OwnerStructName != null && func.AccessLevel == AccessSpecifier.Private)
         {
-            totalArgSize += Dispatcher.PushArgument(arg, context);
-        }
+            var definingStructFqn = _typeRepository.GetFullyQualifiedOwnerName(func);
+            var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction);
 
-        // Phase 4: Push `this` pointer (if it's a method) and dispatch the call.
-        bool isMethodCall = func.OwnerStructName != null;
-        if (isMethodCall)
-        {
-            if (callExpr.Callee is MemberAccessExpressionNode ma)
+            if (definingStructFqn != ownerFqn)
             {
-                // Explicit call (obj.method() or ptr->method())
-                if (ma.Operator.Type == TokenType.Arrow) Dispatcher.GenerateExpression(ma.Left, context);
-                else LValueGenerator.GenerateLValueAddress(ma.Left, context);
-            }
-            else
-            {
-                // Implicit `this` call (method() from within another method)
-                context.Symbols.TryGetSymbol("this", out int thisOffset, out _, out _);
-                Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get implicit 'this' pointer");
-            }
-            Builder.AppendInstruction("push eax", "Push 'this' pointer");
-            totalArgSize += 4;
-
-            // Dispatch (virtual or static)
-            if (func.IsVirtual || func.IsOverride)
-            {
-                var ownerTypeFqn = TypeRepository.GetFullyQualifiedOwnerName(func)!;
-                var vtableIndex = VTableManager.GetMethodVTableIndex(ownerTypeFqn, func.Name);
-                int thisPtrOnStackOffset = totalArgSize - 4;
-                Builder.AppendInstruction($"mov eax, [esp + {thisPtrOnStackOffset}]", "Get 'this' from stack for vcall");
-                Builder.AppendInstruction("mov eax, [eax]", "Get vtable pointer from object");
-                Builder.AppendInstruction($"mov eax, [eax + {vtableIndex * 4}]", $"Get method address from vtable[{vtableIndex}]");
-                Builder.AppendInstruction("call eax");
-            }
-            else
-            {
-                Builder.AppendInstruction($"call {NameMangler.Mangle(func)}");
+                diagnostics.Add(new Diagnostic(
+                   context.CompilationUnit.FilePath,
+                   $"Method '{func.Name}' is private and cannot be accessed from this context.",
+                   AstHelper.GetFirstToken(call.Callee).Line,
+                   AstHelper.GetFirstToken(call.Callee).Column
+               ));
             }
         }
-        else
+
+        // ** VALIDATE ARGUMENT COUNT **
+        int expectedArgs = func.OwnerStructName != null
+            ? func.Parameters.Count - 1 // Don't count implicit 'this'
+            : func.Parameters.Count;
+
+        if (call.Arguments.Count != expectedArgs)
         {
-            // Global function dispatch
-            string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
-            if (func.Body == null) ExternalFunctions.Add(func.Name);
-            Builder.AppendInstruction($"call {calleeTarget}");
+            diagnostics.Add(new Diagnostic(
+                context.CompilationUnit.FilePath,
+                $"Wrong number of arguments for call to '{func.Name}'. Expected {expectedArgs}, but got {call.Arguments.Count}.",
+                AstHelper.GetFirstToken(call).Line,
+                AstHelper.GetFirstToken(call).Column
+            ));
         }
 
-        // Phase 5: Cleanup stack.
-        if (totalArgSize > 0)
+
+        // Analyze arguments for their types
+        foreach (var arg in call.Arguments)
         {
-            Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
+            _semanticAnalyzer.AnalyzeExpressionType(arg, context, diagnostics);
         }
 
-        if (returnsStructByValue)
-        {
-            Builder.AppendInstruction("lea eax, [esp]", "Get address of hidden return temporary");
-        }
+        // TODO: Validate argument types against function signature
+
+        return _semanticAnalyzer.GetFunctionReturnType(func, context);
     }
 }

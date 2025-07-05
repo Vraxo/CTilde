@@ -255,7 +255,7 @@ public class StatementGenerator
 
     private void GenerateReturn(ReturnStatementNode ret, AnalysisContext context)
     {
-        var returnTypeFqn = _context.SemanticAnalyzer.AnalyzeFunctionReturnType(context.CurrentFunction, context);
+        var returnTypeFqn = _context.SemanticAnalyzer.GetFunctionReturnType(context.CurrentFunction, context);
         if (TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
             if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");

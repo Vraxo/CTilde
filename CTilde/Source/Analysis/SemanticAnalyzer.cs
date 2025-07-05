@@ -492,7 +492,6 @@ public class SemanticAnalyzer
         return AnalyzeFunctionReturnType(func, context);
     }
 
-
     private string AnalyzeQualifiedAccessExpression(QualifiedAccessExpressionNode q, AnalysisContext context, List<Diagnostic> diagnostics)
     {
         string qualifier = TypeResolver.ResolveQualifier(q.Left);

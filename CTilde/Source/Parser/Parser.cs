@@ -135,7 +135,7 @@ public class Parser
         }
 
         var unitNode = new CompilationUnitNode(filePath, usings, structs, functions, enums);
-        SetParents(unitNode);
+        SetParents(unitNode, null);
         return unitNode;
     }
 
@@ -379,24 +379,21 @@ public class Parser
     }
 
 
-    private void SetParents(AstNode node)
+    public void SetParents(AstNode node, AstNode? parent)
     {
+        node.Parent = parent;
         foreach (var property in node.GetType().GetProperties())
         {
             if (property.CanWrite && property.Name == "Parent") continue;
             if (property.GetValue(node) is AstNode child)
             {
-                var parentProp = child.GetType().GetProperty("Parent");
-                if (parentProp != null && parentProp.CanWrite) parentProp.SetValue(child, node);
-                SetParents(child);
+                SetParents(child, node);
             }
             else if (property.GetValue(node) is IEnumerable<AstNode> children)
             {
                 foreach (var c in children.ToList()) // ToList to avoid mutation issues
                 {
-                    var parentProp = c.GetType().GetProperty("Parent");
-                    if (parentProp != null && parentProp.CanWrite) parentProp.SetValue(c, node);
-                    SetParents(c);
+                    SetParents(c, node);
                 }
             }
         }

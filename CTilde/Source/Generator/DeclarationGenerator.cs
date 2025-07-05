@@ -39,7 +39,8 @@ public class DeclarationGenerator
             var argTypes = ctor.Initializer.Arguments
                 .Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, analysisContext))
                 .ToList();
-            var baseFqn = TypeResolver.ResolveTypeName(ownerStruct.BaseStructName!, ownerStruct.Namespace, unit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, ownerStruct.BaseStructName!, -1, -1));
+            var baseFqn = TypeResolver.ResolveType(baseTypeNode, ownerStruct.Namespace, unit);
             var baseCtor = FunctionResolver.FindConstructor(baseFqn, argTypes) ?? throw new InvalidOperationException("Base constructor not found for given argument types.");
 
 

@@ -56,22 +56,7 @@ public class SymbolTable
             var baseTypeName = d.Type.GetBaseTypeName();
             if (baseTypeName == "unknown") continue;
 
-            var rawTypeName = TypeRepository.GetTypeNameFromNode(d.Type);
-            var pointerSuffix = new string('*', d.Type.GetPointerLevel());
-
-            string resolvedTypeName;
-            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else if (d.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else
-            {
-                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
-            }
+            string resolvedTypeName = typeResolver.ResolveType(d.Type, currentNamespace, currentUnit);
             TotalLocalSize += memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
         }
 
@@ -81,26 +66,24 @@ public class SymbolTable
             var baseTypeName = param.Type.GetBaseTypeName();
             if (baseTypeName == "unknown") continue;
 
-            var rawTypeName = TypeRepository.GetTypeNameFromNode(param.Type);
-            var pointerSuffix = new string('*', param.Type.GetPointerLevel());
             string resolvedTypeName;
-
-            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
+            if (param.Name.Value == "this" && param.Type is PointerTypeNode ptn && ptn.BaseType is SimpleTypeNode stn)
             {
-                resolvedTypeName = rawTypeName;
-            }
-            else if (param.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else if (rawTypeName.Contains("::"))
-            {
-                // This correctly handles the pre-qualified 'this' parameter type.
-                resolvedTypeName = rawTypeName;
+                // The 'this' pointer for a monomorphized struct needs to use the mangled name.
+                // We can get this from the owner's name which should already be mangled.
+                var function = param.Ancestors().OfType<FunctionDeclarationNode>().FirstOrDefault();
+                if (function != null && function.OwnerStructName != null && function.OwnerStructName.Contains("__"))
+                {
+                    resolvedTypeName = function.OwnerStructName + "*";
+                }
+                else
+                {
+                    resolvedTypeName = typeResolver.ResolveType(param.Type, currentNamespace, currentUnit);
+                }
             }
             else
             {
-                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+                resolvedTypeName = typeResolver.ResolveType(param.Type, currentNamespace, currentUnit);
             }
 
             _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false, false); // isRead = false
@@ -113,22 +96,7 @@ public class SymbolTable
             var baseTypeName = decl.Type.GetBaseTypeName();
             if (baseTypeName == "unknown") continue;
 
-            var rawTypeName = TypeRepository.GetTypeNameFromNode(decl.Type);
-            var pointerSuffix = new string('*', decl.Type.GetPointerLevel());
-            string resolvedTypeName;
-
-            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else if (decl.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
-            {
-                resolvedTypeName = rawTypeName;
-            }
-            else
-            {
-                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
-            }
+            string resolvedTypeName = typeResolver.ResolveType(decl.Type, currentNamespace, currentUnit);
 
             int size = memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;

@@ -37,7 +37,9 @@ public class MemoryLayoutManager
             var structUnit = _typeRepository.GetCompilationUnitForStruct(typeNameFqn);
             if (structDef.BaseStructName != null)
             {
-                string baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+                var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+                string baseFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, structUnit);
+
                 // The baseUnit might be different if the base struct is in another file/namespace
                 var baseUnit = _typeRepository.GetCompilationUnitForStruct(baseFqn);
                 size += GetSizeOfType(baseFqn, baseUnit);
@@ -49,19 +51,7 @@ public class MemoryLayoutManager
 
             foreach (var member in structDef.Members)
             {
-                var rawMemberType = TypeRepository.GetTypeNameFromNode(member.Type);
-                string baseMemberName = rawMemberType.TrimEnd('*');
-                string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
-
-                string resolvedMemberType;
-                if (member.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
-                {
-                    resolvedMemberType = rawMemberType;
-                }
-                else
-                {
-                    resolvedMemberType = _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, structUnit) + pointerSuffix;
-                }
+                var resolvedMemberType = _typeResolver.ResolveType(member.Type, structDef.Namespace, structUnit);
 
                 var memberUnit = _typeRepository.IsStruct(resolvedMemberType)
                     ? _typeRepository.GetCompilationUnitForStruct(resolvedMemberType.TrimEnd('*'))
@@ -90,7 +80,8 @@ public class MemoryLayoutManager
         if (structDef.BaseStructName != null)
         {
             var structUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            string baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, structUnit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            string baseFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, structUnit);
             var baseUnit = _typeRepository.GetCompilationUnitForStruct(baseFqn);
             allMembers.AddRange(GetAllMembers(baseFqn, baseUnit));
             currentOffset = GetSizeOfType(baseFqn, baseUnit);
@@ -103,19 +94,7 @@ public class MemoryLayoutManager
         foreach (var mem in structDef.Members)
         {
             var ownUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            var rawMemberType = TypeRepository.GetTypeNameFromNode(mem.Type);
-            var baseMemberName = rawMemberType.TrimEnd('*');
-            var pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
-
-            string resolvedMemberType;
-            if (mem.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
-            {
-                resolvedMemberType = rawMemberType;
-            }
-            else
-            {
-                resolvedMemberType = _typeResolver.ResolveTypeName(baseMemberName, structDef.Namespace, ownUnit) + pointerSuffix;
-            }
+            string resolvedMemberType = _typeResolver.ResolveType(mem.Type, structDef.Namespace, ownUnit);
 
             allMembers.Add((mem.Name.Value, resolvedMemberType, currentOffset, mem.IsConst));
 

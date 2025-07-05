@@ -35,7 +35,8 @@ public class VTableManager
         if (structDef.BaseStructName != null)
         {
             var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            var baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            var baseFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
             result = HasVTable(baseFqn);
         }
 
@@ -53,7 +54,8 @@ public class VTableManager
         if (structDef.BaseStructName != null)
         {
             var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            var baseFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            var baseFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
             newVTable.AddRange(GetVTable(baseFqn));
         }
 

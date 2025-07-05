@@ -29,13 +29,32 @@ public class TypeRepository
                 _enumUnitMap[GetFullyQualifiedName(e)] = cu;
     }
 
+    public void RegisterInstantiatedStruct(StructDefinitionNode newStruct, CompilationUnitNode originalUnit)
+    {
+        var fqn = GetFullyQualifiedName(newStruct);
+        if (_structs.ContainsKey(fqn)) return; // Already registered
+
+        _structs[fqn] = newStruct;
+        _structUnitMap[fqn] = originalUnit;
+    }
+
     public static string GetFullyQualifiedName(StructDefinitionNode s) => s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name;
     public static string GetFullyQualifiedName(EnumDefinitionNode e) => e.Namespace != null ? $"{e.Namespace}::{e.Name}" : e.Name;
+
+    public string? GetMangledNameForOwner(FunctionDeclarationNode func)
+    {
+        if (func.OwnerStructName == null) return null;
+        if (func.OwnerStructName.Contains("__")) return func.OwnerStructName; // Already mangled
+        return func.Namespace != null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName;
+    }
 
     public StructDefinitionNode? FindStruct(string qualifiedName) => _structs.TryGetValue(qualifiedName, out var def) ? def : null;
 
     public StructDefinitionNode? FindStructByUnqualifiedName(string name, string? currentNamespace)
     {
+        // Handle already-mangled names from monomorphization
+        if (name.Contains("__")) return FindStruct(name);
+
         var fqn = currentNamespace != null ? $"{currentNamespace}::{name}" : name;
         if (_structs.TryGetValue(fqn, out var def)) return def;
         return _structs.TryGetValue(name, out def) ? def : null;

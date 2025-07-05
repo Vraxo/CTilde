@@ -60,7 +60,8 @@ public class FunctionResolver
             if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
 
             var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            structFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            structFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
         }
         return null;
     }
@@ -86,19 +87,7 @@ public class FunctionResolver
             for (int i = 0; i < argTypeFqns.Count; i++)
             {
                 var param = ctor.Parameters[i];
-                var rawParamType = TypeRepository.GetTypeNameFromNode(param.Type);
-                var baseParamType = rawParamType.TrimEnd('*');
-                var pointerSuffix = new string('*', rawParamType.Length - baseParamType.Length);
-
-                string resolvedParamType;
-                if (param.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseParamType.Equals("void", StringComparison.OrdinalIgnoreCase))
-                {
-                    resolvedParamType = rawParamType;
-                }
-                else
-                {
-                    resolvedParamType = _typeResolver.ResolveTypeName(baseParamType, ctor.Namespace, ctorUnit) + pointerSuffix;
-                }
+                var resolvedParamType = _typeResolver.ResolveType(param.Type, ctor.Namespace, ctorUnit);
 
                 string argumentType = argTypeFqns[i];
                 bool isMatch = resolvedParamType == argumentType;

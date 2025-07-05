@@ -66,7 +66,9 @@ public class ExpressionGenerator
         {
             try
             {
-                string ownerStructFqn = context.CurrentFunction.Namespace != null ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}" : context.CurrentFunction.OwnerStructName;
+                string ownerStructFqn = TypeRepository.GetMangledNameForOwner(context.CurrentFunction) ??
+                                        (context.CurrentFunction.Namespace != null ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}" : context.CurrentFunction.OwnerStructName);
+
                 var (memberOffset, _) = MemoryLayoutManager.GetMemberInfo(ownerStructFqn, varExpr.Identifier.Value, context.CompilationUnit);
                 context.Symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
                 Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get `this` pointer value");
@@ -110,8 +112,7 @@ public class ExpressionGenerator
 
     private void GenerateNewExpression(NewExpressionNode n, AnalysisContext context)
     {
-        var baseTypeName = n.Type.GetBaseTypeName();
-        var typeFqn = TypeResolver.ResolveTypeName(baseTypeName, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var typeFqn = TypeResolver.ResolveType(n.Type, context.CurrentFunction.Namespace, context.CompilationUnit);
         var size = MemoryLayoutManager.GetSizeOfType(typeFqn, context.CompilationUnit);
 
         Builder.AppendInstruction($"push {size}", "Push size for malloc");

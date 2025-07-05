@@ -77,8 +77,18 @@ public class SemanticAnalyzer
 
         if (rightType != "unknown" && leftType != "unknown" && leftType != rightType && !isIntToPointerConversion && !isIntToCharLiteralConversion)
         {
-            var token = AstHelper.GetFirstToken(a.Right);
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{rightType}' to '{leftType}'.", token.Line, token.Column));
+            // Allow assignment of T to concrete type if we are inside a generic function
+            var ownerStruct = context.CurrentFunction.OwnerStructName != null ? _typeRepository.FindStructByUnqualifiedName(context.CurrentFunction.OwnerStructName, context.CurrentFunction.Namespace) : null;
+            if (ownerStruct != null && ownerStruct.GenericParameters.Any(p => p.Value == rightType))
+            {
+                // This is a simplification. A real compiler would do more complex generic type variance checks.
+                // For now, we allow assigning from a generic type 'T' to a concrete type if the context implies it.
+            }
+            else
+            {
+                var token = AstHelper.GetFirstToken(a.Right);
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{rightType}' to '{leftType}'.", token.Line, token.Column));
+            }
         }
 
         return leftType; // Type of assignment is type of l-value
@@ -96,27 +106,15 @@ public class SemanticAnalyzer
     public void AnalyzeDeclarationStatement(DeclarationStatementNode decl, AnalysisContext context, List<Diagnostic> diagnostics)
     {
         string declaredTypeFqn;
-        var rawTypeName = TypeRepository.GetTypeNameFromNode(decl.Type);
-        var baseTypeName = rawTypeName.TrimEnd('*');
-        var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
-
-        if (decl.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
+        try
         {
-            declaredTypeFqn = rawTypeName; // For primitives like int, char, void
+            declaredTypeFqn = _typeResolver.ResolveType(decl.Type, context.CurrentFunction.Namespace, context.CompilationUnit);
         }
-        else
+        catch (InvalidOperationException ex)
         {
-            try
-            {
-                // For user-defined types (structs), resolve their FQN
-                declaredTypeFqn = _typeResolver.ResolveTypeName(baseTypeName, context.CurrentFunction.Namespace, context.CompilationUnit) + pointerSuffix;
-            }
-            catch (InvalidOperationException ex)
-            {
-                var token = decl.Type.GetFirstToken();
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
-                declaredTypeFqn = "unknown"; // Sentinel type
-            }
+            var token = decl.Type.GetFirstToken();
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
+            declaredTypeFqn = "unknown"; // Sentinel type
         }
 
         if (declaredTypeFqn == "unknown") return; // Stop analysis if type resolution failed
@@ -185,21 +183,7 @@ public class SemanticAnalyzer
 
     public string AnalyzeFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
     {
-        var returnTypeNameRaw = TypeRepository.GetTypeNameFromNode(func.ReturnType);
-        string resolvedReturnName;
-
-        if (func.ReturnType is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
-        {
-            resolvedReturnName = returnTypeNameRaw;
-        }
-        else
-        {
-            string baseReturnName = returnTypeNameRaw.TrimEnd('*');
-            string pointerSuffix = new string('*', returnTypeNameRaw.Length - baseReturnName.Length);
-            resolvedReturnName = _typeResolver.ResolveTypeName(baseReturnName, func.Namespace, context.CompilationUnit) + pointerSuffix;
-        }
-
-        return resolvedReturnName;
+        return _typeResolver.ResolveType(func.ReturnType, func.Namespace, context.CompilationUnit);
     }
 
     private string AnalyzeBinaryExpression(BinaryExpressionNode bin, AnalysisContext context, List<Diagnostic> diagnostics)
@@ -255,31 +239,24 @@ public class SemanticAnalyzer
 
     private string AnalyzeNewExpression(NewExpressionNode n, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        // A new expression always returns a pointer to the type.
         string typeName;
-        var rawTypeName = TypeRepository.GetTypeNameFromNode(n.Type);
-        string baseTypeName = rawTypeName.TrimEnd('*');
-        string pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
+        try
+        {
+            typeName = _typeResolver.ResolveType(n.Type, context.CurrentFunction.Namespace, context.CompilationUnit);
+        }
+        catch (InvalidOperationException ex)
+        {
+            var token = n.Type.GetFirstToken();
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
+            typeName = "unknown";
+        }
 
-        // 'new' can only be used with identifiers (struct types), not keywords like 'int'
+        // 'new' can only be used with struct types, not primitives like 'int'
         if (n.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
         {
             var token = n.Type.GetFirstToken();
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"'new' cannot be used with primitive type '{rawTypeName}'.", token.Line, token.Column));
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"'new' cannot be used with primitive type '{stn.TypeToken.Value}'.", token.Line, token.Column));
             return "unknown";
-        }
-        else
-        {
-            try
-            {
-                typeName = _typeResolver.ResolveTypeName(baseTypeName, context.CurrentFunction.Namespace, context.CompilationUnit) + pointerSuffix;
-            }
-            catch (InvalidOperationException ex)
-            {
-                var token = n.Type.GetFirstToken();
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
-                typeName = "unknown";
-            }
         }
 
         // Analyze constructor arguments to mark variables as used and check for other errors.
@@ -311,9 +288,10 @@ public class SemanticAnalyzer
         // 3. If in a method, try resolving as an implicit `this->member`.
         if (context.CurrentFunction.OwnerStructName != null)
         {
-            string ownerStructFqn = context.CurrentFunction.Namespace != null
-                ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}"
-                : context.CurrentFunction.OwnerStructName;
+            string ownerStructFqn = _typeRepository.GetMangledNameForOwner(context.CurrentFunction) ??
+                                    (context.CurrentFunction.Namespace != null
+                                    ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}"
+                                    : context.CurrentFunction.OwnerStructName);
 
             // Walk up the inheritance chain to find the member
             string? currentStructFqn = ownerStructFqn;
@@ -335,7 +313,8 @@ public class SemanticAnalyzer
                 if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
 
                 var unit = _typeRepository.GetCompilationUnitForStruct(currentStructFqn);
-                currentStructFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+                var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+                currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
             }
 
             if (member != null && definingStruct != null)
@@ -394,7 +373,8 @@ public class SemanticAnalyzer
             if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
 
             var unit = _typeRepository.GetCompilationUnitForStruct(currentStructFqn);
-            currentStructFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
         }
 
         if (member == null || definingStruct == null)

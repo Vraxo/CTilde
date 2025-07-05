@@ -41,7 +41,9 @@ public class Compiler
 
         // 3. Create analysis services ONCE
         var typeRepository = new TypeRepository(programNode);
-        var typeResolver = new TypeResolver(typeRepository);
+        var monomorphizer = new Monomorphizer(typeRepository);
+        var typeResolver = new TypeResolver(typeRepository, monomorphizer);
+        monomorphizer.SetResolver(typeResolver); // Break circular dependency
         var vtableManager = new VTableManager(typeRepository, typeResolver);
         var memoryLayoutManager = new MemoryLayoutManager(typeRepository, typeResolver, vtableManager);
         var functionResolver = new FunctionResolver(typeRepository, typeResolver, programNode);

@@ -7,10 +7,12 @@ namespace CTilde;
 public class TypeResolver
 {
     private readonly TypeRepository _typeRepository;
+    private readonly Monomorphizer _monomorphizer;
 
-    public TypeResolver(TypeRepository typeRepository)
+    public TypeResolver(TypeRepository typeRepository, Monomorphizer monomorphizer)
     {
         _typeRepository = typeRepository;
+        _monomorphizer = monomorphizer;
     }
 
     public static string ResolveQualifier(ExpressionNode expr)
@@ -23,7 +25,26 @@ public class TypeResolver
         };
     }
 
-    public string ResolveTypeName(string name, string? currentNamespace, CompilationUnitNode context)
+    public string ResolveType(TypeNode node, string? currentNamespace, CompilationUnitNode context)
+    {
+        switch (node)
+        {
+            case PointerTypeNode ptn:
+                return ResolveType(ptn.BaseType, currentNamespace, context) + "*";
+
+            case GenericInstantiationTypeNode gitn:
+                var concreteStruct = _monomorphizer.Instantiate(gitn, currentNamespace, context);
+                return TypeRepository.GetFullyQualifiedName(concreteStruct);
+
+            case SimpleTypeNode stn:
+                return ResolveSimpleTypeName(stn.GetBaseTypeName(), currentNamespace, context);
+
+            default:
+                throw new NotImplementedException($"ResolveType not implemented for {node.GetType().Name}");
+        }
+    }
+
+    public string ResolveSimpleTypeName(string name, string? currentNamespace, CompilationUnitNode context)
     {
         if (name is "int" or "char" or "void")
         {

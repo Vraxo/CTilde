@@ -27,7 +27,8 @@ public class SymbolTable
         CollectDeclarations(ctor.Body, allLocalDeclarations);
 
         var thisTypeName = ctor.Namespace != null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName;
-        var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName, -1, -1), 1, new Token(TokenType.Identifier, "this", -1, -1));
+        var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
+        var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
 
         var allParams = new List<ParameterNode> { thisParam };
         allParams.AddRange(ctor.Parameters);
@@ -41,7 +42,8 @@ public class SymbolTable
         CollectDeclarations(dtor.Body, allLocalDeclarations);
 
         var thisTypeName = dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName;
-        var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName, -1, -1), 1, new Token(TokenType.Identifier, "this", -1, -1));
+        var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
+        var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
 
         Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeResolver, memoryLayoutManager, dtor.Namespace, currentUnit);
     }
@@ -51,28 +53,47 @@ public class SymbolTable
         TotalLocalSize = 0;
         foreach (var d in localDeclarations)
         {
-            var rawTypeName = TypeRepository.GetTypeNameFromToken(d.Type, d.PointerLevel);
-            var baseTypeName = rawTypeName.TrimEnd('*');
-            var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
-            var resolvedTypeName = d.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
-                ? rawTypeName
-                : typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+            var baseTypeName = d.Type.GetBaseTypeName();
+            if (baseTypeName == "unknown") continue;
+
+            var rawTypeName = TypeRepository.GetTypeNameFromNode(d.Type);
+            var pointerSuffix = new string('*', d.Type.GetPointerLevel());
+
+            string resolvedTypeName;
+            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
+            {
+                resolvedTypeName = rawTypeName;
+            }
+            else if (d.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedTypeName = rawTypeName;
+            }
+            else
+            {
+                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+            }
             TotalLocalSize += memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
         }
 
         int currentParamOffset = 8; // EBP + 8 is first parameter
         foreach (var param in parameters)
         {
-            var rawTypeName = TypeRepository.GetTypeNameFromToken(param.Type, param.PointerLevel);
-            var baseTypeName = rawTypeName.TrimEnd('*');
-            var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
+            var baseTypeName = param.Type.GetBaseTypeName();
+            if (baseTypeName == "unknown") continue;
+
+            var rawTypeName = TypeRepository.GetTypeNameFromNode(param.Type);
+            var pointerSuffix = new string('*', param.Type.GetPointerLevel());
             string resolvedTypeName;
 
-            if (param.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
+            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
             {
                 resolvedTypeName = rawTypeName;
             }
-            else if (param.Type.Value.Contains("::"))
+            else if (param.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedTypeName = rawTypeName;
+            }
+            else if (rawTypeName.Contains("::"))
             {
                 // This correctly handles the pre-qualified 'this' parameter type.
                 resolvedTypeName = rawTypeName;
@@ -89,12 +110,25 @@ public class SymbolTable
         int currentLocalOffset = 0;
         foreach (var decl in localDeclarations)
         {
-            var rawTypeName = TypeRepository.GetTypeNameFromToken(decl.Type, decl.PointerLevel);
-            var baseTypeName = rawTypeName.TrimEnd('*');
-            var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
-            var resolvedTypeName = decl.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
-                ? rawTypeName
-                : typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+            var baseTypeName = decl.Type.GetBaseTypeName();
+            if (baseTypeName == "unknown") continue;
+
+            var rawTypeName = TypeRepository.GetTypeNameFromNode(decl.Type);
+            var pointerSuffix = new string('*', decl.Type.GetPointerLevel());
+            string resolvedTypeName;
+
+            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
+            {
+                resolvedTypeName = rawTypeName;
+            }
+            else if (decl.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedTypeName = rawTypeName;
+            }
+            else
+            {
+                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+            }
 
             int size = memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;

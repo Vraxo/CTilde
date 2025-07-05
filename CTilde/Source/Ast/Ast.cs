@@ -25,10 +25,10 @@ public abstract record ExpressionNode : AstNode;
 // Program structure
 public record ImportDirectiveNode(string LibraryName) : AstNode;
 public record UsingDirectiveNode(string Namespace, string? Alias) : AstNode;
-public record MemberVariableNode(bool IsConst, Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode;
-public record StructDefinitionNode(string Name, string? BaseStructName, string? Namespace, List<MemberVariableNode> Members, List<FunctionDeclarationNode> Methods, List<ConstructorDeclarationNode> Constructors, List<DestructorDeclarationNode> Destructors) : AstNode;
-public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
-public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, bool IsVirtual, bool IsOverride, string? Namespace) : AstNode;
+public record MemberVariableNode(bool IsConst, TypeNode Type, Token Name, AccessSpecifier AccessLevel) : AstNode;
+public record StructDefinitionNode(string Name, List<Token> GenericParameters, string? BaseStructName, string? Namespace, List<MemberVariableNode> Members, List<FunctionDeclarationNode> Methods, List<ConstructorDeclarationNode> Constructors, List<DestructorDeclarationNode> Destructors) : AstNode;
+public record ParameterNode(TypeNode Type, Token Name) : AstNode;
+public record FunctionDeclarationNode(TypeNode ReturnType, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, bool IsVirtual, bool IsOverride, string? Namespace) : AstNode;
 public record BaseInitializerNode(List<ExpressionNode> Arguments) : AstNode;
 public record ConstructorDeclarationNode(string OwnerStructName, string? Namespace, AccessSpecifier AccessLevel, List<ParameterNode> Parameters, BaseInitializerNode? Initializer, StatementNode Body) : AstNode;
 public record DestructorDeclarationNode(string OwnerStructName, string? Namespace, AccessSpecifier AccessLevel, bool IsVirtual, StatementNode Body) : AstNode;
@@ -45,9 +45,9 @@ public record BlockStatementNode(List<StatementNode> Statements) : StatementNode
 public record ReturnStatementNode(ExpressionNode? Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBody, StatementNode? ElseBody) : StatementNode;
-public record DeclarationStatementNode(bool IsConst, Token Type, int PointerLevel, Token Identifier, ExpressionNode? Initializer, List<ExpressionNode>? ConstructorArguments) : StatementNode;
+public record DeclarationStatementNode(bool IsConst, TypeNode Type, Token Identifier, ExpressionNode? Initializer, List<ExpressionNode>? ConstructorArguments) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
-public record DeleteStatementNode(ExpressionNode Expression) : StatementNode; // NEW
+public record DeleteStatementNode(ExpressionNode Expression) : StatementNode;
 
 
 // Expressions
@@ -61,4 +61,5 @@ public record CallExpressionNode(ExpressionNode Callee, List<ExpressionNode> Arg
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;
 public record MemberAccessExpressionNode(ExpressionNode Left, Token Operator, Token Member) : ExpressionNode;
 public record QualifiedAccessExpressionNode(ExpressionNode Left, Token Member) : ExpressionNode;
-public record NewExpressionNode(Token Type, List<ExpressionNode> Arguments) : ExpressionNode; // NEW
+public record NewExpressionNode(TypeNode Type, List<ExpressionNode> Arguments) : ExpressionNode;
+public record SizeofExpressionNode(Token SizeofToken, TypeNode Type) : ExpressionNode;

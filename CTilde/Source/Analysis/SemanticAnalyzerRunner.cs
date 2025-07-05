@@ -37,6 +37,13 @@ public class SemanticAnalyzerRunner
 
             foreach (var s in unit.Structs)
             {
+                // If it's a generic template (e.g. struct List<T>), skip analysis.
+                // It will be monomorphized and analyzed on-demand when instantiated.
+                if (s.GenericParameters.Any())
+                {
+                    continue;
+                }
+
                 foreach (var method in s.Methods)
                 {
                     if (method.Body == null) continue;
@@ -48,7 +55,7 @@ public class SemanticAnalyzerRunner
                 foreach (var ctor in s.Constructors)
                 {
                     var dummyFunctionForContext = new FunctionDeclarationNode(
-                        new Token(TokenType.Keyword, "void", -1, -1), 0, ctor.OwnerStructName,
+                        new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), ctor.OwnerStructName,
                         ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
                         false, false, ctor.Namespace
                     );
@@ -60,7 +67,7 @@ public class SemanticAnalyzerRunner
                 foreach (var dtor in s.Destructors)
                 {
                     var dummyFunctionForContext = new FunctionDeclarationNode(
-                        new Token(TokenType.Keyword, "void", -1, -1), 0, dtor.OwnerStructName,
+                        new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), dtor.OwnerStructName,
                         new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
                         dtor.IsVirtual, false, dtor.Namespace
                     );

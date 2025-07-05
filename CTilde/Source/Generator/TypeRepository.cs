@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace CTilde;
@@ -50,5 +51,14 @@ public class TypeRepository
 
     public bool IsStruct(string typeName) => _structs.ContainsKey(typeName.TrimEnd('*'));
 
-    public static string GetTypeNameFromToken(Token type, int pointerLevel) => type.Value + new string('*', pointerLevel);
+    public static string GetTypeNameFromNode(TypeNode node)
+    {
+        return node switch
+        {
+            SimpleTypeNode s => s.TypeToken.Value,
+            PointerTypeNode p => GetTypeNameFromNode(p.BaseType) + "*",
+            GenericInstantiationTypeNode g => $"{g.BaseType.Value}<{string.Join(",", g.TypeArguments.Select(GetTypeNameFromNode))}>",
+            _ => throw new NotImplementedException($"GetTypeNameFromNode not implemented for {node.GetType().Name}")
+        };
+    }
 }

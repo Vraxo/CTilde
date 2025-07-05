@@ -23,11 +23,11 @@ public class DeclarationGenerator
         var symbols = new SymbolTable(ctor, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis, preventing NullReferenceException.
         var dummyFunctionForContext = new FunctionDeclarationNode(
-            new Token(TokenType.Keyword, "void", -1, -1), 0, ctor.OwnerStructName,
+            new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), ctor.OwnerStructName,
             ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
             false, false, ctor.Namespace
         );
-        var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
+        var analysisContext = new AnalysisContext(symbols, unit, dummyFunctionForContext);
 
         Builder.AppendLabel(NameMangler.Mangle(ctor));
         GeneratePrologue(symbols);
@@ -37,7 +37,7 @@ public class DeclarationGenerator
             var ownerStruct = TypeRepository.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
 
             var argTypes = ctor.Initializer.Arguments
-                .Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, context))
+                .Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, analysisContext))
                 .ToList();
             var baseFqn = TypeResolver.ResolveTypeName(ownerStruct.BaseStructName!, ownerStruct.Namespace, unit);
             var baseCtor = FunctionResolver.FindConstructor(baseFqn, argTypes) ?? throw new InvalidOperationException("Base constructor not found for given argument types.");
@@ -46,10 +46,10 @@ public class DeclarationGenerator
             int totalArgSize = 0;
             foreach (var arg in ctor.Initializer.Arguments.AsEnumerable().Reverse())
             {
-                totalArgSize += ExpressionGenerator.PushArgument(arg, context);
+                totalArgSize += ExpressionGenerator.PushArgument(arg, analysisContext);
             }
 
-            context.Symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
+            symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
             Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get 'this' pointer");
             Builder.AppendInstruction("push eax", "Push 'this' for base ctor");
             totalArgSize += 4;
@@ -59,7 +59,7 @@ public class DeclarationGenerator
             Builder.AppendBlankLine();
         }
 
-        StatementGenerator.GenerateStatement(ctor.Body, context);
+        StatementGenerator.GenerateStatement(ctor.Body, analysisContext);
         GenerateEpilogue(new List<(string, int, string)>());
     }
 
@@ -68,7 +68,7 @@ public class DeclarationGenerator
         var symbols = new SymbolTable(dtor, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis.
         var dummyFunctionForContext = new FunctionDeclarationNode(
-            new Token(TokenType.Keyword, "void", -1, -1), 0, dtor.OwnerStructName,
+            new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), dtor.OwnerStructName,
             new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
             dtor.IsVirtual, false, dtor.Namespace
         );
@@ -89,7 +89,8 @@ public class DeclarationGenerator
         var parametersWithRetPtr = new List<ParameterNode>(function.Parameters);
         if (returnsStructByValue)
         {
-            var retPtrParam = new ParameterNode(new Token(TokenType.Keyword, "void", -1, -1), 1, new Token(TokenType.Identifier, "__ret_ptr", -1, -1));
+            var retPtrType = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)));
+            var retPtrParam = new ParameterNode(retPtrType, new Token(TokenType.Identifier, "__ret_ptr", -1, -1));
             parametersWithRetPtr.Add(retPtrParam);
         }
 

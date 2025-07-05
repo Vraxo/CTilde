@@ -26,8 +26,45 @@ internal class StatementParser
         return new BlockStatementNode(statements);
     }
 
+    /// <summary>
+    /// Peeks ahead in the token stream to determine if the upcoming sequence of tokens is a declaration.
+    /// This is a classic C/C++ parsing problem, as `A * B;` could be a multiplication or a declaration.
+    /// This lookahead is read-only and does not consume tokens or report errors.
+    /// </summary>
+    private bool IsDeclaration()
+    {
+        int originalPosition = _parser._position;
+        try
+        {
+            // Create a new parser instance for a safe lookahead, to avoid modifying the main parser's state
+            // and to suppress error reporting during the lookahead.
+            var tempParser = new Parser(new List<Token>(_parser._tokens.ToArray()))
+            {
+                _position = originalPosition
+            };
+
+            // A declaration can optionally start with const.
+            if (tempParser.Current.Type == TokenType.Keyword && tempParser.Current.Value == "const")
+            {
+                tempParser.AdvancePosition(1);
+            }
+
+            // Now, try to parse a type from the temporary state.
+            tempParser.ParseTypeNode();
+
+            // If we get here, it parsed a type. A declaration must be followed by an identifier.
+            return tempParser.Current.Type == TokenType.Identifier;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+
     internal StatementNode ParseStatement()
     {
+        // First, check for keywords that unambiguously start a statement.
         if (_parser.Current.Type == TokenType.Keyword)
         {
             switch (_parser.Current.Value)
@@ -36,39 +73,22 @@ internal class StatementParser
                 case "if": return ParseIfStatement();
                 case "while": return ParseWhileStatement();
                 case "delete": return ParseDeleteStatement();
-                case "const":
-                case "int":
-                case "char":
-                case "struct":
-                    return ParseDeclarationStatement();
             }
         }
 
-        // Lookahead to distinguish between a declaration and an expression statement
-        bool isDeclaration = false;
-        if (_parser.Current.Type == TokenType.Identifier || (_parser.Current.Type == TokenType.Keyword && (_parser.Current.Value == "const" || _parser.Current.Value == "int" || _parser.Current.Value == "char" || _parser.Current.Value == "struct")))
+        // Check for block statements.
+        if (_parser.Current.Type == TokenType.LeftBrace)
         {
-            int tempPos = _parser._position;
-            try
-            {
-                if (_parser.Current.Type == TokenType.Keyword && _parser.Current.Value == "const") _parser.AdvancePosition(1);
-                _parser.ParseType();
-                if (_parser.Current.Type == TokenType.Identifier) isDeclaration = true;
-            }
-            catch
-            {
-                // Lookahead failed, assume not a declaration
-                isDeclaration = false;
-            }
-            finally
-            {
-                _parser._position = tempPos;
-            }
+            return ParseBlockStatement();
         }
 
-        if (isDeclaration) return ParseDeclarationStatement();
-        if (_parser.Current.Type == TokenType.LeftBrace) return ParseBlockStatement();
+        // Now, use the lookahead to resolve the ambiguity between a declaration and an expression.
+        if (IsDeclaration())
+        {
+            return ParseDeclarationStatement();
+        }
 
+        // If it's not a declaration or any other statement type, it must be an expression.
         var expression = _expressionParser.ParseExpression();
         _parser.Eat(TokenType.Semicolon);
         return new ExpressionStatementNode(expression);
@@ -107,7 +127,7 @@ internal class StatementParser
             _parser.Eat(TokenType.Keyword);
         }
 
-        var (typeToken, pointerLevel) = _parser.ParseType();
+        var typeNode = _parser.ParseTypeNode();
         var identifier = _parser.Eat(TokenType.Identifier);
 
         ExpressionNode? initializer = null;
@@ -135,7 +155,7 @@ internal class StatementParser
             _parser.ReportError($"Constant variable '{identifier.Value}' must be initialized.", identifier);
         }
         _parser.Eat(TokenType.Semicolon);
-        return new DeclarationStatementNode(isConst, typeToken, pointerLevel, identifier, initializer, ctorArgs);
+        return new DeclarationStatementNode(isConst, typeNode, identifier, initializer, ctorArgs);
     }
 
     private WhileStatementNode ParseWhileStatement()

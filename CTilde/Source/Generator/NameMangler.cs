@@ -7,30 +7,34 @@ public static class NameMangler
         return MangleName(f.Namespace, f.OwnerStructName, f.Name);
     }
 
-    private static string MangleType(Token type, int pointerLevel)
+    private static string MangleType(TypeNode type)
     {
-        var typeName = type.Value;
-        string mangled;
-        if (type.Type == TokenType.Keyword)
+        if (type is PointerTypeNode ptn)
         {
-            mangled = typeName[0].ToString();
-        }
-        else // Identifier, could be qualified
-        {
-            var cleanName = typeName.Replace("::", "_");
-            mangled = $"{cleanName.Length}{cleanName}";
+            return "p" + MangleType(ptn.BaseType);
         }
 
-        for (int i = 0; i < pointerLevel; i++)
+        if (type is SimpleTypeNode stn)
         {
-            mangled = "p" + mangled;
+            var typeToken = stn.TypeToken;
+            if (typeToken.Type == TokenType.Keyword)
+            {
+                return typeToken.Value[0].ToString();
+            }
+            else // Identifier, could be qualified
+            {
+                var cleanName = typeToken.Value.Replace("::", "_");
+                return $"{cleanName.Length}{cleanName}";
+            }
         }
-        return mangled;
+
+        // TODO: Mangle generic types properly
+        return "T";
     }
 
     public static string Mangle(ConstructorDeclarationNode c)
     {
-        var paramSignature = string.Concat(c.Parameters.Select(p => MangleType(p.Type, p.PointerLevel)));
+        var paramSignature = string.Concat(c.Parameters.Select(p => MangleType(p.Type)));
         return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor_{paramSignature}");
     }
 

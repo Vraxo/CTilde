@@ -14,7 +14,8 @@ public static class AstHelper
             VariableExpressionNode n => n.Identifier,
             UnaryExpressionNode n => n.Operator,
             InitializerListExpressionNode n => n.OpeningBrace,
-            DeclarationStatementNode n => n.Type,
+            DeclarationStatementNode n => n.Type.GetFirstToken(),
+            NewExpressionNode n => n.Type.GetFirstToken(),
             MemberAccessExpressionNode n => GetFirstToken(n.Left),
             _ => FindFirstTokenByReflection(node)
         };

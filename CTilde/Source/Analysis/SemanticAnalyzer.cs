@@ -42,6 +42,7 @@ public class SemanticAnalyzer
             {
                 IntegerLiteralNode => "int",
                 StringLiteralNode => "char*",
+                SizeofExpressionNode => "int",
                 VariableExpressionNode v => AnalyzeVariableExpression(v, context, diagnostics),
                 AssignmentExpressionNode a => AnalyzeAssignmentExpression(a, context, diagnostics),
                 MemberAccessExpressionNode ma => AnalyzeMemberAccessExpression(ma, context, diagnostics),
@@ -95,11 +96,11 @@ public class SemanticAnalyzer
     public void AnalyzeDeclarationStatement(DeclarationStatementNode decl, AnalysisContext context, List<Diagnostic> diagnostics)
     {
         string declaredTypeFqn;
-        string rawTypeName = TypeRepository.GetTypeNameFromToken(decl.Type, decl.PointerLevel);
-        string baseTypeName = rawTypeName.TrimEnd('*');
-        string pointerSuffix = new string('*', decl.PointerLevel); // Correctly calculate pointer suffix from level
+        var rawTypeName = TypeRepository.GetTypeNameFromNode(decl.Type);
+        var baseTypeName = rawTypeName.TrimEnd('*');
+        var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
 
-        if (decl.Type.Type == TokenType.Keyword)
+        if (decl.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
         {
             declaredTypeFqn = rawTypeName; // For primitives like int, char, void
         }
@@ -112,7 +113,8 @@ public class SemanticAnalyzer
             }
             catch (InvalidOperationException ex)
             {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, decl.Type.Line, decl.Type.Column));
+                var token = decl.Type.GetFirstToken();
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
                 declaredTypeFqn = "unknown"; // Sentinel type
             }
         }
@@ -125,7 +127,8 @@ public class SemanticAnalyzer
 
             if (structDef == null)
             {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{declaredTypeFqn}' is not a struct and cannot be initialized with an initializer list.", decl.Type.Line, decl.Type.Column));
+                var token = decl.Type.GetFirstToken();
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{declaredTypeFqn}' is not a struct and cannot be initialized with an initializer list.", token.Line, token.Column));
                 return;
             }
 
@@ -182,10 +185,10 @@ public class SemanticAnalyzer
 
     public string AnalyzeFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
     {
-        var returnTypeNameRaw = TypeRepository.GetTypeNameFromToken(func.ReturnType, func.ReturnPointerLevel);
+        var returnTypeNameRaw = TypeRepository.GetTypeNameFromNode(func.ReturnType);
         string resolvedReturnName;
 
-        if (func.ReturnType.Type == TokenType.Keyword)
+        if (func.ReturnType is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
         {
             resolvedReturnName = returnTypeNameRaw;
         }
@@ -254,13 +257,15 @@ public class SemanticAnalyzer
     {
         // A new expression always returns a pointer to the type.
         string typeName;
-        string baseTypeName = n.Type.Value.TrimEnd('*');
-        string pointerSuffix = new string('*', n.Type.Value.Length - baseTypeName.Length);
+        var rawTypeName = TypeRepository.GetTypeNameFromNode(n.Type);
+        string baseTypeName = rawTypeName.TrimEnd('*');
+        string pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
 
         // 'new' can only be used with identifiers (struct types), not keywords like 'int'
-        if (n.Type.Type == TokenType.Keyword)
+        if (n.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
         {
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"'new' cannot be used with primitive type '{n.Type.Value}'.", n.Type.Line, n.Type.Column));
+            var token = n.Type.GetFirstToken();
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"'new' cannot be used with primitive type '{rawTypeName}'.", token.Line, token.Column));
             return "unknown";
         }
         else
@@ -271,7 +276,8 @@ public class SemanticAnalyzer
             }
             catch (InvalidOperationException ex)
             {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, n.Type.Line, n.Type.Column));
+                var token = n.Type.GetFirstToken();
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
                 typeName = "unknown";
             }
         }

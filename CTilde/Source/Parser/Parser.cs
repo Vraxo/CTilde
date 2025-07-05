@@ -230,6 +230,15 @@ public class Parser
         Eat(TokenType.Keyword); // struct
         var structName = Eat(TokenType.Identifier);
 
+        var genericParameters = new List<Token>();
+        if (Current.Type == TokenType.LessThan)
+        {
+            Eat(TokenType.LessThan);
+            do { genericParameters.Add(Eat(TokenType.Identifier)); }
+            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+            Eat(TokenType.GreaterThan);
+        }
+
         string? baseStructName = null;
         if (Current.Type == TokenType.Colon)
         {
@@ -286,6 +295,7 @@ public class Parser
                 continue;
             }
 
+            // Check for constructor (e.g. `List(...)` not `List<T>(...)`)
             if (Current.Type == TokenType.Identifier && Current.Value == structName.Value && Peek(1).Type == TokenType.LeftParen)
             {
                 if (isVirtual || isOverride || isConst) ReportError("Constructors cannot be marked 'virtual', 'override', or 'const'.", startToken);
@@ -293,7 +303,7 @@ public class Parser
                 continue;
             }
 
-            var (type, pointerLevel) = ParseType();
+            var type = ParseTypeNode();
 
             Token name;
             if (Current.Type == TokenType.Keyword && Current.Value == "operator")
@@ -310,21 +320,22 @@ public class Parser
 
             if (Current.Type == TokenType.LeftParen)
             {
-                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value, currentAccess, isVirtual, isOverride, _currentNamespace, true);
+                var methodNode = FinishParsingFunction(type, name.Value, structName.Value, currentAccess, isVirtual, isOverride, _currentNamespace, true);
                 methods.Add(methodNode);
             }
             else
             {
                 if (isVirtual || isOverride) ReportError("Only methods can be marked 'virtual' or 'override'.", startToken);
-                members.Add(new MemberVariableNode(isConst, type, pointerLevel, name, currentAccess));
+                members.Add(new MemberVariableNode(isConst, type, name, currentAccess));
                 Eat(TokenType.Semicolon);
             }
         }
 
         Eat(TokenType.RightBrace);
         Eat(TokenType.Semicolon);
-        return new StructDefinitionNode(structName.Value, baseStructName, _currentNamespace, members, methods, constructors, destructors);
+        return new StructDefinitionNode(structName.Value, genericParameters, baseStructName, _currentNamespace, members, methods, constructors, destructors);
     }
+
 
     private ConstructorDeclarationNode ParseConstructor(string ownerStructName, string? baseStructName, AccessSpecifier access)
     {
@@ -391,44 +402,64 @@ public class Parser
         }
     }
 
-    internal (Token type, int pointerLevel) ParseType()
+    internal TypeNode ParseTypeNode()
     {
-        Token typeToken;
-        string? namespaceQualifier = null;
+        Token baseTypeToken;
+        var current = Current;
 
-        if (Current.Type == TokenType.Identifier && Peek(1).Type == TokenType.DoubleColon)
+        // 1. Parse the base name (which could be qualified)
+        if (current.Type == TokenType.Keyword && current.Value == "struct")
         {
-            namespaceQualifier = Eat(TokenType.Identifier).Value;
-            Eat(TokenType.DoubleColon);
+            Eat(TokenType.Keyword);
+            baseTypeToken = Eat(TokenType.Identifier);
         }
-
-        if (Current.Type == TokenType.Keyword && Current.Value == "struct")
+        else if (current.Type == TokenType.Keyword && (current.Value is "int" or "char" or "void"))
         {
-            Eat(TokenType.Keyword); // struct
-            typeToken = Eat(TokenType.Identifier);
+            baseTypeToken = Eat(TokenType.Keyword);
+        }
+        else if (current.Type == TokenType.Identifier)
+        {
+            baseTypeToken = Eat(TokenType.Identifier);
+            // Check for `::`
+            if (Current.Type == TokenType.DoubleColon)
+            {
+                Eat(TokenType.DoubleColon);
+                var memberName = Eat(TokenType.Identifier);
+                baseTypeToken = new Token(TokenType.Identifier, $"{baseTypeToken.Value}::{memberName.Value}", baseTypeToken.Line, baseTypeToken.Column);
+            }
         }
         else
         {
-            typeToken = Current;
-            _position++;
+            ReportError($"Expected a type name but found '{current.Type}' ('{current.Value}').", current);
+            AdvancePosition(1); // Consume the bad token to prevent infinite loop
+            return new SimpleTypeNode(new Token(TokenType.Identifier, "unknown", current.Line, current.Column));
         }
 
-        if (typeToken.Type == TokenType.Identifier)
+        // 2. Parse optional generic arguments
+        TypeNode typeNode;
+        if (Current.Type == TokenType.LessThan)
         {
-            if (namespaceQualifier != null)
-            {
-                typeToken = new Token(typeToken.Type, $"{namespaceQualifier}::{typeToken.Value}", typeToken.Line, typeToken.Column);
-            }
+            Eat(TokenType.LessThan);
+            var typeArgs = new List<TypeNode>();
+            do { typeArgs.Add(ParseTypeNode()); }
+            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+            Eat(TokenType.GreaterThan);
+            typeNode = new GenericInstantiationTypeNode(baseTypeToken, typeArgs);
+        }
+        else
+        {
+            typeNode = new SimpleTypeNode(baseTypeToken);
         }
 
-        int pointerLevel = 0;
+        // 3. Parse optional pointers
         while (Current.Type == TokenType.Star)
         {
             Eat(TokenType.Star);
-            pointerLevel++;
+            typeNode = new PointerTypeNode(typeNode);
         }
-        return (typeToken, pointerLevel);
+        return typeNode;
     }
+
 
     private List<ParameterNode> ParseParameterList(bool addThisPointer)
     {
@@ -438,9 +469,9 @@ public class Parser
         {
             do
             {
-                var (paramType, paramPointerLevel) = ParseType();
+                var paramType = ParseTypeNode();
                 var paramName = Eat(TokenType.Identifier);
-                parameters.Add(new ParameterNode(paramType, paramPointerLevel, paramName));
+                parameters.Add(new ParameterNode(paramType, paramName));
             } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
         }
         Eat(TokenType.RightParen);
@@ -449,21 +480,22 @@ public class Parser
 
     private FunctionDeclarationNode ParseGlobalFunction()
     {
-        var (returnType, returnPointerLevel) = ParseType();
+        var returnType = ParseTypeNode();
         var identifier = Eat(TokenType.Identifier);
-        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null, AccessSpecifier.Public, false, false, _currentNamespace, false);
+        return FinishParsingFunction(returnType, identifier.Value, null, AccessSpecifier.Public, false, false, _currentNamespace, false);
     }
 
-    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName, AccessSpecifier accessLevel, bool isVirtual, bool isOverride, string? namespaceName, bool isMethod)
+    private FunctionDeclarationNode FinishParsingFunction(TypeNode returnType, string name, string? ownerStructName, AccessSpecifier accessLevel, bool isVirtual, bool isOverride, string? namespaceName, bool isMethod)
     {
         var parameters = ParseParameterList(isMethod);
 
         if (isMethod && ownerStructName != null)
         {
-            var thisTypeTokenValue = namespaceName != null ? $"{namespaceName}::{ownerStructName}" : ownerStructName;
-            var thisType = new Token(TokenType.Identifier, thisTypeTokenValue, -1, -1); // Location doesn't matter for this internal param
+            // The `this` pointer type will be resolved later during semantic analysis.
+            // For now, we create a placeholder.
+            var thisType = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, ownerStructName, -1, -1)));
             var thisName = new Token(TokenType.Identifier, "this", -1, -1);
-            var thisParam = new ParameterNode(thisType, 1, thisName);
+            var thisParam = new ParameterNode(thisType, thisName);
             parameters.Insert(0, thisParam);
         }
 
@@ -477,6 +509,6 @@ public class Parser
             Eat(TokenType.Semicolon); // For function prototypes
         }
 
-        return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName, accessLevel, isVirtual, isOverride, namespaceName);
+        return new FunctionDeclarationNode(returnType, name, parameters, body, ownerStructName, accessLevel, isVirtual, isOverride, namespaceName);
     }
 }

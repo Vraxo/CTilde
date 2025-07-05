@@ -25,6 +25,18 @@ public class TypeResolver
 
     public string ResolveTypeName(string name, string? currentNamespace, CompilationUnitNode context)
     {
+        if (name is "int" or "char" or "void")
+        {
+            return name;
+        }
+
+        // Heuristic: if a type name is a single uppercase char, assume it's a generic parameter
+        // from an uninstantiated template, which shouldn't be resolved. Return its name directly.
+        if (name.Length == 1 && char.IsUpper(name[0]))
+        {
+            return name;
+        }
+
         if (name.Contains("::"))
         {
             var parts = name.Split("::");

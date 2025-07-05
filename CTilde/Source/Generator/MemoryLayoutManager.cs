@@ -23,6 +23,13 @@ public class MemoryLayoutManager
         if (typeNameFqn == "char") return 1;
         if (typeNameFqn == "void") return 0; // Void has no size
 
+        // Heuristic: If it's a single uppercase letter, assume it's a generic type parameter.
+        // In the current implementation, generic types are treated like pointers/references.
+        if (typeNameFqn.Length == 1 && char.IsUpper(typeNameFqn[0]))
+        {
+            return 4; // Treat as a pointer size.
+        }
+
         // If it's not a primitive, try to find it as a struct
         if (_typeRepository.FindStruct(typeNameFqn) is { } structDef)
         {
@@ -42,12 +49,12 @@ public class MemoryLayoutManager
 
             foreach (var member in structDef.Members)
             {
-                var rawMemberType = TypeRepository.GetTypeNameFromToken(member.Type, member.PointerLevel);
+                var rawMemberType = TypeRepository.GetTypeNameFromNode(member.Type);
                 string baseMemberName = rawMemberType.TrimEnd('*');
                 string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
 
                 string resolvedMemberType;
-                if (member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
+                if (member.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
                 {
                     resolvedMemberType = rawMemberType;
                 }
@@ -96,12 +103,12 @@ public class MemoryLayoutManager
         foreach (var mem in structDef.Members)
         {
             var ownUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            var rawMemberType = TypeRepository.GetTypeNameFromToken(mem.Type, mem.PointerLevel);
+            var rawMemberType = TypeRepository.GetTypeNameFromNode(mem.Type);
             var baseMemberName = rawMemberType.TrimEnd('*');
             var pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
 
             string resolvedMemberType;
-            if (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
+            if (mem.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
             {
                 resolvedMemberType = rawMemberType;
             }

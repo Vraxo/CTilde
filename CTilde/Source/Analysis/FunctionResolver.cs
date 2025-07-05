@@ -86,12 +86,12 @@ public class FunctionResolver
             for (int i = 0; i < argTypeFqns.Count; i++)
             {
                 var param = ctor.Parameters[i];
-                var rawParamType = TypeRepository.GetTypeNameFromToken(param.Type, param.PointerLevel);
+                var rawParamType = TypeRepository.GetTypeNameFromNode(param.Type);
                 var baseParamType = rawParamType.TrimEnd('*');
                 var pointerSuffix = new string('*', rawParamType.Length - baseParamType.Length);
 
                 string resolvedParamType;
-                if (param.Type.Type == TokenType.Keyword || baseParamType.Equals("void", StringComparison.OrdinalIgnoreCase))
+                if (param.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseParamType.Equals("void", StringComparison.OrdinalIgnoreCase))
                 {
                     resolvedParamType = rawParamType;
                 }

@@ -244,12 +244,12 @@ public class FunctionResolver
             for (int i = 0; i < argTypeFqns.Count; i++)
             {
                 var param = ctor.Parameters[i];
-                var rawParamType = TypeRepository.GetTypeNameFromToken(param.Type, param.PointerLevel);
+                var rawParamType = TypeRepository.GetTypeNameFromNode(param.Type);
                 var baseParamType = rawParamType.TrimEnd('*');
                 var pointerSuffix = new string('*', rawParamType.Length - baseParamType.Length);
 
                 string resolvedParamType;
-                if (param.Type.Type == TokenType.Keyword || baseParamType.Equals("void", StringComparison.OrdinalIgnoreCase))
+                if (param.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseParamType.Equals("void", StringComparison.OrdinalIgnoreCase))
                 {
                     resolvedParamType = rawParamType;
                 }
@@ -363,6 +363,7 @@ public class SemanticAnalyzer
             {
                 IntegerLiteralNode => "int",
                 StringLiteralNode => "char*",
+                SizeofExpressionNode => "int",
                 VariableExpressionNode v => AnalyzeVariableExpression(v, context, diagnostics),
                 AssignmentExpressionNode a => AnalyzeAssignmentExpression(a, context, diagnostics),
                 MemberAccessExpressionNode ma => AnalyzeMemberAccessExpression(ma, context, diagnostics),
@@ -416,11 +417,11 @@ public class SemanticAnalyzer
     public void AnalyzeDeclarationStatement(DeclarationStatementNode decl, AnalysisContext context, List<Diagnostic> diagnostics)
     {
         string declaredTypeFqn;
-        string rawTypeName = TypeRepository.GetTypeNameFromToken(decl.Type, decl.PointerLevel);
-        string baseTypeName = rawTypeName.TrimEnd('*');
-        string pointerSuffix = new string('*', decl.PointerLevel); // Correctly calculate pointer suffix from level
+        var rawTypeName = TypeRepository.GetTypeNameFromNode(decl.Type);
+        var baseTypeName = rawTypeName.TrimEnd('*');
+        var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
 
-        if (decl.Type.Type == TokenType.Keyword)
+        if (decl.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
         {
             declaredTypeFqn = rawTypeName; // For primitives like int, char, void
         }
@@ -433,7 +434,8 @@ public class SemanticAnalyzer
             }
             catch (InvalidOperationException ex)
             {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, decl.Type.Line, decl.Type.Column));
+                var token = decl.Type.GetFirstToken();
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
                 declaredTypeFqn = "unknown"; // Sentinel type
             }
         }
@@ -446,7 +448,8 @@ public class SemanticAnalyzer
 
             if (structDef == null)
             {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{declaredTypeFqn}' is not a struct and cannot be initialized with an initializer list.", decl.Type.Line, decl.Type.Column));
+                var token = decl.Type.GetFirstToken();
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{declaredTypeFqn}' is not a struct and cannot be initialized with an initializer list.", token.Line, token.Column));
                 return;
             }
 
@@ -503,10 +506,10 @@ public class SemanticAnalyzer
 
     public string AnalyzeFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
     {
-        var returnTypeNameRaw = TypeRepository.GetTypeNameFromToken(func.ReturnType, func.ReturnPointerLevel);
+        var returnTypeNameRaw = TypeRepository.GetTypeNameFromNode(func.ReturnType);
         string resolvedReturnName;
 
-        if (func.ReturnType.Type == TokenType.Keyword)
+        if (func.ReturnType is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
         {
             resolvedReturnName = returnTypeNameRaw;
         }
@@ -575,13 +578,15 @@ public class SemanticAnalyzer
     {
         // A new expression always returns a pointer to the type.
         string typeName;
-        string baseTypeName = n.Type.Value.TrimEnd('*');
-        string pointerSuffix = new string('*', n.Type.Value.Length - baseTypeName.Length);
+        var rawTypeName = TypeRepository.GetTypeNameFromNode(n.Type);
+        string baseTypeName = rawTypeName.TrimEnd('*');
+        string pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
 
         // 'new' can only be used with identifiers (struct types), not keywords like 'int'
-        if (n.Type.Type == TokenType.Keyword)
+        if (n.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword)
         {
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"'new' cannot be used with primitive type '{n.Type.Value}'.", n.Type.Line, n.Type.Column));
+            var token = n.Type.GetFirstToken();
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"'new' cannot be used with primitive type '{rawTypeName}'.", token.Line, token.Column));
             return "unknown";
         }
         else
@@ -592,10 +597,19 @@ public class SemanticAnalyzer
             }
             catch (InvalidOperationException ex)
             {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, n.Type.Line, n.Type.Column));
+                var token = n.Type.GetFirstToken();
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
                 typeName = "unknown";
             }
         }
+
+        // Analyze constructor arguments to mark variables as used and check for other errors.
+        foreach (var arg in n.Arguments)
+        {
+            AnalyzeExpressionType(arg, context, diagnostics);
+        }
+        // TODO: Add constructor resolution and signature matching check here
+
         return typeName + "*";
     }
 
@@ -957,6 +971,13 @@ public class SemanticAnalyzerRunner
 
             foreach (var s in unit.Structs)
             {
+                // If it's a generic template (e.g. struct List<T>), skip analysis.
+                // It will be monomorphized and analyzed on-demand when instantiated.
+                if (s.GenericParameters.Any())
+                {
+                    continue;
+                }
+
                 foreach (var method in s.Methods)
                 {
                     if (method.Body == null) continue;
@@ -968,7 +989,7 @@ public class SemanticAnalyzerRunner
                 foreach (var ctor in s.Constructors)
                 {
                     var dummyFunctionForContext = new FunctionDeclarationNode(
-                        new Token(TokenType.Keyword, "void", -1, -1), 0, ctor.OwnerStructName,
+                        new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), ctor.OwnerStructName,
                         ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
                         false, false, ctor.Namespace
                     );
@@ -980,7 +1001,7 @@ public class SemanticAnalyzerRunner
                 foreach (var dtor in s.Destructors)
                 {
                     var dummyFunctionForContext = new FunctionDeclarationNode(
-                        new Token(TokenType.Keyword, "void", -1, -1), 0, dtor.OwnerStructName,
+                        new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), dtor.OwnerStructName,
                         new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
                         dtor.IsVirtual, false, dtor.Namespace
                     );
@@ -1123,6 +1144,11 @@ public class TypeResolver
 
     public string ResolveTypeName(string name, string? currentNamespace, CompilationUnitNode context)
     {
+        if (name is "int" or "char" or "void")
+        {
+            return name;
+        }
+
         if (name.Contains("::"))
         {
             var parts = name.Split("::");
@@ -1208,10 +1234,10 @@ public abstract record ExpressionNode : AstNode;
 // Program structure
 public record ImportDirectiveNode(string LibraryName) : AstNode;
 public record UsingDirectiveNode(string Namespace, string? Alias) : AstNode;
-public record MemberVariableNode(bool IsConst, Token Type, int PointerLevel, Token Name, AccessSpecifier AccessLevel) : AstNode;
-public record StructDefinitionNode(string Name, string? BaseStructName, string? Namespace, List<MemberVariableNode> Members, List<FunctionDeclarationNode> Methods, List<ConstructorDeclarationNode> Constructors, List<DestructorDeclarationNode> Destructors) : AstNode;
-public record ParameterNode(Token Type, int PointerLevel, Token Name) : AstNode;
-public record FunctionDeclarationNode(Token ReturnType, int ReturnPointerLevel, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, bool IsVirtual, bool IsOverride, string? Namespace) : AstNode;
+public record MemberVariableNode(bool IsConst, TypeNode Type, Token Name, AccessSpecifier AccessLevel) : AstNode;
+public record StructDefinitionNode(string Name, List<Token> GenericParameters, string? BaseStructName, string? Namespace, List<MemberVariableNode> Members, List<FunctionDeclarationNode> Methods, List<ConstructorDeclarationNode> Constructors, List<DestructorDeclarationNode> Destructors) : AstNode;
+public record ParameterNode(TypeNode Type, Token Name) : AstNode;
+public record FunctionDeclarationNode(TypeNode ReturnType, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, bool IsVirtual, bool IsOverride, string? Namespace) : AstNode;
 public record BaseInitializerNode(List<ExpressionNode> Arguments) : AstNode;
 public record ConstructorDeclarationNode(string OwnerStructName, string? Namespace, AccessSpecifier AccessLevel, List<ParameterNode> Parameters, BaseInitializerNode? Initializer, StatementNode Body) : AstNode;
 public record DestructorDeclarationNode(string OwnerStructName, string? Namespace, AccessSpecifier AccessLevel, bool IsVirtual, StatementNode Body) : AstNode;
@@ -1228,9 +1254,9 @@ public record BlockStatementNode(List<StatementNode> Statements) : StatementNode
 public record ReturnStatementNode(ExpressionNode? Expression) : StatementNode;
 public record WhileStatementNode(ExpressionNode Condition, StatementNode Body) : StatementNode;
 public record IfStatementNode(ExpressionNode Condition, StatementNode ThenBody, StatementNode? ElseBody) : StatementNode;
-public record DeclarationStatementNode(bool IsConst, Token Type, int PointerLevel, Token Identifier, ExpressionNode? Initializer, List<ExpressionNode>? ConstructorArguments) : StatementNode;
+public record DeclarationStatementNode(bool IsConst, TypeNode Type, Token Identifier, ExpressionNode? Initializer, List<ExpressionNode>? ConstructorArguments) : StatementNode;
 public record ExpressionStatementNode(ExpressionNode Expression) : StatementNode;
-public record DeleteStatementNode(ExpressionNode Expression) : StatementNode; // NEW
+public record DeleteStatementNode(ExpressionNode Expression) : StatementNode;
 
 
 // Expressions
@@ -1244,7 +1270,8 @@ public record CallExpressionNode(ExpressionNode Callee, List<ExpressionNode> Arg
 public record BinaryExpressionNode(ExpressionNode Left, Token Operator, ExpressionNode Right) : ExpressionNode;
 public record MemberAccessExpressionNode(ExpressionNode Left, Token Operator, Token Member) : ExpressionNode;
 public record QualifiedAccessExpressionNode(ExpressionNode Left, Token Member) : ExpressionNode;
-public record NewExpressionNode(Token Type, List<ExpressionNode> Arguments) : ExpressionNode; // NEW
+public record NewExpressionNode(TypeNode Type, List<ExpressionNode> Arguments) : ExpressionNode;
+public record SizeofExpressionNode(Token SizeofToken, TypeNode Type) : ExpressionNode;
 </file>
 
 <file path="Ast\AstHelper.cs">
@@ -1264,7 +1291,8 @@ public static class AstHelper
             VariableExpressionNode n => n.Identifier,
             UnaryExpressionNode n => n.Operator,
             InitializerListExpressionNode n => n.OpeningBrace,
-            DeclarationStatementNode n => n.Type,
+            DeclarationStatementNode n => n.Type.GetFirstToken(),
+            NewExpressionNode n => n.Type.GetFirstToken(),
             MemberAccessExpressionNode n => GetFirstToken(n.Left),
             _ => FindFirstTokenByReflection(node)
         };
@@ -1291,6 +1319,45 @@ public static class AstHelper
         }
         return new Token(TokenType.Unknown, "", -1, -1);
     }
+}
+</file>
+
+<file path="Ast\TypeNode.cs">
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace CTilde;
+
+public abstract record TypeNode : AstNode
+{
+    public abstract Token GetFirstToken();
+    public abstract string GetBaseTypeName();
+    public abstract int GetPointerLevel();
+}
+
+public record SimpleTypeNode(Token TypeToken) : TypeNode
+{
+    public override string ToString() => TypeToken.Value;
+    public override Token GetFirstToken() => TypeToken;
+    public override string GetBaseTypeName() => TypeToken.Value;
+    public override int GetPointerLevel() => 0;
+}
+
+public record PointerTypeNode(TypeNode BaseType) : TypeNode
+{
+    public override string ToString() => $"{BaseType}*";
+    public override Token GetFirstToken() => BaseType.GetFirstToken();
+    public override string GetBaseTypeName() => BaseType.GetBaseTypeName();
+    public override int GetPointerLevel() => BaseType.GetPointerLevel() + 1;
+}
+
+public record GenericInstantiationTypeNode(Token BaseType, List<TypeNode> TypeArguments) : TypeNode
+{
+    public override string ToString() => $"{BaseType.Value}<{string.Join(", ", TypeArguments.Select(a => a.ToString()))}>";
+    public override Token GetFirstToken() => BaseType;
+    public override string GetBaseTypeName() => BaseType.Value;
+    public override int GetPointerLevel() => 0;
 }
 </file>
 
@@ -1603,11 +1670,11 @@ public class DeclarationGenerator
         var symbols = new SymbolTable(ctor, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis, preventing NullReferenceException.
         var dummyFunctionForContext = new FunctionDeclarationNode(
-            new Token(TokenType.Keyword, "void", -1, -1), 0, ctor.OwnerStructName,
+            new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), ctor.OwnerStructName,
             ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
             false, false, ctor.Namespace
         );
-        var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
+        var analysisContext = new AnalysisContext(symbols, unit, dummyFunctionForContext);
 
         Builder.AppendLabel(NameMangler.Mangle(ctor));
         GeneratePrologue(symbols);
@@ -1617,7 +1684,7 @@ public class DeclarationGenerator
             var ownerStruct = TypeRepository.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
 
             var argTypes = ctor.Initializer.Arguments
-                .Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, context))
+                .Select(arg => SemanticAnalyzer.AnalyzeExpressionType(arg, analysisContext))
                 .ToList();
             var baseFqn = TypeResolver.ResolveTypeName(ownerStruct.BaseStructName!, ownerStruct.Namespace, unit);
             var baseCtor = FunctionResolver.FindConstructor(baseFqn, argTypes) ?? throw new InvalidOperationException("Base constructor not found for given argument types.");
@@ -1626,10 +1693,10 @@ public class DeclarationGenerator
             int totalArgSize = 0;
             foreach (var arg in ctor.Initializer.Arguments.AsEnumerable().Reverse())
             {
-                totalArgSize += ExpressionGenerator.PushArgument(arg, context);
+                totalArgSize += ExpressionGenerator.PushArgument(arg, analysisContext);
             }
 
-            context.Symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
+            symbols.TryGetSymbol("this", out var thisOffset, out _, out _);
             Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get 'this' pointer");
             Builder.AppendInstruction("push eax", "Push 'this' for base ctor");
             totalArgSize += 4;
@@ -1639,7 +1706,7 @@ public class DeclarationGenerator
             Builder.AppendBlankLine();
         }
 
-        StatementGenerator.GenerateStatement(ctor.Body, context);
+        StatementGenerator.GenerateStatement(ctor.Body, analysisContext);
         GenerateEpilogue(new List<(string, int, string)>());
     }
 
@@ -1648,7 +1715,7 @@ public class DeclarationGenerator
         var symbols = new SymbolTable(dtor, TypeResolver, FunctionResolver, MemoryLayoutManager, unit);
         // Create a dummy function node to provide context for analysis.
         var dummyFunctionForContext = new FunctionDeclarationNode(
-            new Token(TokenType.Keyword, "void", -1, -1), 0, dtor.OwnerStructName,
+            new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), dtor.OwnerStructName,
             new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
             dtor.IsVirtual, false, dtor.Namespace
         );
@@ -1669,7 +1736,8 @@ public class DeclarationGenerator
         var parametersWithRetPtr = new List<ParameterNode>(function.Parameters);
         if (returnsStructByValue)
         {
-            var retPtrParam = new ParameterNode(new Token(TokenType.Keyword, "void", -1, -1), 1, new Token(TokenType.Identifier, "__ret_ptr", -1, -1));
+            var retPtrType = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)));
+            var retPtrParam = new ParameterNode(retPtrType, new Token(TokenType.Identifier, "__ret_ptr", -1, -1));
             parametersWithRetPtr.Add(retPtrParam);
         }
 
@@ -1859,7 +1927,8 @@ public class ExpressionGenerator
 
     private void GenerateNewExpression(NewExpressionNode n, AnalysisContext context)
     {
-        var typeFqn = TypeResolver.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var baseTypeName = n.Type.GetBaseTypeName();
+        var typeFqn = TypeResolver.ResolveTypeName(baseTypeName, context.CurrentFunction.Namespace, context.CompilationUnit);
         var size = MemoryLayoutManager.GetSizeOfType(typeFqn, context.CompilationUnit);
 
         Builder.AppendInstruction($"push {size}", "Push size for malloc");
@@ -1956,7 +2025,7 @@ public class ExpressionGenerator
     private void GenerateAssignmentExpression(AssignmentExpressionNode assign, AnalysisContext context)
     {
         string lValueType = SemanticAnalyzer.AnalyzeExpressionType(assign.Left, context);
-        bool isStructAssign = TypeRepository.IsStruct(lValueType);
+        bool isStructAssign = TypeRepository.IsStruct(lValueType) && !lValueType.EndsWith("*");
 
         if (isStructAssign)
         {
@@ -2054,9 +2123,11 @@ public class ExpressionGenerator
     private void GenerateBinaryExpression(BinaryExpressionNode binExpr, AnalysisContext context)
     {
         var leftTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(binExpr.Left, context);
+        var rightTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(binExpr.Right, context);
 
-        if (TypeRepository.IsStruct(leftTypeFqn))
+        if (TypeRepository.IsStruct(leftTypeFqn) && !leftTypeFqn.EndsWith("*"))
         {
+            // Handle struct operator overloads
             var opName = $"operator_{NameMangler.MangleOperator(binExpr.Operator.Value)}";
             var overload = FunctionResolver.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
 
@@ -2085,29 +2156,47 @@ public class ExpressionGenerator
             {
                 Builder.AppendInstruction("lea eax, [esp]", "Get address of hidden return temporary");
             }
+            return;
         }
-        else
-        {
-            GenerateExpression(binExpr.Left, context);
-            Builder.AppendInstruction("push eax");
-            GenerateExpression(binExpr.Right, context);
-            Builder.AppendInstruction("mov ecx, eax");
-            Builder.AppendInstruction("pop eax");
 
-            switch (binExpr.Operator.Type)
+        // Standard evaluation: Right then Left
+        GenerateExpression(binExpr.Right, context);
+        Builder.AppendInstruction("push eax");
+        GenerateExpression(binExpr.Left, context);
+        Builder.AppendInstruction("pop ecx"); // EAX = Left, ECX = Right
+
+        // Handle pointer arithmetic scaling
+        if (binExpr.Operator.Type is TokenType.Plus or TokenType.Minus)
+        {
+            if (leftTypeFqn.EndsWith("*") && rightTypeFqn == "int")
             {
-                case TokenType.Plus: Builder.AppendInstruction("add eax, ecx"); break;
-                case TokenType.Minus: Builder.AppendInstruction("sub eax, ecx"); break;
-                case TokenType.Star: Builder.AppendInstruction("imul eax, ecx"); break;
-                case TokenType.Slash: Builder.AppendInstruction("cdq"); Builder.AppendInstruction("idiv ecx"); break;
-                case TokenType.DoubleEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("sete al"); Builder.AppendInstruction("movzx eax, al"); break;
-                case TokenType.NotEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setne al"); Builder.AppendInstruction("movzx eax, al"); break;
-                case TokenType.LessThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setl al"); Builder.AppendInstruction("movzx eax, al"); break;
-                case TokenType.GreaterThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setg al"); Builder.AppendInstruction("movzx eax, al"); break;
-                default: throw new NotImplementedException($"Op: {binExpr.Operator.Type}");
+                var baseType = leftTypeFqn.TrimEnd('*');
+                var elementSize = MemoryLayoutManager.GetSizeOfType(baseType, context.CompilationUnit);
+                if (elementSize > 1) Builder.AppendInstruction($"imul ecx, {elementSize}");
+            }
+            else if (leftTypeFqn == "int" && rightTypeFqn.EndsWith("*"))
+            {
+                var baseType = rightTypeFqn.TrimEnd('*');
+                var elementSize = MemoryLayoutManager.GetSizeOfType(baseType, context.CompilationUnit);
+                if (elementSize > 1) Builder.AppendInstruction($"imul eax, {elementSize}");
             }
         }
+
+        // Perform Operation
+        switch (binExpr.Operator.Type)
+        {
+            case TokenType.Plus: Builder.AppendInstruction("add eax, ecx"); break;
+            case TokenType.Minus: Builder.AppendInstruction("sub eax, ecx"); break;
+            case TokenType.Star: Builder.AppendInstruction("imul eax, ecx"); break;
+            case TokenType.Slash: Builder.AppendInstruction("cdq"); Builder.AppendInstruction("idiv ecx"); break;
+            case TokenType.DoubleEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("sete al"); Builder.AppendInstruction("movzx eax, al"); break;
+            case TokenType.NotEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setne al"); Builder.AppendInstruction("movzx eax, al"); break;
+            case TokenType.LessThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setl al"); Builder.AppendInstruction("movzx eax, al"); break;
+            case TokenType.GreaterThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setg al"); Builder.AppendInstruction("movzx eax, al"); break;
+            default: throw new NotImplementedException($"Op: {binExpr.Operator.Type}");
+        }
     }
+
 
     private void GenerateQualifiedAccessExpression(QualifiedAccessExpressionNode qNode, AnalysisContext context)
     {
@@ -2309,12 +2398,12 @@ public class MemoryLayoutManager
 
             foreach (var member in structDef.Members)
             {
-                var rawMemberType = TypeRepository.GetTypeNameFromToken(member.Type, member.PointerLevel);
+                var rawMemberType = TypeRepository.GetTypeNameFromNode(member.Type);
                 string baseMemberName = rawMemberType.TrimEnd('*');
                 string pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
 
                 string resolvedMemberType;
-                if (member.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
+                if (member.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
                 {
                     resolvedMemberType = rawMemberType;
                 }
@@ -2363,12 +2452,12 @@ public class MemoryLayoutManager
         foreach (var mem in structDef.Members)
         {
             var ownUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
-            var rawMemberType = TypeRepository.GetTypeNameFromToken(mem.Type, mem.PointerLevel);
+            var rawMemberType = TypeRepository.GetTypeNameFromNode(mem.Type);
             var baseMemberName = rawMemberType.TrimEnd('*');
             var pointerSuffix = new string('*', rawMemberType.Length - baseMemberName.Length);
 
             string resolvedMemberType;
-            if (mem.Type.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
+            if (mem.Type is SimpleTypeNode stn && stn.TypeToken.Type == TokenType.Keyword || baseMemberName.Equals("void", System.StringComparison.OrdinalIgnoreCase))
             {
                 resolvedMemberType = rawMemberType;
             }
@@ -2399,30 +2488,34 @@ public static class NameMangler
         return MangleName(f.Namespace, f.OwnerStructName, f.Name);
     }
 
-    private static string MangleType(Token type, int pointerLevel)
+    private static string MangleType(TypeNode type)
     {
-        var typeName = type.Value;
-        string mangled;
-        if (type.Type == TokenType.Keyword)
+        if (type is PointerTypeNode ptn)
         {
-            mangled = typeName[0].ToString();
-        }
-        else // Identifier, could be qualified
-        {
-            var cleanName = typeName.Replace("::", "_");
-            mangled = $"{cleanName.Length}{cleanName}";
+            return "p" + MangleType(ptn.BaseType);
         }
 
-        for (int i = 0; i < pointerLevel; i++)
+        if (type is SimpleTypeNode stn)
         {
-            mangled = "p" + mangled;
+            var typeToken = stn.TypeToken;
+            if (typeToken.Type == TokenType.Keyword)
+            {
+                return typeToken.Value[0].ToString();
+            }
+            else // Identifier, could be qualified
+            {
+                var cleanName = typeToken.Value.Replace("::", "_");
+                return $"{cleanName.Length}{cleanName}";
+            }
         }
-        return mangled;
+
+        // TODO: Mangle generic types properly
+        return "T";
     }
 
     public static string Mangle(ConstructorDeclarationNode c)
     {
-        var paramSignature = string.Concat(c.Parameters.Select(p => MangleType(p.Type, p.PointerLevel)));
+        var paramSignature = string.Concat(c.Parameters.Select(p => MangleType(p.Type)));
         return MangleName(c.Namespace, c.OwnerStructName, $"{c.OwnerStructName}_ctor_{paramSignature}");
     }
 
@@ -2528,27 +2621,31 @@ public class StatementGenerator
     {
         ExpressionGenerator.GenerateExpression(deleteNode.Expression, context);
         Builder.AppendInstruction("mov edi, eax", "Save pointer to be deleted in edi");
-        Builder.AppendInstruction("push edi", "Push 'this' pointer for destructor call");
 
         var pointerType = _context.SemanticAnalyzer.AnalyzeExpressionType(deleteNode.Expression, context);
         var objectType = pointerType.TrimEnd('*');
-        var dtor = FunctionResolver.FindDestructor(objectType);
 
-        if (dtor != null)
+        // If the object's type has a vtable, its destructor MUST be called virtually.
+        // Otherwise, call it directly if it exists.
+        if (_context.VTableManager.HasVTable(objectType))
         {
-            if (dtor.IsVirtual)
+            Builder.AppendInstruction("push edi", "Push 'this' pointer for virtual dtor call");
+            Builder.AppendInstruction("mov eax, [edi]", "Get vtable pointer from object");
+            Builder.AppendInstruction("mov eax, [eax]", "Get destructor from vtable[0]");
+            Builder.AppendInstruction("call eax");
+            Builder.AppendInstruction("add esp, 4", "Clean up 'this' from dtor call");
+        }
+        else
+        {
+            var dtor = FunctionResolver.FindDestructor(objectType);
+            if (dtor != null)
             {
-                Builder.AppendInstruction("mov eax, [edi]", "Get vtable pointer from object");
-                Builder.AppendInstruction("mov eax, [eax]", "Get destructor from vtable[0]");
-                Builder.AppendInstruction("call eax");
-            }
-            else
-            {
+                Builder.AppendInstruction("push edi", "Push 'this' pointer for non-virtual dtor call");
                 Builder.AppendInstruction($"call {NameMangler.Mangle(dtor)}");
+                Builder.AppendInstruction("add esp, 4", "Clean up 'this' from dtor call");
             }
         }
 
-        Builder.AppendInstruction("add esp, 4", "Clean up 'this' from dtor call");
         Builder.AppendInstruction("push edi", "Push pointer for free()");
         Builder.AppendInstruction("call [free]");
         Builder.AppendInstruction("add esp, 4", "Clean up pointer from free() call");
@@ -2608,74 +2705,93 @@ public class StatementGenerator
                         else Builder.AppendInstruction($"mov dword [ebp + {totalOffset}], eax", $"Init member {memberName}");
                     }
                 }
-                else // e.g. string s = "hello"; or string s = other_s; (Implicit constructor call)
+                else // Covers implicit constructor calls AND pointer initialization
                 {
                     string initializerType = _context.SemanticAnalyzer.AnalyzeExpressionType(decl.Initializer, context);
-                    var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType });
 
-                    bool takeAddressOfInitializer = false;
-                    if (ctor == null && TypeRepository.IsStruct(initializerType))
+                    if (varTypeFqn.EndsWith("*"))
                     {
-                        // Try to find a copy constructor that takes a pointer, e.g. string(string*)
-                        ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType + "*" });
-                        if (ctor != null)
-                        {
-                            takeAddressOfInitializer = true;
-                        }
-                    }
-
-                    if (ctor == null)
-                    {
-                        throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
-                    }
-
-                    int totalArgSize;
-                    if (takeAddressOfInitializer)
-                    {
-                        // We need the address of the initializer object. `GenerateExpression` on a struct-type expression gives its address.
+                        // Pointer initialization, not a constructor call.
                         ExpressionGenerator.GenerateExpression(decl.Initializer, context);
-                        Builder.AppendInstruction("push eax", "Push pointer to initializer object for copy ctor");
-                        totalArgSize = 4;
+                        Builder.AppendInstruction($"mov dword [ebp + {offset}], eax", $"Initialize pointer {variableName}");
                     }
                     else
                     {
-                        // The constructor takes the initializer by value (either a primitive/pointer, or a struct).
-                        // PushArgument handles both cases correctly (pushing value, or member-wise copy).
-                        totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
-                    }
+                        // Implicit constructor call for a value-type struct.
+                        var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType });
 
+                        bool takeAddressOfInitializer = false;
+                        if (ctor == null && TypeRepository.IsStruct(initializerType))
+                        {
+                            // Try to find a copy constructor that takes a pointer, e.g. string(string*)
+                            ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType + "*" });
+                            if (ctor != null)
+                            {
+                                takeAddressOfInitializer = true;
+                            }
+                        }
+
+                        if (ctor == null)
+                        {
+                            throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
+                        }
+
+                        int totalArgSize;
+                        if (takeAddressOfInitializer)
+                        {
+                            ExpressionGenerator.GenerateExpression(decl.Initializer, context);
+                            Builder.AppendInstruction("push eax", "Push pointer to initializer object for copy ctor");
+                            totalArgSize = 4;
+                        }
+                        else
+                        {
+                            totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
+                        }
+
+                        Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
+                        Builder.AppendInstruction("push eax");
+                        totalArgSize += 4;
+
+                        Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
+                        Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
+
+                        if (decl.Initializer is CallExpressionNode or BinaryExpressionNode &&
+                            _context.TypeRepository.IsStruct(initializerType) && !initializerType.EndsWith("*"))
+                        {
+                            var tempDtor = FunctionResolver.FindDestructor(initializerType);
+                            if (tempDtor != null)
+                            {
+                                Builder.AppendInstruction(null, "Destroying temporary from initialization");
+                                Builder.AppendInstruction("lea eax, [esp]");
+                                Builder.AppendInstruction("push eax");
+                                if (tempDtor.IsVirtual)
+                                {
+                                    Builder.AppendInstruction("mov eax, [eax]");
+                                    Builder.AppendInstruction("mov eax, [eax]");
+                                    Builder.AppendInstruction("call eax");
+                                }
+                                else
+                                {
+                                    Builder.AppendInstruction($"call {NameMangler.Mangle(tempDtor)}");
+                                }
+                                Builder.AppendInstruction("add esp, 4");
+                            }
+                            var size = MemoryLayoutManager.GetSizeOfType(initializerType, context.CompilationUnit);
+                            Builder.AppendInstruction($"add esp, {size}", "Clean up temporary return object from stack");
+                        }
+                    }
+                }
+            }
+            else // Default constructor call, e.g. List textObjects;
+            {
+                var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string>());
+                if (ctor != null)
+                {
+                    Builder.AppendInstruction(null, $"Calling default constructor for {variableName}");
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
                     Builder.AppendInstruction("push eax");
-                    totalArgSize += 4;
-
                     Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
-                    Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
-
-                    // CRITICAL FIX: If the initializer created a temporary, it's still on the stack. Destroy it.
-                    if (decl.Initializer is CallExpressionNode or BinaryExpressionNode &&
-                        _context.TypeRepository.IsStruct(initializerType) && !initializerType.EndsWith("*"))
-                    {
-                        var tempDtor = FunctionResolver.FindDestructor(initializerType);
-                        if (tempDtor != null)
-                        {
-                            Builder.AppendInstruction(null, "Destroying temporary from initialization");
-                            Builder.AppendInstruction("lea eax, [esp]"); // Address of temporary is now at ESP
-                            Builder.AppendInstruction("push eax"); // Push 'this'
-                            if (tempDtor.IsVirtual)
-                            {
-                                Builder.AppendInstruction("mov eax, [eax]", "Get vtable ptr");
-                                Builder.AppendInstruction("mov eax, [eax]", "Get dtor from vtable[0]");
-                                Builder.AppendInstruction("call eax");
-                            }
-                            else
-                            {
-                                Builder.AppendInstruction($"call {NameMangler.Mangle(tempDtor)}");
-                            }
-                            Builder.AppendInstruction("add esp, 4"); // Clean up 'this'
-                        }
-                        var size = MemoryLayoutManager.GetSizeOfType(initializerType, context.CompilationUnit);
-                        Builder.AppendInstruction($"add esp, {size}", "Clean up temporary return object from stack");
-                    }
+                    Builder.AppendInstruction("add esp, 4", "Clean up ctor args");
                 }
             }
         }
@@ -2795,7 +2911,8 @@ public class SymbolTable
         CollectDeclarations(ctor.Body, allLocalDeclarations);
 
         var thisTypeName = ctor.Namespace != null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName;
-        var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName, -1, -1), 1, new Token(TokenType.Identifier, "this", -1, -1));
+        var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
+        var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
 
         var allParams = new List<ParameterNode> { thisParam };
         allParams.AddRange(ctor.Parameters);
@@ -2809,7 +2926,8 @@ public class SymbolTable
         CollectDeclarations(dtor.Body, allLocalDeclarations);
 
         var thisTypeName = dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName;
-        var thisParam = new ParameterNode(new Token(TokenType.Identifier, thisTypeName, -1, -1), 1, new Token(TokenType.Identifier, "this", -1, -1));
+        var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
+        var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
 
         Initialize(new List<ParameterNode> { thisParam }, allLocalDeclarations, typeResolver, memoryLayoutManager, dtor.Namespace, currentUnit);
     }
@@ -2819,28 +2937,47 @@ public class SymbolTable
         TotalLocalSize = 0;
         foreach (var d in localDeclarations)
         {
-            var rawTypeName = TypeRepository.GetTypeNameFromToken(d.Type, d.PointerLevel);
-            var baseTypeName = rawTypeName.TrimEnd('*');
-            var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
-            var resolvedTypeName = d.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
-                ? rawTypeName
-                : typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+            var baseTypeName = d.Type.GetBaseTypeName();
+            if (baseTypeName == "unknown") continue;
+
+            var rawTypeName = TypeRepository.GetTypeNameFromNode(d.Type);
+            var pointerSuffix = new string('*', d.Type.GetPointerLevel());
+
+            string resolvedTypeName;
+            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
+            {
+                resolvedTypeName = rawTypeName;
+            }
+            else if (d.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedTypeName = rawTypeName;
+            }
+            else
+            {
+                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+            }
             TotalLocalSize += memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
         }
 
         int currentParamOffset = 8; // EBP + 8 is first parameter
         foreach (var param in parameters)
         {
-            var rawTypeName = TypeRepository.GetTypeNameFromToken(param.Type, param.PointerLevel);
-            var baseTypeName = rawTypeName.TrimEnd('*');
-            var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
+            var baseTypeName = param.Type.GetBaseTypeName();
+            if (baseTypeName == "unknown") continue;
+
+            var rawTypeName = TypeRepository.GetTypeNameFromNode(param.Type);
+            var pointerSuffix = new string('*', param.Type.GetPointerLevel());
             string resolvedTypeName;
 
-            if (param.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
+            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
             {
                 resolvedTypeName = rawTypeName;
             }
-            else if (param.Type.Value.Contains("::"))
+            else if (param.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedTypeName = rawTypeName;
+            }
+            else if (rawTypeName.Contains("::"))
             {
                 // This correctly handles the pre-qualified 'this' parameter type.
                 resolvedTypeName = rawTypeName;
@@ -2857,12 +2994,25 @@ public class SymbolTable
         int currentLocalOffset = 0;
         foreach (var decl in localDeclarations)
         {
-            var rawTypeName = TypeRepository.GetTypeNameFromToken(decl.Type, decl.PointerLevel);
-            var baseTypeName = rawTypeName.TrimEnd('*');
-            var pointerSuffix = new string('*', rawTypeName.Length - baseTypeName.Length);
-            var resolvedTypeName = decl.Type.Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase)
-                ? rawTypeName
-                : typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+            var baseTypeName = decl.Type.GetBaseTypeName();
+            if (baseTypeName == "unknown") continue;
+
+            var rawTypeName = TypeRepository.GetTypeNameFromNode(decl.Type);
+            var pointerSuffix = new string('*', decl.Type.GetPointerLevel());
+            string resolvedTypeName;
+
+            if (baseTypeName.Length == 1 && char.IsUpper(baseTypeName[0])) // Heuristic for generic type T
+            {
+                resolvedTypeName = rawTypeName;
+            }
+            else if (decl.Type.GetFirstToken().Type == TokenType.Keyword || baseTypeName.Equals("void", StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedTypeName = rawTypeName;
+            }
+            else
+            {
+                resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
+            }
 
             int size = memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;
@@ -2936,6 +3086,7 @@ public class SymbolTable
 </file>
 
 <file path="Generator\TypeRepository.cs">
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -2988,7 +3139,16 @@ public class TypeRepository
 
     public bool IsStruct(string typeName) => _structs.ContainsKey(typeName.TrimEnd('*'));
 
-    public static string GetTypeNameFromToken(Token type, int pointerLevel) => type.Value + new string('*', pointerLevel);
+    public static string GetTypeNameFromNode(TypeNode node)
+    {
+        return node switch
+        {
+            SimpleTypeNode s => s.TypeToken.Value,
+            PointerTypeNode p => GetTypeNameFromNode(p.BaseType) + "*",
+            GenericInstantiationTypeNode g => $"{g.BaseType.Value}<{string.Join(",", g.TypeArguments.Select(GetTypeNameFromNode))}>",
+            _ => throw new NotImplementedException($"GetTypeNameFromNode not implemented for {node.GetType().Name}")
+        };
+    }
 }
 </file>
 
@@ -3053,10 +3213,22 @@ public class VTableManager
         }
 
         var dtor = structDef.Destructors.FirstOrDefault();
-        if (dtor?.IsVirtual ?? false)
+
+        // A derived dtor is implicitly virtual if the base is virtual.
+        bool isBaseDtorVirtual = newVTable.FirstOrDefault() is DestructorDeclarationNode;
+
+        if (dtor != null && (dtor.IsVirtual || isBaseDtorVirtual))
         {
-            if (newVTable.Any(n => n is DestructorDeclarationNode)) newVTable[0] = dtor;
-            else newVTable.Insert(0, dtor);
+            // If the base had a virtual dtor, we override it.
+            if (isBaseDtorVirtual)
+            {
+                newVTable[0] = dtor;
+            }
+            // If the base did NOT have a virtual dtor, but this one is explicitly virtual, we add it.
+            else // dtor.IsVirtual is true
+            {
+                newVTable.Insert(0, dtor);
+            }
         }
 
         foreach (var method in structDef.Methods)
@@ -3189,6 +3361,10 @@ internal class ExpressionParser
         {
             return ParseNewExpression();
         }
+        if (_parser.Current.Type == TokenType.Keyword && _parser.Current.Value == "sizeof")
+        {
+            return ParseSizeofExpression();
+        }
         if (_parser.Current.Type is TokenType.Minus or TokenType.Plus or TokenType.Star or TokenType.Ampersand)
         {
             var op = _parser.Current; _parser.AdvancePosition(1);
@@ -3197,10 +3373,19 @@ internal class ExpressionParser
         return ParsePostfixExpression();
     }
 
+    private ExpressionNode ParseSizeofExpression()
+    {
+        var sizeofToken = _parser.Eat(TokenType.Keyword); // sizeof
+        _parser.Eat(TokenType.LeftParen);
+        var typeNode = _parser.ParseTypeNode();
+        _parser.Eat(TokenType.RightParen);
+        return new SizeofExpressionNode(sizeofToken, typeNode);
+    }
+
     private NewExpressionNode ParseNewExpression()
     {
         _parser.Eat(TokenType.Keyword); // new
-        var typeToken = _parser.Eat(TokenType.Identifier);
+        var typeNode = _parser.ParseTypeNode();
 
         _parser.Eat(TokenType.LeftParen);
         var arguments = new List<ExpressionNode>();
@@ -3211,7 +3396,7 @@ internal class ExpressionParser
         }
         _parser.Eat(TokenType.RightParen);
 
-        return new NewExpressionNode(typeToken, arguments);
+        return new NewExpressionNode(typeNode, arguments);
     }
 
     private ExpressionNode ParsePostfixExpression()
@@ -3521,6 +3706,15 @@ public class Parser
         Eat(TokenType.Keyword); // struct
         var structName = Eat(TokenType.Identifier);
 
+        var genericParameters = new List<Token>();
+        if (Current.Type == TokenType.LessThan)
+        {
+            Eat(TokenType.LessThan);
+            do { genericParameters.Add(Eat(TokenType.Identifier)); }
+            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+            Eat(TokenType.GreaterThan);
+        }
+
         string? baseStructName = null;
         if (Current.Type == TokenType.Colon)
         {
@@ -3577,6 +3771,7 @@ public class Parser
                 continue;
             }
 
+            // Check for constructor (e.g. `List(...)` not `List<T>(...)`)
             if (Current.Type == TokenType.Identifier && Current.Value == structName.Value && Peek(1).Type == TokenType.LeftParen)
             {
                 if (isVirtual || isOverride || isConst) ReportError("Constructors cannot be marked 'virtual', 'override', or 'const'.", startToken);
@@ -3584,7 +3779,7 @@ public class Parser
                 continue;
             }
 
-            var (type, pointerLevel) = ParseType();
+            var type = ParseTypeNode();
 
             Token name;
             if (Current.Type == TokenType.Keyword && Current.Value == "operator")
@@ -3601,21 +3796,22 @@ public class Parser
 
             if (Current.Type == TokenType.LeftParen)
             {
-                var methodNode = FinishParsingFunction(type, pointerLevel, name.Value, structName.Value, currentAccess, isVirtual, isOverride, _currentNamespace, true);
+                var methodNode = FinishParsingFunction(type, name.Value, structName.Value, currentAccess, isVirtual, isOverride, _currentNamespace, true);
                 methods.Add(methodNode);
             }
             else
             {
                 if (isVirtual || isOverride) ReportError("Only methods can be marked 'virtual' or 'override'.", startToken);
-                members.Add(new MemberVariableNode(isConst, type, pointerLevel, name, currentAccess));
+                members.Add(new MemberVariableNode(isConst, type, name, currentAccess));
                 Eat(TokenType.Semicolon);
             }
         }
 
         Eat(TokenType.RightBrace);
         Eat(TokenType.Semicolon);
-        return new StructDefinitionNode(structName.Value, baseStructName, _currentNamespace, members, methods, constructors, destructors);
+        return new StructDefinitionNode(structName.Value, genericParameters, baseStructName, _currentNamespace, members, methods, constructors, destructors);
     }
+
 
     private ConstructorDeclarationNode ParseConstructor(string ownerStructName, string? baseStructName, AccessSpecifier access)
     {
@@ -3682,44 +3878,64 @@ public class Parser
         }
     }
 
-    internal (Token type, int pointerLevel) ParseType()
+    internal TypeNode ParseTypeNode()
     {
-        Token typeToken;
-        string? namespaceQualifier = null;
+        Token baseTypeToken;
+        var current = Current;
 
-        if (Current.Type == TokenType.Identifier && Peek(1).Type == TokenType.DoubleColon)
+        // 1. Parse the base name (which could be qualified)
+        if (current.Type == TokenType.Keyword && current.Value == "struct")
         {
-            namespaceQualifier = Eat(TokenType.Identifier).Value;
-            Eat(TokenType.DoubleColon);
+            Eat(TokenType.Keyword);
+            baseTypeToken = Eat(TokenType.Identifier);
         }
-
-        if (Current.Type == TokenType.Keyword && Current.Value == "struct")
+        else if (current.Type == TokenType.Keyword && (current.Value is "int" or "char" or "void"))
         {
-            Eat(TokenType.Keyword); // struct
-            typeToken = Eat(TokenType.Identifier);
+            baseTypeToken = Eat(TokenType.Keyword);
+        }
+        else if (current.Type == TokenType.Identifier)
+        {
+            baseTypeToken = Eat(TokenType.Identifier);
+            // Check for `::`
+            if (Current.Type == TokenType.DoubleColon)
+            {
+                Eat(TokenType.DoubleColon);
+                var memberName = Eat(TokenType.Identifier);
+                baseTypeToken = new Token(TokenType.Identifier, $"{baseTypeToken.Value}::{memberName.Value}", baseTypeToken.Line, baseTypeToken.Column);
+            }
         }
         else
         {
-            typeToken = Current;
-            _position++;
+            ReportError($"Expected a type name but found '{current.Type}' ('{current.Value}').", current);
+            AdvancePosition(1); // Consume the bad token to prevent infinite loop
+            return new SimpleTypeNode(new Token(TokenType.Identifier, "unknown", current.Line, current.Column));
         }
 
-        if (typeToken.Type == TokenType.Identifier)
+        // 2. Parse optional generic arguments
+        TypeNode typeNode;
+        if (Current.Type == TokenType.LessThan)
         {
-            if (namespaceQualifier != null)
-            {
-                typeToken = new Token(typeToken.Type, $"{namespaceQualifier}::{typeToken.Value}", typeToken.Line, typeToken.Column);
-            }
+            Eat(TokenType.LessThan);
+            var typeArgs = new List<TypeNode>();
+            do { typeArgs.Add(ParseTypeNode()); }
+            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+            Eat(TokenType.GreaterThan);
+            typeNode = new GenericInstantiationTypeNode(baseTypeToken, typeArgs);
+        }
+        else
+        {
+            typeNode = new SimpleTypeNode(baseTypeToken);
         }
 
-        int pointerLevel = 0;
+        // 3. Parse optional pointers
         while (Current.Type == TokenType.Star)
         {
             Eat(TokenType.Star);
-            pointerLevel++;
+            typeNode = new PointerTypeNode(typeNode);
         }
-        return (typeToken, pointerLevel);
+        return typeNode;
     }
+
 
     private List<ParameterNode> ParseParameterList(bool addThisPointer)
     {
@@ -3729,9 +3945,9 @@ public class Parser
         {
             do
             {
-                var (paramType, paramPointerLevel) = ParseType();
+                var paramType = ParseTypeNode();
                 var paramName = Eat(TokenType.Identifier);
-                parameters.Add(new ParameterNode(paramType, paramPointerLevel, paramName));
+                parameters.Add(new ParameterNode(paramType, paramName));
             } while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
         }
         Eat(TokenType.RightParen);
@@ -3740,21 +3956,22 @@ public class Parser
 
     private FunctionDeclarationNode ParseGlobalFunction()
     {
-        var (returnType, returnPointerLevel) = ParseType();
+        var returnType = ParseTypeNode();
         var identifier = Eat(TokenType.Identifier);
-        return FinishParsingFunction(returnType, returnPointerLevel, identifier.Value, null, AccessSpecifier.Public, false, false, _currentNamespace, false);
+        return FinishParsingFunction(returnType, identifier.Value, null, AccessSpecifier.Public, false, false, _currentNamespace, false);
     }
 
-    private FunctionDeclarationNode FinishParsingFunction(Token returnType, int returnPointerLevel, string name, string? ownerStructName, AccessSpecifier accessLevel, bool isVirtual, bool isOverride, string? namespaceName, bool isMethod)
+    private FunctionDeclarationNode FinishParsingFunction(TypeNode returnType, string name, string? ownerStructName, AccessSpecifier accessLevel, bool isVirtual, bool isOverride, string? namespaceName, bool isMethod)
     {
         var parameters = ParseParameterList(isMethod);
 
         if (isMethod && ownerStructName != null)
         {
-            var thisTypeTokenValue = namespaceName != null ? $"{namespaceName}::{ownerStructName}" : ownerStructName;
-            var thisType = new Token(TokenType.Identifier, thisTypeTokenValue, -1, -1); // Location doesn't matter for this internal param
+            // The `this` pointer type will be resolved later during semantic analysis.
+            // For now, we create a placeholder.
+            var thisType = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, ownerStructName, -1, -1)));
             var thisName = new Token(TokenType.Identifier, "this", -1, -1);
-            var thisParam = new ParameterNode(thisType, 1, thisName);
+            var thisParam = new ParameterNode(thisType, thisName);
             parameters.Insert(0, thisParam);
         }
 
@@ -3768,7 +3985,7 @@ public class Parser
             Eat(TokenType.Semicolon); // For function prototypes
         }
 
-        return new FunctionDeclarationNode(returnType, returnPointerLevel, name, parameters, body, ownerStructName, accessLevel, isVirtual, isOverride, namespaceName);
+        return new FunctionDeclarationNode(returnType, name, parameters, body, ownerStructName, accessLevel, isVirtual, isOverride, namespaceName);
     }
 }
 </file>
@@ -3802,8 +4019,45 @@ internal class StatementParser
         return new BlockStatementNode(statements);
     }
 
+    /// <summary>
+    /// Peeks ahead in the token stream to determine if the upcoming sequence of tokens is a declaration.
+    /// This is a classic C/C++ parsing problem, as `A * B;` could be a multiplication or a declaration.
+    /// This lookahead is read-only and does not consume tokens or report errors.
+    /// </summary>
+    private bool IsDeclaration()
+    {
+        int originalPosition = _parser._position;
+        try
+        {
+            // Create a new parser instance for a safe lookahead, to avoid modifying the main parser's state
+            // and to suppress error reporting during the lookahead.
+            var tempParser = new Parser(new List<Token>(_parser._tokens.ToArray()))
+            {
+                _position = originalPosition
+            };
+
+            // A declaration can optionally start with const.
+            if (tempParser.Current.Type == TokenType.Keyword && tempParser.Current.Value == "const")
+            {
+                tempParser.AdvancePosition(1);
+            }
+
+            // Now, try to parse a type from the temporary state.
+            tempParser.ParseTypeNode();
+
+            // If we get here, it parsed a type. A declaration must be followed by an identifier.
+            return tempParser.Current.Type == TokenType.Identifier;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+
     internal StatementNode ParseStatement()
     {
+        // First, check for keywords that unambiguously start a statement.
         if (_parser.Current.Type == TokenType.Keyword)
         {
             switch (_parser.Current.Value)
@@ -3812,39 +4066,22 @@ internal class StatementParser
                 case "if": return ParseIfStatement();
                 case "while": return ParseWhileStatement();
                 case "delete": return ParseDeleteStatement();
-                case "const":
-                case "int":
-                case "char":
-                case "struct":
-                    return ParseDeclarationStatement();
             }
         }
 
-        // Lookahead to distinguish between a declaration and an expression statement
-        bool isDeclaration = false;
-        if (_parser.Current.Type == TokenType.Identifier || (_parser.Current.Type == TokenType.Keyword && (_parser.Current.Value == "const" || _parser.Current.Value == "int" || _parser.Current.Value == "char" || _parser.Current.Value == "struct")))
+        // Check for block statements.
+        if (_parser.Current.Type == TokenType.LeftBrace)
         {
-            int tempPos = _parser._position;
-            try
-            {
-                if (_parser.Current.Type == TokenType.Keyword && _parser.Current.Value == "const") _parser.AdvancePosition(1);
-                _parser.ParseType();
-                if (_parser.Current.Type == TokenType.Identifier) isDeclaration = true;
-            }
-            catch
-            {
-                // Lookahead failed, assume not a declaration
-                isDeclaration = false;
-            }
-            finally
-            {
-                _parser._position = tempPos;
-            }
+            return ParseBlockStatement();
         }
 
-        if (isDeclaration) return ParseDeclarationStatement();
-        if (_parser.Current.Type == TokenType.LeftBrace) return ParseBlockStatement();
+        // Now, use the lookahead to resolve the ambiguity between a declaration and an expression.
+        if (IsDeclaration())
+        {
+            return ParseDeclarationStatement();
+        }
 
+        // If it's not a declaration or any other statement type, it must be an expression.
         var expression = _expressionParser.ParseExpression();
         _parser.Eat(TokenType.Semicolon);
         return new ExpressionStatementNode(expression);
@@ -3883,7 +4120,7 @@ internal class StatementParser
             _parser.Eat(TokenType.Keyword);
         }
 
-        var (typeToken, pointerLevel) = _parser.ParseType();
+        var typeNode = _parser.ParseTypeNode();
         var identifier = _parser.Eat(TokenType.Identifier);
 
         ExpressionNode? initializer = null;
@@ -3911,7 +4148,7 @@ internal class StatementParser
             _parser.ReportError($"Constant variable '{identifier.Value}' must be initialized.", identifier);
         }
         _parser.Eat(TokenType.Semicolon);
-        return new DeclarationStatementNode(isConst, typeToken, pointerLevel, identifier, initializer, ctorArgs);
+        return new DeclarationStatementNode(isConst, typeNode, identifier, initializer, ctorArgs);
     }
 
     private WhileStatementNode ParseWhileStatement()
@@ -3969,7 +4206,8 @@ public class Tokenizer
         "override",
         "new",
         "delete",
-        "operator" // NEW
+        "operator",
+        "sizeof"
     ];
 
     public static List<Token> Tokenize(string input)
@@ -4120,7 +4358,9 @@ namespace CTilde;
 
 public enum TokenType
 {
+    Unknown,
     Keyword,
+    Enum,
     Identifier,
     IntegerLiteral,
     HexLiteral,
@@ -4134,22 +4374,111 @@ public enum TokenType
     Dot,
     Hash,
     Assignment,
-    Unknown,
     Plus,
     Minus,
     Star,
     Slash,
+
     DoubleEquals,
     NotEquals,
     LessThan,
     GreaterThan,
+
     Ampersand,
     Arrow,
     Colon,
     DoubleColon,
-    Enum,
     Tilde
 }
+</file>
+
+<file path="list.c">
+namespace std;
+
+// A generic dynamic list implementation.
+// The list owns the backing array and copies items by value.
+struct List<T>
+{
+private:
+    T* m_data;          // Pointer to the array of T
+    int m_count;        // Number of elements currently in the list
+    int m_capacity;     // Allocated capacity of the backing array
+
+    void ensure_capacity(int min_capacity)
+    {
+        if (m_capacity < min_capacity)
+        {
+            int new_capacity = m_capacity * 2;
+            if (new_capacity < min_capacity) {
+                new_capacity = min_capacity;
+            }
+            if (new_capacity < 4) {
+                new_capacity = 4;
+            }
+
+            T* new_data = malloc(new_capacity * sizeof(T)); 
+            if (m_data != 0)
+            {
+                memcpy(new_data, m_data, m_count * sizeof(T));
+                free(m_data);
+            }
+            m_data = new_data;
+            m_capacity = new_capacity;
+        }
+    }
+
+public:
+    List()
+    {
+        m_data = 0;
+        m_count = 0;
+        m_capacity = 0;
+    }
+
+    ~List()
+    {
+        if (m_data != 0)
+        {
+            free(m_data);
+        }
+    }
+    
+    void add(T item)
+    {
+        ensure_capacity(m_count + 1);
+        *(m_data + m_count) = item;
+        m_count = m_count + 1;
+    }
+
+    T get(int index)
+    {
+        return *(m_data + index);
+    }
+    
+    void set(int index, T item)
+    {
+        *(m_data + index) = item;
+    }
+
+    int count()
+    {
+        return m_count;
+    }
+    
+    void remove_at(int index)
+    {
+        if (index < m_count - 1)
+        {
+            memcpy(m_data + index, m_data + index + 1, (m_count - index - 1) * sizeof(T));
+        }
+        m_count = m_count - 1;
+    }
+    
+    void clear()
+    {
+        m_count = 0;
+    }
+};
 </file>
 
 <file path="main.c">
@@ -4157,6 +4486,7 @@ public enum TokenType
 #import "msvcrt.dll"
 #include "raylib.c"
 #include "string.c"
+#include "list.c"
 #include "position.c"
 #include "text_object.c"
 
@@ -4169,31 +4499,45 @@ int main()
     const int screenWidth = 800;
     const int screenHeight = 600;
 
-    int unusedVar = 10; // WARNING: Unused variable 'unusedVar'.
-
-    rl::Color rayWhite = {245, 245, 245, 255};
-    rl::Color maroon = {190, 33, 55, 255};
-    
-    rl::InitWindow(screenWidth, screenHeight, "Comprehensive Diagnostics");
+    rl::InitWindow(screenWidth, screenHeight, "CTilde Generic List Demo");
     rl::SetTargetFPS(60);
     
-    TextObject myText(150, 275, "GO FUCK YOURSELF", 40, maroon);
-    myText.speed = 500; // ERROR: 'speed' is private
+    rl::Color rayWhite = {245, 245, 245, 255};
+    rl::Color red = {230, 41, 55, 255};
+    rl::Color blue = {0, 121, 241, 255};
+    
+    List<TextObject*> textObjects;
+    textObjects.add(new TextObject(100, 100, "First Item", 20, red));
+    textObjects.add(new TextObject(200, 200, "Second Item", 30, blue));
+    textObjects.add(new TextObject(300, 300, "Third Item", 40, red));
 
     while (rl::WindowShouldClose() == 0) 
     {
         rl::BeginDrawing();
         rl::ClearBackground(rayWhite);
-        myText.draw();
+
+        int i = 0;
+        while (i < textObjects.count())
+        {
+           TextObject* txt = textObjects.get(i);
+           txt->draw();
+           i = i + 1;
+        }
+
         rl::EndDrawing();
+    }
+    
+    int j = 0;
+    while (j < textObjects.count())
+    {
+        TextObject* to_delete = textObjects.get(j);
+        delete to_delete;
+        j = j + 1;
     }
     
     rl::CloseWindow();
     
     return 0;
-
-    // WARNING: Unreachable code detected.
-    myText.fontSize = 99;
 }
 </file>
 

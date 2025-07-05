@@ -25,7 +25,8 @@ public class Tokenizer
         "override",
         "new",
         "delete",
-        "operator" // NEW
+        "operator",
+        "sizeof"
     ];
 
     public static List<Token> Tokenize(string input)

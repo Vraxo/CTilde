@@ -110,7 +110,8 @@ public class ExpressionGenerator
 
     private void GenerateNewExpression(NewExpressionNode n, AnalysisContext context)
     {
-        var typeFqn = TypeResolver.ResolveTypeName(n.Type.Value, context.CurrentFunction.Namespace, context.CompilationUnit);
+        var baseTypeName = n.Type.GetBaseTypeName();
+        var typeFqn = TypeResolver.ResolveTypeName(baseTypeName, context.CurrentFunction.Namespace, context.CompilationUnit);
         var size = MemoryLayoutManager.GetSizeOfType(typeFqn, context.CompilationUnit);
 
         Builder.AppendInstruction($"push {size}", "Push size for malloc");

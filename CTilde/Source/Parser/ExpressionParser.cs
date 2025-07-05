@@ -99,6 +99,10 @@ internal class ExpressionParser
         {
             return ParseNewExpression();
         }
+        if (_parser.Current.Type == TokenType.Keyword && _parser.Current.Value == "sizeof")
+        {
+            return ParseSizeofExpression();
+        }
         if (_parser.Current.Type is TokenType.Minus or TokenType.Plus or TokenType.Star or TokenType.Ampersand)
         {
             var op = _parser.Current; _parser.AdvancePosition(1);
@@ -107,10 +111,19 @@ internal class ExpressionParser
         return ParsePostfixExpression();
     }
 
+    private ExpressionNode ParseSizeofExpression()
+    {
+        var sizeofToken = _parser.Eat(TokenType.Keyword); // sizeof
+        _parser.Eat(TokenType.LeftParen);
+        var typeNode = _parser.ParseTypeNode();
+        _parser.Eat(TokenType.RightParen);
+        return new SizeofExpressionNode(sizeofToken, typeNode);
+    }
+
     private NewExpressionNode ParseNewExpression()
     {
         _parser.Eat(TokenType.Keyword); // new
-        var typeToken = _parser.Eat(TokenType.Identifier);
+        var typeNode = _parser.ParseTypeNode();
 
         _parser.Eat(TokenType.LeftParen);
         var arguments = new List<ExpressionNode>();
@@ -121,7 +134,7 @@ internal class ExpressionParser
         }
         _parser.Eat(TokenType.RightParen);
 
-        return new NewExpressionNode(typeToken, arguments);
+        return new NewExpressionNode(typeNode, arguments);
     }
 
     private ExpressionNode ParsePostfixExpression()

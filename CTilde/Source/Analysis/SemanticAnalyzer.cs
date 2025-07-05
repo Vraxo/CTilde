@@ -205,6 +205,21 @@ public class SemanticAnalyzer
             }
         }
 
+        // Handle pointer comparisons
+        if (bin.Operator.Type is TokenType.DoubleEquals or TokenType.NotEquals or TokenType.LessThan or TokenType.GreaterThan)
+        {
+            bool leftIsPtr = leftTypeFqn.EndsWith("*");
+            bool rightIsPtr = rightTypeFqn.EndsWith("*");
+            bool leftIsInt = leftTypeFqn == "int";
+            bool rightIsInt = rightTypeFqn == "int";
+
+            // Allow ptr <=> ptr and ptr <=> int
+            if ((leftIsPtr && rightIsPtr) || (leftIsPtr && rightIsInt) || (leftIsInt && rightIsPtr))
+            {
+                return "int"; // Result of any comparison is an int.
+            }
+        }
+
         if (_typeRepository.IsStruct(leftTypeFqn))
         {
             try

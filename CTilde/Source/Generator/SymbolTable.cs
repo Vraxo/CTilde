@@ -26,7 +26,11 @@ public class SymbolTable
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(ctor.Body, allLocalDeclarations);
 
-        var thisTypeName = ctor.Namespace != null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName;
+        // If the owner's name is mangled, it's already an FQN. Otherwise, construct the FQN.
+        string thisTypeName = ctor.OwnerStructName.Contains("__")
+            ? ctor.OwnerStructName
+            : (ctor.Namespace != null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName);
+
         var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
         var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
 
@@ -41,7 +45,11 @@ public class SymbolTable
         var allLocalDeclarations = new List<DeclarationStatementNode>();
         CollectDeclarations(dtor.Body, allLocalDeclarations);
 
-        var thisTypeName = dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName;
+        // If the owner's name is mangled, it's already an FQN. Otherwise, construct the FQN.
+        string thisTypeName = dtor.OwnerStructName.Contains("__")
+            ? dtor.OwnerStructName
+            : (dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName);
+
         var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
         var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
 
@@ -66,25 +74,7 @@ public class SymbolTable
             var baseTypeName = param.Type.GetBaseTypeName();
             if (baseTypeName == "unknown") continue;
 
-            string resolvedTypeName;
-            if (param.Name.Value == "this" && param.Type is PointerTypeNode ptn && ptn.BaseType is SimpleTypeNode stn)
-            {
-                // The 'this' pointer for a monomorphized struct needs to use the mangled name.
-                // We can get this from the owner's name which should already be mangled.
-                var function = param.Ancestors().OfType<FunctionDeclarationNode>().FirstOrDefault();
-                if (function != null && function.OwnerStructName != null && function.OwnerStructName.Contains("__"))
-                {
-                    resolvedTypeName = function.OwnerStructName + "*";
-                }
-                else
-                {
-                    resolvedTypeName = typeResolver.ResolveType(param.Type, currentNamespace, currentUnit);
-                }
-            }
-            else
-            {
-                resolvedTypeName = typeResolver.ResolveType(param.Type, currentNamespace, currentUnit);
-            }
+            string resolvedTypeName = typeResolver.ResolveType(param.Type, currentNamespace, currentUnit);
 
             _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false, false); // isRead = false
             currentParamOffset += Math.Max(4, memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit));

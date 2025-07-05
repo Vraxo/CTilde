@@ -71,10 +71,12 @@ public class Monomorphizer
         var cloner = new AstCloner(replacements);
         var clonedStruct = cloner.Clone(templateStruct);
 
-        // 6. Update the cloned struct's name and clear its generic parameters
+        // 6. Update the cloned struct's name and clear its generic parameters and namespace.
+        // The mangled name is now the FQN.
         var concreteStruct = clonedStruct with
         {
             Name = mangledName,
+            Namespace = null,
             GenericParameters = new List<Token>()
         };
 

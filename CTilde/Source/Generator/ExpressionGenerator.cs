@@ -207,7 +207,7 @@ public class ExpressionGenerator
     private void GenerateAssignmentExpression(AssignmentExpressionNode assign, AnalysisContext context)
     {
         string lValueType = SemanticAnalyzer.AnalyzeExpressionType(assign.Left, context);
-        bool isStructAssign = TypeRepository.IsStruct(lValueType);
+        bool isStructAssign = TypeRepository.IsStruct(lValueType) && !lValueType.EndsWith("*");
 
         if (isStructAssign)
         {
@@ -305,9 +305,11 @@ public class ExpressionGenerator
     private void GenerateBinaryExpression(BinaryExpressionNode binExpr, AnalysisContext context)
     {
         var leftTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(binExpr.Left, context);
+        var rightTypeFqn = SemanticAnalyzer.AnalyzeExpressionType(binExpr.Right, context);
 
-        if (TypeRepository.IsStruct(leftTypeFqn))
+        if (TypeRepository.IsStruct(leftTypeFqn) && !leftTypeFqn.EndsWith("*"))
         {
+            // Handle struct operator overloads
             var opName = $"operator_{NameMangler.MangleOperator(binExpr.Operator.Value)}";
             var overload = FunctionResolver.FindMethod(leftTypeFqn.TrimEnd('*'), opName) ?? throw new InvalidOperationException($"Internal compiler error: overload for '{opName}' not found.");
 
@@ -336,29 +338,47 @@ public class ExpressionGenerator
             {
                 Builder.AppendInstruction("lea eax, [esp]", "Get address of hidden return temporary");
             }
+            return;
         }
-        else
-        {
-            GenerateExpression(binExpr.Left, context);
-            Builder.AppendInstruction("push eax");
-            GenerateExpression(binExpr.Right, context);
-            Builder.AppendInstruction("mov ecx, eax");
-            Builder.AppendInstruction("pop eax");
 
-            switch (binExpr.Operator.Type)
+        // Standard evaluation: Right then Left
+        GenerateExpression(binExpr.Right, context);
+        Builder.AppendInstruction("push eax");
+        GenerateExpression(binExpr.Left, context);
+        Builder.AppendInstruction("pop ecx"); // EAX = Left, ECX = Right
+
+        // Handle pointer arithmetic scaling
+        if (binExpr.Operator.Type is TokenType.Plus or TokenType.Minus)
+        {
+            if (leftTypeFqn.EndsWith("*") && rightTypeFqn == "int")
             {
-                case TokenType.Plus: Builder.AppendInstruction("add eax, ecx"); break;
-                case TokenType.Minus: Builder.AppendInstruction("sub eax, ecx"); break;
-                case TokenType.Star: Builder.AppendInstruction("imul eax, ecx"); break;
-                case TokenType.Slash: Builder.AppendInstruction("cdq"); Builder.AppendInstruction("idiv ecx"); break;
-                case TokenType.DoubleEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("sete al"); Builder.AppendInstruction("movzx eax, al"); break;
-                case TokenType.NotEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setne al"); Builder.AppendInstruction("movzx eax, al"); break;
-                case TokenType.LessThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setl al"); Builder.AppendInstruction("movzx eax, al"); break;
-                case TokenType.GreaterThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setg al"); Builder.AppendInstruction("movzx eax, al"); break;
-                default: throw new NotImplementedException($"Op: {binExpr.Operator.Type}");
+                var baseType = leftTypeFqn.TrimEnd('*');
+                var elementSize = MemoryLayoutManager.GetSizeOfType(baseType, context.CompilationUnit);
+                if (elementSize > 1) Builder.AppendInstruction($"imul ecx, {elementSize}");
+            }
+            else if (leftTypeFqn == "int" && rightTypeFqn.EndsWith("*"))
+            {
+                var baseType = rightTypeFqn.TrimEnd('*');
+                var elementSize = MemoryLayoutManager.GetSizeOfType(baseType, context.CompilationUnit);
+                if (elementSize > 1) Builder.AppendInstruction($"imul eax, {elementSize}");
             }
         }
+
+        // Perform Operation
+        switch (binExpr.Operator.Type)
+        {
+            case TokenType.Plus: Builder.AppendInstruction("add eax, ecx"); break;
+            case TokenType.Minus: Builder.AppendInstruction("sub eax, ecx"); break;
+            case TokenType.Star: Builder.AppendInstruction("imul eax, ecx"); break;
+            case TokenType.Slash: Builder.AppendInstruction("cdq"); Builder.AppendInstruction("idiv ecx"); break;
+            case TokenType.DoubleEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("sete al"); Builder.AppendInstruction("movzx eax, al"); break;
+            case TokenType.NotEquals: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setne al"); Builder.AppendInstruction("movzx eax, al"); break;
+            case TokenType.LessThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setl al"); Builder.AppendInstruction("movzx eax, al"); break;
+            case TokenType.GreaterThan: Builder.AppendInstruction("cmp eax, ecx"); Builder.AppendInstruction("setg al"); Builder.AppendInstruction("movzx eax, al"); break;
+            default: throw new NotImplementedException($"Op: {binExpr.Operator.Type}");
+        }
     }
+
 
     private void GenerateQualifiedAccessExpression(QualifiedAccessExpressionNode qNode, AnalysisContext context)
     {

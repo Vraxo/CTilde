@@ -69,27 +69,31 @@ public class StatementGenerator
     {
         ExpressionGenerator.GenerateExpression(deleteNode.Expression, context);
         Builder.AppendInstruction("mov edi, eax", "Save pointer to be deleted in edi");
-        Builder.AppendInstruction("push edi", "Push 'this' pointer for destructor call");
 
         var pointerType = _context.SemanticAnalyzer.AnalyzeExpressionType(deleteNode.Expression, context);
         var objectType = pointerType.TrimEnd('*');
-        var dtor = FunctionResolver.FindDestructor(objectType);
 
-        if (dtor != null)
+        // If the object's type has a vtable, its destructor MUST be called virtually.
+        // Otherwise, call it directly if it exists.
+        if (_context.VTableManager.HasVTable(objectType))
         {
-            if (dtor.IsVirtual)
+            Builder.AppendInstruction("push edi", "Push 'this' pointer for virtual dtor call");
+            Builder.AppendInstruction("mov eax, [edi]", "Get vtable pointer from object");
+            Builder.AppendInstruction("mov eax, [eax]", "Get destructor from vtable[0]");
+            Builder.AppendInstruction("call eax");
+            Builder.AppendInstruction("add esp, 4", "Clean up 'this' from dtor call");
+        }
+        else
+        {
+            var dtor = FunctionResolver.FindDestructor(objectType);
+            if (dtor != null)
             {
-                Builder.AppendInstruction("mov eax, [edi]", "Get vtable pointer from object");
-                Builder.AppendInstruction("mov eax, [eax]", "Get destructor from vtable[0]");
-                Builder.AppendInstruction("call eax");
-            }
-            else
-            {
+                Builder.AppendInstruction("push edi", "Push 'this' pointer for non-virtual dtor call");
                 Builder.AppendInstruction($"call {NameMangler.Mangle(dtor)}");
+                Builder.AppendInstruction("add esp, 4", "Clean up 'this' from dtor call");
             }
         }
 
-        Builder.AppendInstruction("add esp, 4", "Clean up 'this' from dtor call");
         Builder.AppendInstruction("push edi", "Push pointer for free()");
         Builder.AppendInstruction("call [free]");
         Builder.AppendInstruction("add esp, 4", "Clean up pointer from free() call");
@@ -149,74 +153,93 @@ public class StatementGenerator
                         else Builder.AppendInstruction($"mov dword [ebp + {totalOffset}], eax", $"Init member {memberName}");
                     }
                 }
-                else // e.g. string s = "hello"; or string s = other_s; (Implicit constructor call)
+                else // Covers implicit constructor calls AND pointer initialization
                 {
                     string initializerType = _context.SemanticAnalyzer.AnalyzeExpressionType(decl.Initializer, context);
-                    var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType });
 
-                    bool takeAddressOfInitializer = false;
-                    if (ctor == null && TypeRepository.IsStruct(initializerType))
+                    if (varTypeFqn.EndsWith("*"))
                     {
-                        // Try to find a copy constructor that takes a pointer, e.g. string(string*)
-                        ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType + "*" });
-                        if (ctor != null)
-                        {
-                            takeAddressOfInitializer = true;
-                        }
-                    }
-
-                    if (ctor == null)
-                    {
-                        throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
-                    }
-
-                    int totalArgSize;
-                    if (takeAddressOfInitializer)
-                    {
-                        // We need the address of the initializer object. `GenerateExpression` on a struct-type expression gives its address.
+                        // Pointer initialization, not a constructor call.
                         ExpressionGenerator.GenerateExpression(decl.Initializer, context);
-                        Builder.AppendInstruction("push eax", "Push pointer to initializer object for copy ctor");
-                        totalArgSize = 4;
+                        Builder.AppendInstruction($"mov dword [ebp + {offset}], eax", $"Initialize pointer {variableName}");
                     }
                     else
                     {
-                        // The constructor takes the initializer by value (either a primitive/pointer, or a struct).
-                        // PushArgument handles both cases correctly (pushing value, or member-wise copy).
-                        totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
-                    }
+                        // Implicit constructor call for a value-type struct.
+                        var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType });
 
+                        bool takeAddressOfInitializer = false;
+                        if (ctor == null && TypeRepository.IsStruct(initializerType))
+                        {
+                            // Try to find a copy constructor that takes a pointer, e.g. string(string*)
+                            ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType + "*" });
+                            if (ctor != null)
+                            {
+                                takeAddressOfInitializer = true;
+                            }
+                        }
+
+                        if (ctor == null)
+                        {
+                            throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
+                        }
+
+                        int totalArgSize;
+                        if (takeAddressOfInitializer)
+                        {
+                            ExpressionGenerator.GenerateExpression(decl.Initializer, context);
+                            Builder.AppendInstruction("push eax", "Push pointer to initializer object for copy ctor");
+                            totalArgSize = 4;
+                        }
+                        else
+                        {
+                            totalArgSize = ExpressionGenerator.PushArgument(decl.Initializer, context);
+                        }
+
+                        Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
+                        Builder.AppendInstruction("push eax");
+                        totalArgSize += 4;
+
+                        Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
+                        Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
+
+                        if (decl.Initializer is CallExpressionNode or BinaryExpressionNode &&
+                            _context.TypeRepository.IsStruct(initializerType) && !initializerType.EndsWith("*"))
+                        {
+                            var tempDtor = FunctionResolver.FindDestructor(initializerType);
+                            if (tempDtor != null)
+                            {
+                                Builder.AppendInstruction(null, "Destroying temporary from initialization");
+                                Builder.AppendInstruction("lea eax, [esp]");
+                                Builder.AppendInstruction("push eax");
+                                if (tempDtor.IsVirtual)
+                                {
+                                    Builder.AppendInstruction("mov eax, [eax]");
+                                    Builder.AppendInstruction("mov eax, [eax]");
+                                    Builder.AppendInstruction("call eax");
+                                }
+                                else
+                                {
+                                    Builder.AppendInstruction($"call {NameMangler.Mangle(tempDtor)}");
+                                }
+                                Builder.AppendInstruction("add esp, 4");
+                            }
+                            var size = MemoryLayoutManager.GetSizeOfType(initializerType, context.CompilationUnit);
+                            Builder.AppendInstruction($"add esp, {size}", "Clean up temporary return object from stack");
+                        }
+                    }
+                }
+            }
+            else // Default constructor call, e.g. List textObjects;
+            {
+                var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string>());
+                if (ctor != null)
+                {
+                    Builder.AppendInstruction(null, $"Calling default constructor for {variableName}");
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
                     Builder.AppendInstruction("push eax");
-                    totalArgSize += 4;
-
                     Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
-                    Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
-
-                    // CRITICAL FIX: If the initializer created a temporary, it's still on the stack. Destroy it.
-                    if (decl.Initializer is CallExpressionNode or BinaryExpressionNode &&
-                        _context.TypeRepository.IsStruct(initializerType) && !initializerType.EndsWith("*"))
-                    {
-                        var tempDtor = FunctionResolver.FindDestructor(initializerType);
-                        if (tempDtor != null)
-                        {
-                            Builder.AppendInstruction(null, "Destroying temporary from initialization");
-                            Builder.AppendInstruction("lea eax, [esp]"); // Address of temporary is now at ESP
-                            Builder.AppendInstruction("push eax"); // Push 'this'
-                            if (tempDtor.IsVirtual)
-                            {
-                                Builder.AppendInstruction("mov eax, [eax]", "Get vtable ptr");
-                                Builder.AppendInstruction("mov eax, [eax]", "Get dtor from vtable[0]");
-                                Builder.AppendInstruction("call eax");
-                            }
-                            else
-                            {
-                                Builder.AppendInstruction($"call {NameMangler.Mangle(tempDtor)}");
-                            }
-                            Builder.AppendInstruction("add esp, 4"); // Clean up 'this'
-                        }
-                        var size = MemoryLayoutManager.GetSizeOfType(initializerType, context.CompilationUnit);
-                        Builder.AppendInstruction($"add esp, {size}", "Clean up temporary return object from stack");
-                    }
+                    Builder.AppendInstruction("add esp, 4", "Clean up ctor args");
                 }
             }
         }

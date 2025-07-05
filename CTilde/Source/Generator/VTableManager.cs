@@ -58,10 +58,22 @@ public class VTableManager
         }
 
         var dtor = structDef.Destructors.FirstOrDefault();
-        if (dtor?.IsVirtual ?? false)
+
+        // A derived dtor is implicitly virtual if the base is virtual.
+        bool isBaseDtorVirtual = newVTable.FirstOrDefault() is DestructorDeclarationNode;
+
+        if (dtor != null && (dtor.IsVirtual || isBaseDtorVirtual))
         {
-            if (newVTable.Any(n => n is DestructorDeclarationNode)) newVTable[0] = dtor;
-            else newVTable.Insert(0, dtor);
+            // If the base had a virtual dtor, we override it.
+            if (isBaseDtorVirtual)
+            {
+                newVTable[0] = dtor;
+            }
+            // If the base did NOT have a virtual dtor, but this one is explicitly virtual, we add it.
+            else // dtor.IsVirtual is true
+            {
+                newVTable.Insert(0, dtor);
+            }
         }
 
         foreach (var method in structDef.Methods)

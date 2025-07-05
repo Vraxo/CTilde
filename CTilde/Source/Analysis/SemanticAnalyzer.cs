@@ -275,6 +275,14 @@ public class SemanticAnalyzer
                 typeName = "unknown";
             }
         }
+
+        // Analyze constructor arguments to mark variables as used and check for other errors.
+        foreach (var arg in n.Arguments)
+        {
+            AnalyzeExpressionType(arg, context, diagnostics);
+        }
+        // TODO: Add constructor resolution and signature matching check here
+
         return typeName + "*";
     }
 

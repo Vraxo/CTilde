@@ -2,7 +2,9 @@
 
 public enum TokenType
 {
+    Unknown,
     Keyword,
+    Enum,
     Identifier,
     IntegerLiteral,
     HexLiteral,
@@ -16,19 +18,19 @@ public enum TokenType
     Dot,
     Hash,
     Assignment,
-    Unknown,
     Plus,
     Minus,
     Star,
     Slash,
+
     DoubleEquals,
     NotEquals,
     LessThan,
     GreaterThan,
+
     Ampersand,
     Arrow,
     Colon,
     DoubleColon,
-    Enum,
     Tilde
 }

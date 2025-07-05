@@ -38,15 +38,6 @@ public class Compiler
             compilationUnits.Add(unit);
         }
 
-        // --- Stop if there are parsing errors ---
-        if (allDiagnostics.Any())
-        {
-            var printer = new DiagnosticPrinter(allDiagnostics, sourceFileCache);
-            printer.Print();
-            Console.WriteLine($"\nCompilation failed with {allDiagnostics.Count} parsing error(s).");
-            return;
-        }
-
         var programNode = new ProgramNode(allImports.DistinctBy(i => i.LibraryName).ToList(), compilationUnits);
 
         // 3. Create analysis services ONCE
@@ -63,13 +54,18 @@ public class Compiler
 
         allDiagnostics.AddRange(runner.Diagnostics);
 
-        // --- Stop if there are semantic errors ---
+        // --- Print all diagnostics, but only fail on errors ---
         if (allDiagnostics.Any())
         {
             var printer = new DiagnosticPrinter(allDiagnostics, sourceFileCache);
             printer.Print();
-            Console.WriteLine($"\nCompilation failed with {allDiagnostics.Count} semantic error(s).");
-            return;
+
+            var errorCount = allDiagnostics.Count(d => d.Severity == DiagnosticSeverity.Error);
+            if (errorCount > 0)
+            {
+                Console.WriteLine($"\nCompilation failed with {errorCount} error(s).");
+                return;
+            }
         }
 
         // 5. Generate Code
@@ -208,7 +204,24 @@ public class FunctionResolver
         return candidates.First();
     }
 
-    public FunctionDeclarationNode ResolveMethod(StructDefinitionNode owner, string name) => owner.Methods.FirstOrDefault(m => m.Name == name) ?? throw new InvalidOperationException($"Method '{name}' not found on struct '{owner.Name}'");
+    public FunctionDeclarationNode? ResolveMethod(string ownerFqn, string name)
+    {
+        var structFqn = ownerFqn;
+        while (structFqn != null)
+        {
+            var structDef = _typeRepository.FindStruct(structFqn);
+            if (structDef == null) return null; // Should not happen if ownerFqn is valid
+
+            var method = structDef.Methods.FirstOrDefault(m => m.Name == name);
+            if (method != null) return method;
+
+            if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
+
+            var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
+            structFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+        }
+        return null;
+    }
 
     public FunctionDeclarationNode? FindMethod(string structFqn, string methodName)
     {
@@ -249,6 +262,12 @@ public class FunctionResolver
                 bool isMatch = resolvedParamType == argumentType;
 
                 if (!isMatch && resolvedParamType == "char" && argumentType == "int")
+                {
+                    isMatch = true;
+                }
+
+                // Allow assigning an int (from malloc) to any pointer type
+                if (!isMatch && argumentType == "int" && resolvedParamType.EndsWith("*"))
                 {
                     isMatch = true;
                 }
@@ -345,7 +364,7 @@ public class SemanticAnalyzer
                 IntegerLiteralNode => "int",
                 StringLiteralNode => "char*",
                 VariableExpressionNode v => AnalyzeVariableExpression(v, context, diagnostics),
-                AssignmentExpressionNode a => AnalyzeExpressionType(a.Left, context, diagnostics), // Type of assignment is type of l-value
+                AssignmentExpressionNode a => AnalyzeAssignmentExpression(a, context, diagnostics),
                 MemberAccessExpressionNode ma => AnalyzeMemberAccessExpression(ma, context, diagnostics),
                 UnaryExpressionNode u => AnalyzeUnaryExpression(u, context, diagnostics),
                 CallExpressionNode c => AnalyzeCallExpression(c, context, diagnostics),
@@ -366,10 +385,30 @@ public class SemanticAnalyzer
         }
     }
 
+    private string AnalyzeAssignmentExpression(AssignmentExpressionNode a, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var leftType = AnalyzeExpressionType(a.Left, context, diagnostics);
+        var rightType = AnalyzeExpressionType(a.Right, context, diagnostics);
+
+        // Allow int to pointer conversion (for malloc etc)
+        bool isIntToPointerConversion = leftType.EndsWith("*") && rightType == "int";
+        // Allow int literal to char conversion
+        bool isIntToCharLiteralConversion = leftType == "char" && rightType == "int" && a.Right is IntegerLiteralNode;
+
+        if (rightType != "unknown" && leftType != "unknown" && leftType != rightType && !isIntToPointerConversion && !isIntToCharLiteralConversion)
+        {
+            var token = AstHelper.GetFirstToken(a.Right);
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{rightType}' to '{leftType}'.", token.Line, token.Column));
+        }
+
+        return leftType; // Type of assignment is type of l-value
+    }
+
+
     private string AnalyzeInitializerListExpression(InitializerListExpressionNode il, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        // An initializer list cannot be used as a standalone expression.
-        // Its validity is checked within AnalyzeDeclarationStatement.
+        // This method is only called if an initializer list is used as a standalone expression,
+        // which is illegal. AnalyzeDeclarationStatement handles the valid case directly.
         diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, "Initializer lists can only be used to initialize a variable.", il.OpeningBrace.Line, il.OpeningBrace.Column));
         return "unknown";
     }
@@ -443,7 +482,10 @@ public class SemanticAnalyzer
             // Allow int literal to char conversion
             bool isIntToCharLiteralConversion = declaredTypeFqn == "char" && initializerType == "int" && decl.Initializer is IntegerLiteralNode;
 
-            if (initializerType != "unknown" && declaredTypeFqn != initializerType && !isIntToCharLiteralConversion)
+            // Allow int to pointer conversion (for malloc etc)
+            bool isIntToPointerConversion = declaredTypeFqn.EndsWith("*") && initializerType == "int";
+
+            if (initializerType != "unknown" && declaredTypeFqn != initializerType && !isIntToCharLiteralConversion && !isIntToPointerConversion)
             {
                 diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{initializerType}' to '{declaredTypeFqn}'.", AstHelper.GetFirstToken(decl.Initializer).Line, AstHelper.GetFirstToken(decl.Initializer).Column));
             }
@@ -509,7 +551,7 @@ public class SemanticAnalyzer
             try
             {
                 var opName = $"operator_{NameMangler.MangleOperator(bin.Operator.Value)}";
-                var overload = _functionResolver.FindMethod(leftTypeFqn, opName);
+                var overload = _functionResolver.ResolveMethod(leftTypeFqn, opName);
 
                 if (overload != null)
                 {
@@ -562,6 +604,7 @@ public class SemanticAnalyzer
         // 1. Check local variables and parameters in the symbol table.
         if (context.Symbols.TryGetSymbol(v.Identifier.Value, out _, out var type, out _))
         {
+            context.Symbols.MarkAsRead(v.Identifier.Value);
             return type;
         }
 
@@ -579,16 +622,46 @@ public class SemanticAnalyzer
                 ? $"{context.CurrentFunction.Namespace}::{context.CurrentFunction.OwnerStructName}"
                 : context.CurrentFunction.OwnerStructName;
 
-            var structDef = _typeRepository.FindStruct(ownerStructFqn);
-            if (structDef != null)
+            // Walk up the inheritance chain to find the member
+            string? currentStructFqn = ownerStructFqn;
+            MemberVariableNode? member = null;
+            StructDefinitionNode? definingStruct = null;
+
+            while (currentStructFqn != null)
             {
-                var member = structDef.Members.FirstOrDefault(m => m.Name.Value == v.Identifier.Value);
+                var structDef = _typeRepository.FindStruct(currentStructFqn);
+                if (structDef == null) break;
+
+                member = structDef.Members.FirstOrDefault(m => m.Name.Value == v.Identifier.Value);
                 if (member != null)
                 {
-                    // If 'this->member' exists, return its type. Access checks are for MemberAccessExpressionNode.
-                    var (_, memberTypeResolved) = _memoryLayoutManager.GetMemberInfo(ownerStructFqn, v.Identifier.Value, context.CompilationUnit);
-                    return memberTypeResolved;
+                    definingStruct = structDef;
+                    break;
                 }
+
+                if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
+
+                var unit = _typeRepository.GetCompilationUnitForStruct(currentStructFqn);
+                currentStructFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
+            }
+
+            if (member != null && definingStruct != null)
+            {
+                context.Symbols.MarkAsRead("this");
+                if (member.AccessLevel == AccessSpecifier.Private)
+                {
+                    if (context.CurrentFunction.OwnerStructName != definingStruct.Name || context.CurrentFunction.Namespace != definingStruct.Namespace)
+                    {
+                        diagnostics.Add(new Diagnostic(
+                            context.CompilationUnit.FilePath,
+                            $"Member '{definingStruct.Name}::{member.Name.Value}' is private and cannot be accessed from this context.",
+                            v.Identifier.Line,
+                            v.Identifier.Column
+                        ));
+                    }
+                }
+                var (_, memberTypeResolved) = _memoryLayoutManager.GetMemberInfo(ownerStructFqn, v.Identifier.Value, context.CompilationUnit);
+                return memberTypeResolved;
             }
         }
 
@@ -602,15 +675,36 @@ public class SemanticAnalyzer
         if (leftType == "unknown") return "unknown";
 
         string baseStructType = leftType.TrimEnd('*');
-        var structDef = _typeRepository.FindStruct(baseStructType);
-        if (structDef == null)
+
+        // Walk up the inheritance chain to find the member
+        string? currentStructFqn = baseStructType;
+        MemberVariableNode? member = null;
+        StructDefinitionNode? definingStruct = null;
+
+        while (currentStructFqn != null)
         {
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{baseStructType}' is not a struct and has no members.", AstHelper.GetFirstToken(ma.Left).Line, AstHelper.GetFirstToken(ma.Left).Column));
-            return "unknown"; // Return sentinel type
+            var structDef = _typeRepository.FindStruct(currentStructFqn);
+            if (structDef == null)
+            {
+                // This case should be handled by the initial struct check
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{baseStructType}' is not a struct and has no members.", AstHelper.GetFirstToken(ma.Left).Line, AstHelper.GetFirstToken(ma.Left).Column));
+                return "unknown";
+            }
+
+            member = structDef.Members.FirstOrDefault(m => m.Name.Value == ma.Member.Value);
+            if (member != null)
+            {
+                definingStruct = structDef;
+                break;
+            }
+
+            if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
+
+            var unit = _typeRepository.GetCompilationUnitForStruct(currentStructFqn);
+            currentStructFqn = _typeResolver.ResolveTypeName(structDef.BaseStructName, structDef.Namespace, unit);
         }
 
-        var member = structDef.Members.FirstOrDefault(m => m.Name.Value == ma.Member.Value);
-        if (member == null)
+        if (member == null || definingStruct == null)
         {
             diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Struct '{baseStructType}' has no member named '{ma.Member.Value}'.", ma.Member.Line, ma.Member.Column));
             return "unknown";
@@ -619,12 +713,12 @@ public class SemanticAnalyzer
         // ** ENFORCE ACCESS SPECIFIER **
         if (member.AccessLevel == AccessSpecifier.Private)
         {
-            // Access is allowed only if the current function is a method of this struct.
-            if (context.CurrentFunction.OwnerStructName != structDef.Name || context.CurrentFunction.Namespace != structDef.Namespace)
+            // Access is allowed only if the current function is a method of the struct that DEFINED the member.
+            if (context.CurrentFunction.OwnerStructName != definingStruct.Name || context.CurrentFunction.Namespace != definingStruct.Namespace)
             {
                 diagnostics.Add(new Diagnostic(
                     context.CompilationUnit.FilePath,
-                    $"Member '{structDef.Name}::{member.Name.Value}' is private and cannot be accessed from this context.",
+                    $"Member '{definingStruct.Name}::{member.Name.Value}' is private and cannot be accessed from this context.",
                     ma.Member.Line,
                     ma.Member.Column
                 ));
@@ -662,9 +756,12 @@ public class SemanticAnalyzer
 
     private string AnalyzeCallExpression(CallExpressionNode call, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        FunctionDeclarationNode func;
+        FunctionDeclarationNode? func;
+        string funcNameForDiags;
+
         if (call.Callee is MemberAccessExpressionNode callMemberAccess) // Method call: myText.draw()
         {
+            funcNameForDiags = callMemberAccess.Member.Value;
             var ownerTypeName = AnalyzeExpressionType(callMemberAccess.Left, context, diagnostics).TrimEnd('*');
             if (ownerTypeName == "unknown") return "unknown";
 
@@ -675,17 +772,20 @@ public class SemanticAnalyzer
                 return "unknown";
             }
 
-            func = _functionResolver.ResolveMethod(ownerStruct, callMemberAccess.Member.Value);
+            func = _functionResolver.ResolveMethod(ownerTypeName, callMemberAccess.Member.Value);
             if (func == null)
             {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Method '{callMemberAccess.Member.Value}' not found on struct '{ownerStruct.Name}'.", callMemberAccess.Member.Line, callMemberAccess.Member.Column));
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Method '{callMemberAccess.Member.Value}' not found on struct '{ownerStruct.Name}' or its base classes.", callMemberAccess.Member.Line, callMemberAccess.Member.Column));
                 return "unknown";
             }
 
             // ** ENFORCE ACCESS SPECIFIER FOR METHODS **
             if (func.AccessLevel == AccessSpecifier.Private)
             {
-                if (context.CurrentFunction.OwnerStructName != ownerStruct.Name || context.CurrentFunction.Namespace != ownerStruct.Namespace)
+                var definingStructFqn = func.OwnerStructName != null ? (func.Namespace != null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName) : null;
+                var definingStruct = definingStructFqn != null ? _typeRepository.FindStruct(definingStructFqn) : null;
+
+                if (definingStruct == null || context.CurrentFunction.OwnerStructName != definingStruct.Name || context.CurrentFunction.Namespace != definingStruct.Namespace)
                 {
                     diagnostics.Add(new Diagnostic(
                         context.CompilationUnit.FilePath,
@@ -698,6 +798,7 @@ public class SemanticAnalyzer
         }
         else // Global or namespaced function call: DrawText(), rl::DrawText()
         {
+            funcNameForDiags = (call.Callee as VariableExpressionNode)?.Identifier.Value ?? "function";
             try
             {
                 func = _functionResolver.ResolveFunctionCall(call.Callee, context.CompilationUnit, context.CurrentFunction);
@@ -709,13 +810,29 @@ public class SemanticAnalyzer
             }
         }
 
+        // ** VALIDATE ARGUMENT COUNT **
+        int expectedArgs = call.Callee is MemberAccessExpressionNode
+            ? func.Parameters.Count - 1 // Don't count implicit 'this'
+            : func.Parameters.Count;
+
+        if (call.Arguments.Count != expectedArgs)
+        {
+            diagnostics.Add(new Diagnostic(
+                context.CompilationUnit.FilePath,
+                $"Wrong number of arguments for call to '{funcNameForDiags}'. Expected {expectedArgs}, but got {call.Arguments.Count}.",
+                AstHelper.GetFirstToken(call).Line,
+                AstHelper.GetFirstToken(call).Column
+            ));
+        }
+
+
         // Analyze arguments for their types
         foreach (var arg in call.Arguments)
         {
             AnalyzeExpressionType(arg, context, diagnostics);
         }
 
-        // TODO: Validate argument count and types against function signature
+        // TODO: Validate argument types against function signature
 
         return AnalyzeFunctionReturnType(func, context);
     }
@@ -752,11 +869,57 @@ public class SemanticAnalyzer
             return "unknown";
         }
     }
+
+    public void AnalyzeReturnStatement(ReturnStatementNode ret, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var funcReturnType = AnalyzeFunctionReturnType(context.CurrentFunction, context);
+
+        if (ret.Expression == null)
+        {
+            if (funcReturnType != "void")
+            {
+                var token = AstHelper.GetFirstToken(ret);
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Non-void function '{context.CurrentFunction.Name}' must return a value.", token.Line, token.Column));
+            }
+            return;
+        }
+
+        if (funcReturnType == "void")
+        {
+            var token = AstHelper.GetFirstToken(ret);
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot return a value from void function '{context.CurrentFunction.Name}'.", token.Line, token.Column));
+            return;
+        }
+
+        var exprType = AnalyzeExpressionType(ret.Expression, context, diagnostics);
+
+        if (exprType != "unknown" && exprType != funcReturnType)
+        {
+            // Allow int to char conversion
+            bool isIntToCharLiteralConversion = funcReturnType == "char" && exprType == "int" && ret.Expression is IntegerLiteralNode;
+            if (!isIntToCharLiteralConversion)
+            {
+                var token = AstHelper.GetFirstToken(ret.Expression);
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert return type '{exprType}' to '{funcReturnType}'.", token.Line, token.Column));
+            }
+        }
+    }
+
+    public void AnalyzeDeleteStatement(DeleteStatementNode deleteStmt, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var exprType = AnalyzeExpressionType(deleteStmt.Expression, context, diagnostics);
+        if (exprType != "unknown" && !exprType.EndsWith("*"))
+        {
+            var token = AstHelper.GetFirstToken(deleteStmt.Expression);
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"'delete' operator can only be applied to pointers, not type '{exprType}'.", token.Line, token.Column));
+        }
+    }
 }
 </file>
 
 <file path="Analysis\SemanticAnalyzerRunner.cs">
 using System.Collections.Generic;
+using System.Linq;
 using CTilde.Diagnostics;
 
 namespace CTilde;
@@ -786,10 +949,10 @@ public class SemanticAnalyzerRunner
             foreach (var function in unit.Functions)
             {
                 if (function.Body == null) continue;
-                // Create a correct symbol table for each function
                 var symbols = new SymbolTable(function, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                 var context = new AnalysisContext(symbols, unit, function);
                 WalkStatement(function.Body, context);
+                CheckForUnusedVariables(function, context);
             }
 
             foreach (var s in unit.Structs)
@@ -800,11 +963,10 @@ public class SemanticAnalyzerRunner
                     var symbols = new SymbolTable(method, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                     var context = new AnalysisContext(symbols, unit, method);
                     WalkStatement(method.Body, context);
+                    CheckForUnusedVariables(method, context);
                 }
                 foreach (var ctor in s.Constructors)
                 {
-                    // For constructors, the "current function" is effectively the constructor itself for analysis context.
-                    // We create a FunctionDeclarationNode that mirrors the constructor's context.
                     var dummyFunctionForContext = new FunctionDeclarationNode(
                         new Token(TokenType.Keyword, "void", -1, -1), 0, ctor.OwnerStructName,
                         ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
@@ -813,10 +975,10 @@ public class SemanticAnalyzerRunner
                     var symbols = new SymbolTable(ctor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                     var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
                     WalkStatement(ctor.Body, context);
+                    CheckForUnusedVariables(dummyFunctionForContext, context);
                 }
                 foreach (var dtor in s.Destructors)
                 {
-                    // For destructors, similarly, a dummy function node provides context.
                     var dummyFunctionForContext = new FunctionDeclarationNode(
                         new Token(TokenType.Keyword, "void", -1, -1), 0, dtor.OwnerStructName,
                         new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
@@ -825,65 +987,108 @@ public class SemanticAnalyzerRunner
                     var symbols = new SymbolTable(dtor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                     var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
                     WalkStatement(dtor.Body, context);
+                    CheckForUnusedVariables(dummyFunctionForContext, context);
                 }
             }
         }
     }
 
-    private void WalkStatement(StatementNode statement, AnalysisContext context)
+    private void CheckForUnusedVariables(FunctionDeclarationNode function, AnalysisContext context)
     {
-        switch (statement)
+        var localDeclarations = new List<DeclarationStatementNode>();
+        if (function.Body != null)
         {
-            case BlockStatementNode block:
-                foreach (var s in block.Statements) WalkStatement(s, context);
+            FindAllDeclarations(function.Body, localDeclarations);
+        }
+
+        var unreadLocals = context.Symbols.GetUnreadLocals().Select(ul => ul.Name).ToHashSet();
+        foreach (var decl in localDeclarations)
+        {
+            if (unreadLocals.Contains(decl.Identifier.Value))
+            {
+                Diagnostics.Add(new Diagnostic(
+                    context.CompilationUnit.FilePath,
+                    $"Unused variable '{decl.Identifier.Value}'.",
+                    decl.Identifier.Line,
+                    decl.Identifier.Column,
+                    DiagnosticSeverity.Warning
+                ));
+            }
+        }
+    }
+
+    private void FindAllDeclarations(StatementNode stmt, List<DeclarationStatementNode> declarations)
+    {
+        switch (stmt)
+        {
+            case DeclarationStatementNode d:
+                declarations.Add(d);
                 break;
-            case ExpressionStatementNode exprStmt:
-                WalkExpression(exprStmt.Expression, context);
+            case BlockStatementNode b:
+                foreach (var s in b.Statements) FindAllDeclarations(s, declarations);
                 break;
-            case ReturnStatementNode retStmt:
-                if (retStmt.Expression != null) WalkExpression(retStmt.Expression, context);
+            case IfStatementNode i:
+                FindAllDeclarations(i.ThenBody, declarations);
+                if (i.ElseBody != null) FindAllDeclarations(i.ElseBody, declarations);
                 break;
-            case IfStatementNode ifStmt:
-                WalkExpression(ifStmt.Condition, context);
-                WalkStatement(ifStmt.ThenBody, context);
-                if (ifStmt.ElseBody != null) WalkStatement(ifStmt.ElseBody, context);
-                break;
-            case WhileStatementNode whileStmt:
-                WalkExpression(whileStmt.Condition, context);
-                WalkStatement(whileStmt.Body, context);
-                break;
-            case DeclarationStatementNode decl:
-                _analyzer.AnalyzeDeclarationStatement(decl, context, Diagnostics);
-                break;
-            case DeleteStatementNode deleteStmt:
-                WalkExpression(deleteStmt.Expression, context);
+            case WhileStatementNode w:
+                FindAllDeclarations(w.Body, declarations);
                 break;
         }
     }
 
-    private void WalkExpression(ExpressionNode expression, AnalysisContext context)
-    {
-        _analyzer.AnalyzeExpressionType(expression, context, Diagnostics);
 
-        switch (expression)
+    private void WalkStatement(StatementNode statement, AnalysisContext context, bool isReachable = true)
+    {
+        // Check for unreachable code first
+        if (!isReachable)
         {
-            case AssignmentExpressionNode a:
-                WalkExpression(a.Left, context);
-                WalkExpression(a.Right, context);
+            var token = AstHelper.GetFirstToken(statement);
+            // Don't flag closing braces as unreachable
+            if (token.Type != TokenType.RightBrace)
+            {
+                Diagnostics.Add(new Diagnostic(
+                    context.CompilationUnit.FilePath,
+                    "Unreachable code detected.",
+                    token.Line,
+                    token.Column,
+                    DiagnosticSeverity.Warning
+                ));
+            }
+            return; // Do not process this statement further
+        }
+
+        switch (statement)
+        {
+            case BlockStatementNode block:
+                bool blockIsReachable = true;
+                foreach (var s in block.Statements)
+                {
+                    WalkStatement(s, context, blockIsReachable);
+                    if (s is ReturnStatementNode) blockIsReachable = false;
+                }
                 break;
-            case BinaryExpressionNode b:
-                WalkExpression(b.Left, context);
-                WalkExpression(b.Right, context);
+            case ExpressionStatementNode exprStmt:
+                _analyzer.AnalyzeExpressionType(exprStmt.Expression, context, Diagnostics);
                 break;
-            case CallExpressionNode c:
-                WalkExpression(c.Callee, context);
-                foreach (var arg in c.Arguments) WalkExpression(arg, context);
+            case ReturnStatementNode retStmt:
+                _analyzer.AnalyzeReturnStatement(retStmt, context, Diagnostics);
                 break;
-            case MemberAccessExpressionNode m:
-                WalkExpression(m.Left, context);
+            case IfStatementNode ifStmt:
+                _analyzer.AnalyzeExpressionType(ifStmt.Condition, context, Diagnostics);
+                WalkStatement(ifStmt.ThenBody, context);
+                if (ifStmt.ElseBody != null) WalkStatement(ifStmt.ElseBody, context);
                 break;
-            case UnaryExpressionNode u:
-                WalkExpression(u.Right, context);
+            case WhileStatementNode whileStmt:
+                _analyzer.AnalyzeExpressionType(whileStmt.Condition, context, Diagnostics);
+                WalkStatement(whileStmt.Body, context);
+                break;
+            case DeclarationStatementNode decl:
+                // Special handling for declarations since initializer lists are not standalone expressions.
+                _analyzer.AnalyzeDeclarationStatement(decl, context, Diagnostics);
+                break;
+            case DeleteStatementNode deleteStmt:
+                _analyzer.AnalyzeDeleteStatement(deleteStmt, context, Diagnostics);
                 break;
         }
     }
@@ -1092,7 +1297,7 @@ public static class AstHelper
 <file path="Diagnostics\Diagnostic.cs">
 namespace CTilde.Diagnostics;
 
-public record Diagnostic(string FilePath, string Message, int Line, int Column);
+public record Diagnostic(string FilePath, string Message, int Line, int Column, DiagnosticSeverity Severity = DiagnosticSeverity.Error);
 </file>
 
 <file path="Diagnostics\DiagnosticPrinter.cs">
@@ -1125,8 +1330,23 @@ public class DiagnosticPrinter
             }
 
             Console.Error.WriteLine(); // Blank line for separation
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.Error.Write($"Error: ");
+
+            ConsoleColor color;
+            string prefix;
+            switch (diagnostic.Severity)
+            {
+                case DiagnosticSeverity.Warning:
+                    color = ConsoleColor.Yellow;
+                    prefix = "Warning: ";
+                    break;
+                default: // Error
+                    color = ConsoleColor.Red;
+                    prefix = "Error: ";
+                    break;
+            }
+
+            Console.ForegroundColor = color;
+            Console.Error.Write(prefix);
             Console.ResetColor();
             Console.Error.WriteLine($"{diagnostic.Message}");
 
@@ -1143,11 +1363,21 @@ public class DiagnosticPrinter
 
             Console.ForegroundColor = ConsoleColor.DarkGray;
             Console.Error.Write($"   | ");
-            Console.ForegroundColor = ConsoleColor.Red;
+            Console.ForegroundColor = color;
             Console.Error.WriteLine(new string(' ', diagnostic.Column - 1) + "^");
             Console.ResetColor();
         }
     }
+}
+</file>
+
+<file path="Diagnostics\DiagnosticSeverity.cs">
+namespace CTilde.Diagnostics;
+
+public enum DiagnosticSeverity
+{
+    Warning,
+    Error
 }
 </file>
 
@@ -1304,7 +1534,7 @@ public class CodeGenerator
             var structFqn = TypeRepository.GetFullyQualifiedName(s);
             if (VTableManager.HasVTable(structFqn))
             {
-                Builder.AppendLabel(NameMangler.GetVTableLabel(s));
+                Builder.AppendLabel(NameMangler.GetVTableLabel(structFqn));
                 var vtable = VTableManager.GetVTable(structFqn);
                 foreach (var entry in vtable)
                 {
@@ -1642,8 +1872,7 @@ public class ExpressionGenerator
 
         if (VTableManager.HasVTable(typeFqn))
         {
-            var structDef = TypeRepository.FindStruct(typeFqn);
-            var vtableLabel = NameMangler.GetVTableLabel(structDef);
+            var vtableLabel = NameMangler.GetVTableLabel(typeFqn);
             Builder.AppendInstruction($"mov dword [edi], {vtableLabel}", "Set vtable pointer on heap object");
         }
 
@@ -1764,7 +1993,7 @@ public class ExpressionGenerator
         {
             var ownerTypeName = SemanticAnalyzer.AnalyzeExpressionType(memberAccess.Left, context).TrimEnd('*');
             var ownerStruct = TypeRepository.FindStruct(ownerTypeName) ?? throw new InvalidOperationException($"Could not find struct definition for '{ownerTypeName}'.");
-            func = FunctionResolver.ResolveMethod(ownerStruct, memberAccess.Member.Value);
+            func = FunctionResolver.ResolveMethod(ownerTypeName, memberAccess.Member.Value);
         }
         else
         {
@@ -2202,9 +2431,9 @@ public static class NameMangler
         return MangleName(d.Namespace, d.OwnerStructName, $"{d.OwnerStructName}_dtor");
     }
 
-    public static string GetVTableLabel(StructDefinitionNode s)
+    public static string GetVTableLabel(string structFqn)
     {
-        return $"_vtable_{s.Namespace?.Replace("::", "_")}_{s.Name}".Replace("__", "_");
+        return $"_vtable_{structFqn.Replace("::", "_")}";
     }
 
     public static string MangleOperator(string op)
@@ -2333,10 +2562,9 @@ public class StatementGenerator
 
         if (TypeRepository.IsStruct(varTypeFqn))
         {
-            var structDef = TypeRepository.FindStruct(varTypeFqn);
             if (_context.VTableManager.HasVTable(varTypeFqn))
             {
-                var vtableLabel = NameMangler.GetVTableLabel(structDef);
+                var vtableLabel = NameMangler.GetVTableLabel(varTypeFqn);
                 Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of object '{variableName}'");
                 Builder.AppendInstruction($"mov dword [eax], {vtableLabel}", "Set vtable pointer");
             }
@@ -2546,7 +2774,7 @@ namespace CTilde;
 
 public class SymbolTable
 {
-    private readonly Dictionary<string, (int Offset, string Type, bool IsConst)> _symbols = new();
+    private readonly Dictionary<string, (int Offset, string Type, bool IsConst, bool IsRead)> _symbols = new();
     public int TotalLocalSize { get; private set; }
 
     // Dummy constructor for semantic analysis pass where symbols aren't fully resolved yet.
@@ -2622,7 +2850,7 @@ public class SymbolTable
                 resolvedTypeName = typeResolver.ResolveTypeName(baseTypeName, currentNamespace, currentUnit) + pointerSuffix;
             }
 
-            _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false);
+            _symbols[param.Name.Value] = (currentParamOffset, resolvedTypeName, false, false); // isRead = false
             currentParamOffset += Math.Max(4, memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit));
         }
 
@@ -2638,8 +2866,27 @@ public class SymbolTable
 
             int size = memoryLayoutManager.GetSizeOfType(resolvedTypeName, currentUnit);
             currentLocalOffset -= size;
-            _symbols[decl.Identifier.Value] = (currentLocalOffset, resolvedTypeName, decl.IsConst);
+            _symbols[decl.Identifier.Value] = (currentLocalOffset, resolvedTypeName, decl.IsConst, false); // isRead = false
         }
+    }
+
+    public void MarkAsRead(string name)
+    {
+        if (_symbols.TryGetValue(name, out var symbol))
+        {
+            _symbols[name] = (symbol.Offset, symbol.Type, symbol.IsConst, true);
+        }
+    }
+
+    public IEnumerable<(string Name, int Line, int Column)> GetUnreadLocals()
+    {
+        return _symbols
+            .Where(kvp => kvp.Value.Offset < 0 && !kvp.Value.IsRead) // Only locals (negative offset)
+            .Select(kvp => {
+                // This is a bit of a hack to get the declaration location back.
+                // A better approach would be to store the DeclarationStatementNode in the symbol table.
+                return (kvp.Key, -1, -1);
+            });
     }
 
 
@@ -2656,7 +2903,7 @@ public class SymbolTable
     public List<(string Name, int Offset, string TypeFqn)> GetDestructibleLocals(FunctionResolver functionResolver)
     {
         var result = new List<(string, int, string)>();
-        foreach (var (name, (offset, type, _)) in _symbols)
+        foreach (var (name, (offset, type, _, _)) in _symbols)
         {
             if (offset < 0 && functionResolver.FindDestructor(type) != null) // Locals have negative offset
             {
@@ -3922,10 +4169,12 @@ int main()
     const int screenWidth = 800;
     const int screenHeight = 600;
 
+    int unusedVar = 10; // WARNING: Unused variable 'unusedVar'.
+
     rl::Color rayWhite = {245, 245, 245, 255};
     rl::Color maroon = {190, 33, 55, 255};
     
-    rl::InitWindow(screenWidth, screenHeight, "Operator Overloading!");
+    rl::InitWindow(screenWidth, screenHeight, "Comprehensive Diagnostics");
     rl::SetTargetFPS(60);
     
     TextObject myText(150, 275, "GO FUCK YOURSELF", 40, maroon);
@@ -3942,6 +4191,9 @@ int main()
     rl::CloseWindow();
     
     return 0;
+
+    // WARNING: Unreachable code detected.
+    myText.fontSize = 99;
 }
 </file>
 
@@ -4108,8 +4360,6 @@ int IsKeyDown(int key);
 </file>
 
 <file path="string.c">
-// Forward-declare C standard library functions we will import.
-// These now use the correct char* type.
 int strlen(char* str);
 void strcpy(char* dest, char* src);
 void memcpy(char* dest, char* src, int count);
@@ -4122,10 +4372,9 @@ struct string
 {
 private:
     int m_length;
-    char* m_data; // This is now correctly a char*
+    char* m_data;
 
 public:
-    // Constructor from a string literal
     string(char* literal) 
     {
         m_length = strlen(literal);
@@ -4133,7 +4382,6 @@ public:
         strcpy(m_data, literal);
     }
     
-    // Copy constructor (takes a pointer to the other string)
     string(string* other)
     {
         m_length = other->length();
@@ -4141,13 +4389,11 @@ public:
         strcpy(m_data, other->c_str());
     }
 
-    // Destructor to free the allocated memory
     ~string() 
     {
         free(m_data);
     }
     
-    // Concatenation operator
     string operator+(string* other)
     {
         int new_len = m_length + other->length();
@@ -4155,12 +4401,10 @@ public:
         
         memcpy(new_buffer, m_data, m_length);
         memcpy(new_buffer + m_length, other->c_str(), other->length());
-        *(new_buffer + new_len) = 0; // BUG FIX: Null-terminate the new buffer
+        *(new_buffer + new_len) = 0;
         
-        // Create a new string object from our temporary buffer
         string result(new_buffer);
         
-        // The temporary buffer is no longer needed, as the result string made its own copy
         free(new_buffer);
         
         return result;

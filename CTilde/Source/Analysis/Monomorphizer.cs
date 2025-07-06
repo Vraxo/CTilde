@@ -1,13 +1,9 @@
-﻿using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-
-namespace CTilde;
+﻿namespace CTilde;
 
 public class Monomorphizer
 {
     private readonly TypeRepository _typeRepository;
-    private TypeResolver _typeResolver = null!; // Set via SetResolver to break circular dependency
+    private TypeResolver _typeResolver = null!;
     private readonly Dictionary<string, StructDefinitionNode> _instantiationCache = new();
 
     public Monomorphizer(TypeRepository typeRepository)
@@ -22,109 +18,116 @@ public class Monomorphizer
 
     public StructDefinitionNode Instantiate(GenericInstantiationTypeNode typeNode, string? currentNamespace, CompilationUnitNode contextForResolution)
     {
-        // 1. Resolve the base generic type (e.g., 'List' -> 'std::List')
-        var templateFqn = _typeResolver.ResolveSimpleTypeName(typeNode.BaseType.Value, currentNamespace, contextForResolution);
-        var templateStruct = _typeRepository.FindStruct(templateFqn) ?? throw new System.InvalidOperationException($"Generic template '{templateFqn}' not found.");
-        var templateUnit = _typeRepository.GetCompilationUnitForStruct(templateFqn);
+        (StructDefinitionNode templateStruct, List<TypeNode> resolvedArgNodes, CompilationUnitNode templateUnit, string templateFqn) =
+            ResolveTemplateAndArguments(typeNode, currentNamespace, contextForResolution);
 
-        // 2. Resolve all type arguments
-        var resolvedArgNodes = typeNode.TypeArguments.Select(arg =>
-        {
-            // Recursively resolve the type argument itself. This supports things like List<List<int>>.
-            var argFqn = _typeResolver.ResolveType(arg, currentNamespace, contextForResolution);
-
-            // We need a TypeNode representation of the resolved FQN.
-            // This is a bit of a hack, but it works for now.
-            var lastPart = argFqn.Split("::").Last();
-            var pointerLevel = argFqn.Count(c => c == '*');
-            var baseName = lastPart.TrimEnd('*');
-            TypeNode resolvedArgNode = new SimpleTypeNode(new Token(TokenType.Identifier, baseName, -1, -1));
-            for (int i = 0; i < pointerLevel; i++)
-            {
-                resolvedArgNode = new PointerTypeNode(resolvedArgNode);
-            }
-            return resolvedArgNode;
-
-        }).ToList();
-
-        // 3. Generate mangled name and check cache
-        var mangledName = NameMangler.MangleGenericInstance(templateFqn, resolvedArgNodes);
+        string mangledName = NameMangler.MangleGenericInstance(templateFqn, resolvedArgNodes);
         if (_instantiationCache.TryGetValue(mangledName, out var cachedStruct))
         {
             return cachedStruct;
         }
 
-        // 4. Create replacement map for the cloner
+        Dictionary<string, TypeNode> replacements = CreateReplacementMap(templateStruct, resolvedArgNodes, templateFqn);
+        StructDefinitionNode concreteStruct = CloneAndAdaptStruct(templateStruct, replacements, mangledName);
+
+        RegisterAndFinalizeNewStruct(concreteStruct, templateUnit);
+
+        _instantiationCache[mangledName] = concreteStruct;
+        return concreteStruct;
+    }
+
+    private (StructDefinitionNode TemplateStruct, List<TypeNode> ResolvedArgs, CompilationUnitNode TemplateUnit, string TemplateFqn)
+        ResolveTemplateAndArguments(GenericInstantiationTypeNode typeNode, string? currentNamespace, CompilationUnitNode context)
+    {
+        string templateFqn = _typeResolver.ResolveSimpleTypeName(typeNode.BaseType.Value, currentNamespace, context);
+        
+        StructDefinitionNode templateStruct = _typeRepository.FindStruct(templateFqn)
+            ?? throw new InvalidOperationException($"Generic template '{templateFqn}' not found.");
+        
+        CompilationUnitNode templateUnit = _typeRepository.GetCompilationUnitForStruct(templateFqn);
+
+        List<TypeNode> resolvedArgNodes = typeNode.TypeArguments.Select(arg =>
+        {
+            string argFqn = _typeResolver.ResolveType(arg, currentNamespace, context);
+            return FqnToTypeNode(argFqn);
+        }).ToList();
+
+        return (templateStruct, resolvedArgNodes, templateUnit, templateFqn);
+    }
+
+    private static TypeNode FqnToTypeNode(string fqn)
+    {
+        int pointerLevel = fqn.Count(c => c == '*');
+        string baseNameWithNamespace = fqn.TrimEnd('*');
+        string baseName = baseNameWithNamespace.Split("::").Last();
+
+        TypeNode resolvedNode = new SimpleTypeNode(new Token(TokenType.Identifier, baseName, -1, -1));
+        
+        for (int i = 0; i < pointerLevel; i++)
+        {
+            resolvedNode = new PointerTypeNode(resolvedNode);
+        }
+
+        return resolvedNode;
+    }
+
+    private static Dictionary<string, TypeNode> CreateReplacementMap(StructDefinitionNode templateStruct, List<TypeNode> resolvedArgNodes, string templateFqn)
+    {
         if (templateStruct.GenericParameters.Count != resolvedArgNodes.Count)
         {
-            throw new System.InvalidOperationException($"Incorrect number of type arguments for generic type '{templateFqn}'.");
-        }
-        var replacements = new Dictionary<string, TypeNode>();
-        for (int i = 0; i < templateStruct.GenericParameters.Count; i++)
-        {
-            var paramName = templateStruct.GenericParameters[i].Value;
-            var concreteType = resolvedArgNodes[i];
-            replacements[paramName] = concreteType;
+            throw new InvalidOperationException($"Incorrect number of type arguments for generic type '{templateFqn}'.");
         }
 
-        // 5. Clone the template's AST, substituting generic parameters
-        var cloner = new AstCloner(replacements);
-        var clonedStruct = cloner.Clone(templateStruct);
+        return templateStruct.GenericParameters
+            .Select((p, i) => new { ParamName = p.Value, ConcreteType = resolvedArgNodes[i] })
+            .ToDictionary(pair => pair.ParamName, pair => pair.ConcreteType);
+    }
 
-        // 6. Update the cloned struct's name and clear its generic parameters and namespace.
-        // The mangled name is now the FQN.
-        var concreteStruct = clonedStruct with
+    private static StructDefinitionNode CloneAndAdaptStruct(StructDefinitionNode templateStruct, Dictionary<string, TypeNode> replacements, string mangledName)
+    {
+        AstCloner cloner = new(replacements);
+        StructDefinitionNode clonedStruct = cloner.Clone(templateStruct);
+
+        List<FunctionDeclarationNode> updatedMethods = clonedStruct.Methods.Select(m =>
         {
-            Name = mangledName,
-            Namespace = null,
-            GenericParameters = new List<Token>()
-        };
+            ParameterNode thisParam = m.Parameters.First();
+            PointerTypeNode newThisType = new(new SimpleTypeNode(new(TokenType.Identifier, mangledName, -1, -1)));
+            ParameterNode newThisParam = thisParam with { Type = newThisType };
+            List<ParameterNode> newParams = new List<ParameterNode> { newThisParam }.Concat(m.Parameters.Skip(1)).ToList();
 
-        // 6a. Update the owner name, namespace, and `this` parameter type on all nested members.
-        var updatedMethods = concreteStruct.Methods.Select(m =>
-        {
-            // The first parameter of a method is always 'this'.
-            var thisParam = m.Parameters.First();
-            var newThisType = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, mangledName, -1, -1)));
-            var newThisParam = thisParam with { Type = newThisType };
-
-            var newParams = new List<ParameterNode> { newThisParam };
-            newParams.AddRange(m.Parameters.Skip(1));
-
-            return m with
-            {
-                OwnerStructName = mangledName,
-                Namespace = null,
-                Parameters = newParams
+            return m with 
+            { 
+                OwnerStructName = mangledName, 
+                Namespace = null, 
+                Parameters = newParams 
             };
         }).ToList();
 
-        var updatedConstructors = concreteStruct.Constructors
+        List<ConstructorDeclarationNode> updatedConstructors = clonedStruct.Constructors
             .Select(c => c with { OwnerStructName = mangledName, Namespace = null })
             .ToList();
-        var updatedDestructors = concreteStruct.Destructors
+
+        List<DestructorDeclarationNode> updatedDestructors = clonedStruct.Destructors
             .Select(d => d with { OwnerStructName = mangledName, Namespace = null })
             .ToList();
 
-        concreteStruct = concreteStruct with
+        return clonedStruct with
         {
+            Name = mangledName,
+            Namespace = null,
+            GenericParameters = [],
             Methods = updatedMethods,
             Constructors = updatedConstructors,
             Destructors = updatedDestructors
         };
+    }
 
-
-        // 7. Register the new struct with the TypeRepository and its compilation unit
+    private void RegisterAndFinalizeNewStruct(StructDefinitionNode concreteStruct, CompilationUnitNode templateUnit)
+    {
         _typeRepository.RegisterInstantiatedStruct(concreteStruct, templateUnit);
-        templateUnit.Structs.Add(concreteStruct); // Add to the original unit's list of structs
+        templateUnit.Structs.Add(concreteStruct);
 
-        // 8. Set parents for the new AST subtree
-        var parser = new Parser(new List<Token>()); // Dummy parser for SetParents
+        Parser parser = new([]);
         parser.SetParents(concreteStruct, templateUnit);
-
-
-        // 9. Cache and return
-        _instantiationCache[mangledName] = concreteStruct;
-        return concreteStruct;
     }
 }

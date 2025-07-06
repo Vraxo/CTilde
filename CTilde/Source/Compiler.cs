@@ -1,10 +1,5 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+﻿using System.Diagnostics;
 using CTilde.Diagnostics;
-using System.Diagnostics; // Added for Process.Start
-using System.Text;
 
 namespace CTilde;
 
@@ -12,59 +7,56 @@ public class Compiler
 {
     public void Compile(string entryFilePath)
     {
-        // 1. Discover all source files from #includes
-        var preprocessor = new Preprocessor();
-        var allFiles = preprocessor.DiscoverDependencies(entryFilePath);
+        Preprocessor preprocessor = new();
+        List<string> allFiles = preprocessor.DiscoverDependencies(entryFilePath);
 
-        // 2. Parse each file into a CompilationUnit
-        var compilationUnits = new List<CompilationUnitNode>();
-        var allImports = new List<ImportDirectiveNode>();
-        var allDiagnostics = new List<Diagnostic>();
-        var sourceFileCache = new Dictionary<string, string[]>();
+        List<CompilationUnitNode> compilationUnits = [];
+        List<ImportDirectiveNode> allImports = [];
+        List<Diagnostic> allDiagnostics = [];
+        Dictionary<string, string[]> sourceFileCache = [];
 
-        foreach (var file in allFiles)
+        foreach (string file in allFiles)
         {
-            var code = File.ReadAllText(file);
+            string code = File.ReadAllText(file);
             sourceFileCache[file] = code.Split('\n');
 
-            var tokens = Tokenizer.Tokenize(code);
-            var parser = new Parser(tokens);
-            var unit = parser.Parse(file);
+            List<Token> tokens = Tokenizer.Tokenize(code);
+            Parser parser = new(tokens);
+            CompilationUnitNode unit = parser.Parse(file);
 
             allDiagnostics.AddRange(parser.Diagnostics);
 
-            var importsInFile = parser.GetImports();
+            List<ImportDirectiveNode> importsInFile = parser.GetImports();
             allImports.AddRange(importsInFile);
 
             compilationUnits.Add(unit);
         }
 
-        var programNode = new ProgramNode(allImports.DistinctBy(i => i.LibraryName).ToList(), compilationUnits);
+        ProgramNode programNode = new(allImports.DistinctBy(i => i.LibraryName).ToList(), compilationUnits);
 
-        // 3. Create analysis services ONCE
-        var typeRepository = new TypeRepository(programNode);
-        var monomorphizer = new Monomorphizer(typeRepository);
-        var typeResolver = new TypeResolver(typeRepository, monomorphizer);
+        TypeRepository typeRepository = new(programNode);
+        Monomorphizer monomorphizer = new(typeRepository);
+        TypeResolver typeResolver = new(typeRepository, monomorphizer);
         monomorphizer.SetResolver(typeResolver); // Break circular dependency
-        var vtableManager = new VTableManager(typeRepository, typeResolver);
-        var memoryLayoutManager = new MemoryLayoutManager(typeRepository, typeResolver, vtableManager);
-        var functionResolver = new FunctionResolver(typeRepository, typeResolver, programNode);
-        var semanticAnalyzer = new SemanticAnalyzer(typeRepository, typeResolver, functionResolver, memoryLayoutManager);
+        VTableManager vtableManager = new(typeRepository, typeResolver);
+        MemoryLayoutManager memoryLayoutManager = new(typeRepository, typeResolver, vtableManager);
+        FunctionResolver functionResolver = new(typeRepository, typeResolver, programNode);
+        SemanticAnalyzer semanticAnalyzer = new(typeRepository, typeResolver, functionResolver, memoryLayoutManager);
         functionResolver.SetSemanticAnalyzer(semanticAnalyzer); // Break circular dependency
 
-        // 4. Perform Semantic Analysis
-        var runner = new SemanticAnalyzerRunner(programNode, typeRepository, typeResolver, functionResolver, memoryLayoutManager, semanticAnalyzer);
+        SemanticAnalyzerRunner runner = new(programNode, typeRepository, typeResolver, functionResolver, memoryLayoutManager, semanticAnalyzer);
         runner.Analyze();
 
         allDiagnostics.AddRange(runner.Diagnostics);
 
         // --- Print all diagnostics, but only fail on errors ---
-        if (allDiagnostics.Any())
+        if (allDiagnostics.Count != 0)
         {
-            var printer = new DiagnosticPrinter(allDiagnostics, sourceFileCache);
+            DiagnosticPrinter printer = new(allDiagnostics, sourceFileCache);
             printer.Print();
 
-            var errorCount = allDiagnostics.Count(d => d.Severity == DiagnosticSeverity.Error);
+            int errorCount = allDiagnostics.Count(d => d.Severity == DiagnosticSeverity.Error);
+            
             if (errorCount > 0)
             {
                 Console.WriteLine($"\nCompilation failed with {errorCount} error(s).");
@@ -73,7 +65,7 @@ public class Compiler
         }
 
         // 5. Generate Code
-        var generator = new CodeGenerator(programNode, typeRepository, typeResolver, functionResolver, vtableManager, memoryLayoutManager, semanticAnalyzer);
+        CodeGenerator generator = new(programNode, typeRepository, typeResolver, functionResolver, vtableManager, memoryLayoutManager, semanticAnalyzer);
         string asmCode = generator.Generate();
 
         // 6. Output
@@ -82,48 +74,30 @@ public class Compiler
 
         // 7. Execute compile.bat
         string compileBatchPath = "Code/compile.bat";
+        
         if (File.Exists(compileBatchPath))
         {
             try
             {
                 Console.WriteLine($"Executing '{compileBatchPath}'...");
-                string fullPathToBatch = Path.GetFullPath(compileBatchPath);
-
+                
                 ProcessStartInfo startInfo = new ProcessStartInfo
                 {
-                    FileName = "cmd.exe",
-                    Arguments = $"/c \"{fullPathToBatch}\"",
+                    FileName = compileBatchPath,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
-                    RedirectStandardInput = true, // Redirect stdin
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                    WorkingDirectory = Path.GetDirectoryName(fullPathToBatch) // Set working directory to the script's directory
+                    WorkingDirectory = Path.GetDirectoryName(compileBatchPath) // Set working directory to the script's directory
                 };
 
-                using (Process process = new Process())
+                using (Process process = Process.Start(startInfo))
                 {
-                    process.StartInfo = startInfo;
-
-                    var outputBuilder = new StringBuilder();
-                    var errorBuilder = new StringBuilder();
-
-                    process.OutputDataReceived += (sender, args) => { if (args.Data != null) outputBuilder.AppendLine(args.Data); };
-                    process.ErrorDataReceived += (sender, args) => { if (args.Data != null) errorBuilder.AppendLine(args.Data); };
-
-                    process.Start();
-
-                    process.BeginOutputReadLine();
-                    process.BeginErrorReadLine();
-
-                    // Close the input stream to signal to commands like 'pause' that no input is coming.
-                    process.StandardInput.Close();
-
                     process.WaitForExit();
-
-                    Console.Write(outputBuilder.ToString());
-                    Console.Error.Write(errorBuilder.ToString());
+                    Console.WriteLine(process.StandardOutput.ReadToEnd());
+                    Console.Error.WriteLine(process.StandardError.ReadToEnd());
                 }
+
                 Console.WriteLine($"Finished executing '{compileBatchPath}'.");
             }
             catch (Exception ex)

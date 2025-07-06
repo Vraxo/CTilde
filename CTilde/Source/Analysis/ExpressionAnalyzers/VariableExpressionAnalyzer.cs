@@ -18,45 +18,22 @@ public class VariableExpressionAnalyzer : ExpressionAnalyzerBase
     public override string Analyze(ExpressionNode expr, AnalysisContext context, List<Diagnostic> diagnostics)
     {
         var v = (VariableExpressionNode)expr;
-        var varName = v.Identifier.Value;
 
-        // 1. Check for special property keywords: 'value' and 'field'
-        if (varName == "field" || varName == "value")
-        {
-            var accessor = v.FindAncestorOfType<PropertyAccessorNode>();
-            if (accessor == null)
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"The '{varName}' keyword can only be used inside a property accessor.", v.Identifier.Line, v.Identifier.Column));
-                return "unknown";
-            }
-
-            if (varName == "value" && accessor.AccessorKeyword.Value != "set")
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, "The 'value' keyword can only be used inside a 'set' accessor.", v.Identifier.Line, v.Identifier.Column));
-                return "unknown";
-            }
-
-            // The type is the type of the property itself. Find it by walking up the tree.
-            var property = accessor.FindAncestorOfType<PropertyDefinitionNode>()!;
-            var structDef = property.FindAncestorOfType<StructDefinitionNode>()!;
-            return _typeResolver.ResolveType(property.Type, structDef.Namespace, context.CompilationUnit);
-        }
-
-        // 2. Check local variables and parameters in the symbol table.
+        // 1. Check local variables and parameters in the symbol table.
         if (context.Symbols.TryGetSymbol(v.Identifier.Value, out _, out var type, out _))
         {
             context.Symbols.MarkAsRead(v.Identifier.Value);
             return type;
         }
 
-        // 3. Try resolving as an unqualified enum member (e.g., `KEY_D`).
+        // 2. Try resolving as an unqualified enum member (e.g., `KEY_D`).
         var unqualifiedEnumValue = _functionResolver.ResolveUnqualifiedEnumMember(v.Identifier.Value, context.CompilationUnit, context.CurrentFunction?.Namespace);
         if (unqualifiedEnumValue.HasValue)
         {
             return "int";
         }
 
-        // 4. If in a method, try resolving as an implicit `this->member`.
+        // 3. If in a method, try resolving as an implicit `this->member`.
         if (context.CurrentFunction?.OwnerStructName != null)
         {
             string ownerStructFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;

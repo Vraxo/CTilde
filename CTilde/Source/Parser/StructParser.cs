@@ -45,7 +45,6 @@ internal class StructParser
         var methods = new List<FunctionDeclarationNode>();
         var constructors = new List<ConstructorDeclarationNode>();
         var destructors = new List<DestructorDeclarationNode>();
-        var properties = new List<PropertyDefinitionNode>();
 
         var currentAccess = AccessSpecifier.Private;
 
@@ -117,14 +116,9 @@ internal class StructParser
                 var methodNode = _functionParser.FinishParsingFunction(type, name.Value, structName.Value, currentAccess, isVirtual, isOverride, _parser._currentNamespace, true);
                 methods.Add(methodNode);
             }
-            else if (_parser.Current.Type == TokenType.LeftBrace)
-            {
-                var propertyNode = ParsePropertyDefinition(type, name, currentAccess, isVirtual, isOverride);
-                properties.Add(propertyNode);
-            }
             else
             {
-                if (isVirtual || isOverride) _parser.ReportError("Only methods or properties can be marked 'virtual' or 'override'.", startToken);
+                if (isVirtual || isOverride) _parser.ReportError("Only methods can be marked 'virtual' or 'override'.", startToken);
                 members.Add(new MemberVariableNode(isConst, type, name, currentAccess));
                 _parser.Eat(TokenType.Semicolon);
             }
@@ -132,56 +126,7 @@ internal class StructParser
 
         _parser.Eat(TokenType.RightBrace);
         _parser.Eat(TokenType.Semicolon);
-        return new StructDefinitionNode(structName.Value, genericParameters, baseStructName, _parser._currentNamespace, members, methods, constructors, destructors, properties);
-    }
-
-    private PropertyDefinitionNode ParsePropertyDefinition(TypeNode type, Token name, AccessSpecifier access, bool isVirtual, bool isOverride)
-    {
-        _parser.Eat(TokenType.LeftBrace);
-
-        PropertyAccessorNode? getter = null;
-        PropertyAccessorNode? setter = null;
-
-        while (_parser.Current.Type != TokenType.RightBrace && _parser.Current.Type != TokenType.Unknown)
-        {
-            var accessorToken = _parser.Current;
-            if (accessorToken.Type != TokenType.Keyword || (accessorToken.Value != "get" && accessorToken.Value != "set"))
-            {
-                _parser.ReportError("Expected 'get' or 'set' keyword inside property.", accessorToken);
-                _parser.AdvancePosition(1); // Skip bad token
-                continue;
-            }
-
-            _parser.Eat(TokenType.Keyword); // Consume 'get' or 'set'
-
-            StatementNode? body = null;
-            if (_parser.Current.Type == TokenType.LeftBrace)
-            {
-                body = _statementParser.ParseBlockStatement();
-            }
-            else
-            {
-                _parser.Eat(TokenType.Semicolon); // Auto-property accessor
-            }
-
-            var accessorNode = new PropertyAccessorNode(accessorToken, body);
-
-            if (accessorToken.Value == "get")
-            {
-                if (getter != null) _parser.ReportError("Property can only have one 'get' accessor.", accessorToken);
-                getter = accessorNode;
-            }
-            else // "set"
-            {
-                if (setter != null) _parser.ReportError("Property can only have one 'set' accessor.", accessorToken);
-                setter = accessorNode;
-            }
-        }
-
-        _parser.Eat(TokenType.RightBrace);
-        // Note: No semicolon after property definition brace
-
-        return new PropertyDefinitionNode(type, name, access, isVirtual, isOverride, getter, setter);
+        return new StructDefinitionNode(structName.Value, genericParameters, baseStructName, _parser._currentNamespace, members, methods, constructors, destructors);
     }
 
 

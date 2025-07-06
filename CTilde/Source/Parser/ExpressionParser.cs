@@ -144,13 +144,6 @@ internal class ExpressionParser
         {
             if (_parser.Current.Type == TokenType.LeftParen)
             {
-                // Prevent things like 5() or "hello"() from being parsed as calls.
-                if (expr is IntegerLiteralNode or StringLiteralNode)
-                {
-                    _parser.ReportError($"An expression of type '{expr.GetType().Name}' is not callable.", AstHelper.GetFirstToken(expr));
-                    break; // Exit loop, preventing creation of an invalid CallExpressionNode
-                }
-
                 _parser.Eat(TokenType.LeftParen);
                 var arguments = new List<ExpressionNode>();
                 if (_parser.Current.Type != TokenType.RightParen)
@@ -202,16 +195,6 @@ internal class ExpressionParser
 
             case TokenType.Identifier:
                 return new VariableExpressionNode(_parser.Eat(TokenType.Identifier));
-
-            case TokenType.Keyword:
-                if (token.Value is "field" or "value")
-                {
-                    _parser.Eat(TokenType.Keyword);
-                    // Create a new token with type Identifier so it can be handled like a normal variable
-                    var identifierToken = new Token(TokenType.Identifier, token.Value, token.Line, token.Column);
-                    return new VariableExpressionNode(identifierToken);
-                }
-                break; // Fall through to error for other keywords
 
             case TokenType.LeftParen:
                 _parser.Eat(TokenType.LeftParen);

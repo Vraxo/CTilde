@@ -1,51 +1,31 @@
-﻿using System;
-using System.Collections.Generic;
-using CTilde.Diagnostics;
+﻿using CTilde.Generator;
 
-namespace CTilde.Analysis.ExpressionAnalyzers;
+namespace CTilde.Generator.ExpressionHandlers;
 
-public class QualifiedAccessExpressionAnalyzer : ExpressionAnalyzerBase
+public class QualifiedAccessExpressionHandler : ExpressionHandlerBase
 {
-    public QualifiedAccessExpressionAnalyzer(
-        SemanticAnalyzer semanticAnalyzer,
-        TypeRepository typeRepository,
-        TypeResolver typeResolver,
-        FunctionResolver functionResolver,
-        MemoryLayoutManager memoryLayoutManager)
-        : base(semanticAnalyzer, typeRepository, typeResolver, functionResolver, memoryLayoutManager) { }
+    public QualifiedAccessExpressionHandler(CodeGenerator codeGenerator) : base(codeGenerator) { }
 
-    public override string Analyze(ExpressionNode expr, AnalysisContext context, List<Diagnostic> diagnostics)
+    public override void Generate(ExpressionNode expression, AnalysisContext context)
     {
-        var q = (QualifiedAccessExpressionNode)expr;
+        var qNode = (QualifiedAccessExpressionNode)expression;
 
-        string qualifier = TypeResolver.ResolveQualifier(q.Left);
-        string memberName = q.Member.Value;
-
-        // 1. Try to resolve as an enum member (e.g., raylib::KeyboardKey::KEY_D)
-        string? enumTypeFQN = _typeResolver.ResolveEnumTypeName(qualifier, context.CurrentFunction?.Namespace, context.CompilationUnit);
+        string potentialEnumTypeName = TypeResolver.ResolveQualifier(qNode.Left);
+        string memberName = qNode.Member.Value;
+        string? enumTypeFQN = TypeResolver.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction?.Namespace, context.CompilationUnit);
         if (enumTypeFQN != null)
         {
-            if (_functionResolver.GetEnumValue(enumTypeFQN, memberName).HasValue)
+            var enumValue = FunctionResolver.GetEnumValue(enumTypeFQN, memberName);
+            if (enumValue.HasValue)
             {
-                return "int"; // Enum members are integers.
+                Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {potentialEnumTypeName}::{memberName}");
+                return;
             }
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Enum '{qualifier}' (resolved to '{enumTypeFQN}') does not contain member '{memberName}'.", q.Member.Line, q.Member.Column));
-            return "unknown";
         }
 
-        // 2. Try to resolve as a qualified function (e.g., rl::InitWindow)
-        // If it's not an enum, but a qualified *function* name, its type is effectively a function pointer.
-        // We resolve it here, but its "type" for now is just void*.
-        try
-        {
-            _functionResolver.ResolveFunctionCall(q, context);
-            return "void*"; // Represents a function pointer type
-        }
-        catch (InvalidOperationException)
-        {
-            // Not an enum member, not a function. It's an error.
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Qualified access '{qualifier}::{memberName}' cannot be evaluated as a value directly. Only enum members or function calls are supported.", q.Member.Line, q.Member.Column));
-            return "unknown";
-        }
+        var func = FunctionResolver.ResolveFunctionCall(qNode, context);
+        string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
+        if (func.Body == null) ExternalFunctions.Add(func.Name);
+        Builder.AppendInstruction($"mov eax, {calleeTarget}");
     }
 }

@@ -18,17 +18,6 @@ public abstract record AstNode
             current = current.Parent;
         }
     }
-
-    public T? FindAncestorOfType<T>() where T : AstNode
-    {
-        var current = Parent;
-        while (current != null)
-        {
-            if (current is T target) return target;
-            current = current.Parent;
-        }
-        return null;
-    }
 }
 public abstract record StatementNode : AstNode;
 public abstract record ExpressionNode : AstNode;
@@ -37,9 +26,7 @@ public abstract record ExpressionNode : AstNode;
 public record ImportDirectiveNode(string LibraryName) : AstNode;
 public record UsingDirectiveNode(string Namespace, string? Alias) : AstNode;
 public record MemberVariableNode(bool IsConst, TypeNode Type, Token Name, AccessSpecifier AccessLevel) : AstNode;
-public record PropertyAccessorNode(Token AccessorKeyword, StatementNode? Body) : AstNode;
-public record PropertyDefinitionNode(TypeNode Type, Token Name, AccessSpecifier AccessLevel, bool IsVirtual, bool IsOverride, PropertyAccessorNode? Getter, PropertyAccessorNode? Setter) : AstNode;
-public record StructDefinitionNode(string Name, List<Token> GenericParameters, string? BaseStructName, string? Namespace, List<MemberVariableNode> Members, List<FunctionDeclarationNode> Methods, List<ConstructorDeclarationNode> Constructors, List<DestructorDeclarationNode> Destructors, List<PropertyDefinitionNode> Properties) : AstNode;
+public record StructDefinitionNode(string Name, List<Token> GenericParameters, string? BaseStructName, string? Namespace, List<MemberVariableNode> Members, List<FunctionDeclarationNode> Methods, List<ConstructorDeclarationNode> Constructors, List<DestructorDeclarationNode> Destructors) : AstNode;
 public record ParameterNode(TypeNode Type, Token Name) : AstNode;
 public record FunctionDeclarationNode(TypeNode ReturnType, string Name, List<ParameterNode> Parameters, StatementNode? Body, string? OwnerStructName, AccessSpecifier AccessLevel, bool IsVirtual, bool IsOverride, string? Namespace) : AstNode;
 public record BaseInitializerNode(List<ExpressionNode> Arguments) : AstNode;

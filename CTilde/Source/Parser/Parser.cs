@@ -25,7 +25,11 @@ public class Parser
         _position = 0;
         _expressionParser = new ExpressionParser(this);
         _statementParser = new StatementParser(this, _expressionParser);
-        _declarationParser = new DeclarationParser(this, _statementParser, _expressionParser);
+
+        // Instantiate and wire up the new declaration sub-parsers
+        var functionParser = new FunctionParser(this, _statementParser);
+        var structParser = new StructParser(this, _statementParser, _expressionParser, functionParser);
+        _declarationParser = new DeclarationParser(this, structParser, functionParser);
     }
 
     internal Token Current => _position < _tokens.Count ? _tokens[_position] : _tokens[^1];

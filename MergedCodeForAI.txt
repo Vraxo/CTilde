@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using CTilde.Diagnostics;
+using System.Diagnostics; // Added for Process.Start
 
 namespace CTilde;
 
@@ -78,6 +79,41 @@ public class Compiler
         // 6. Output
         File.WriteAllText("Code/Output/output.asm", asmCode);
         Console.WriteLine("Compilation successful. Assembly code written to output.asm");
+
+        // 7. Execute compile.bat
+        string compileBatchPath = "Code/compile.bat";
+        if (File.Exists(compileBatchPath))
+        {
+            try
+            {
+                Console.WriteLine($"Executing '{compileBatchPath}'...");
+                ProcessStartInfo startInfo = new ProcessStartInfo
+                {
+                    FileName = compileBatchPath,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WorkingDirectory = Path.GetDirectoryName(compileBatchPath) // Set working directory to the script's directory
+                };
+
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                    Console.WriteLine(process.StandardOutput.ReadToEnd());
+                    Console.Error.WriteLine(process.StandardError.ReadToEnd());
+                }
+                Console.WriteLine($"Finished executing '{compileBatchPath}'.");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error executing '{compileBatchPath}': {ex.Message}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"Warning: '{compileBatchPath}' not found. Skipping batch execution.");
+        }
     }
 }
 </file>
@@ -4929,93 +4965,82 @@ public class BinaryExpressionHandler : ExpressionHandlerBase
 </file>
 
 <file path="Generator\ExpressionHandlers\CallExpressionHandler.cs">
+using System; // Added for InvalidOperationException
+using System.Collections.Generic; // Added for List
 using System.Linq;
-using CTilde.Generator;
+using CTilde.Diagnostics; // Added for Diagnostic
 
-namespace CTilde.Generator.ExpressionHandlers;
+namespace CTilde.Analysis.ExpressionAnalyzers; // Corrected namespace
 
-public class CallExpressionHandler : ExpressionHandlerBase
+public class CallExpressionAnalyzer : ExpressionAnalyzerBase // Corrected class name
 {
-    public CallExpressionHandler(CodeGenerator codeGenerator) : base(codeGenerator) { }
+    public CallExpressionAnalyzer( // Corrected constructor name
+        SemanticAnalyzer semanticAnalyzer,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        MemoryLayoutManager memoryLayoutManager)
+        : base(semanticAnalyzer, typeRepository, typeResolver, functionResolver, memoryLayoutManager) { }
 
-    public override void Generate(ExpressionNode expression, AnalysisContext context)
+    public override string Analyze(ExpressionNode expr, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        var callExpr = (CallExpressionNode)expression;
-        int totalArgSize = 0;
+        var call = (CallExpressionNode)expr;
+        FunctionDeclarationNode? func = null;
+        string funcNameForDiags;
 
-        // Phase 1: Resolve the function to be called.
-        var func = FunctionResolver.ResolveFunctionCall(callExpr.Callee, context);
-
-        // Phase 2: Handle struct return values (if any).
-        var returnType = SemanticAnalyzer.GetFunctionReturnType(func, context);
-        bool returnsStructByValue = TypeRepository.IsStruct(returnType) && !returnType.EndsWith("*");
-        if (returnsStructByValue)
+        try
         {
-            var size = MemoryLayoutManager.GetSizeOfType(returnType, context.CompilationUnit);
-            Builder.AppendInstruction($"sub esp, {size}", "Make space for return value");
-            Builder.AppendInstruction("push esp", "Push hidden return value pointer");
-            totalArgSize += 4;
+            func = _functionResolver.ResolveFunctionCall(call.Callee, context);
+            funcNameForDiags = func.Name;
+        }
+        catch (InvalidOperationException ex)
+        {
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, AstHelper.GetFirstToken(call.Callee).Line, AstHelper.GetFirstToken(call.Callee).Column));
+            return "unknown";
         }
 
-        // Phase 3: Push all regular arguments.
-        foreach (var arg in callExpr.Arguments.AsEnumerable().Reverse())
+        // ** ENFORCE ACCESS SPECIFIER FOR METHODS **
+        if (func.OwnerStructName != null && func.AccessLevel == AccessSpecifier.Private)
         {
-            totalArgSize += Dispatcher.PushArgument(arg, context);
-        }
+            var definingStructFqn = _typeRepository.GetFullyQualifiedOwnerName(func);
+            var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction);
 
-        // Phase 4: Push `this` pointer (if it's a method) and dispatch the call.
-        bool isMethodCall = func.OwnerStructName != null;
-        if (isMethodCall)
-        {
-            if (callExpr.Callee is MemberAccessExpressionNode ma)
+            if (definingStructFqn != ownerFqn)
             {
-                // Explicit call (obj.method() or ptr->method())
-                if (ma.Operator.Type == TokenType.Arrow) Dispatcher.GenerateExpression(ma.Left, context);
-                else LValueGenerator.GenerateLValueAddress(ma.Left, context);
-            }
-            else
-            {
-                // Implicit `this` call (method() from within another method)
-                context.Symbols.TryGetSymbol("this", out int thisOffset, out _, out _);
-                Builder.AppendInstruction($"mov eax, [ebp + {thisOffset}]", "Get implicit 'this' pointer");
-            }
-            Builder.AppendInstruction("push eax", "Push 'this' pointer");
-            totalArgSize += 4;
-
-            // Dispatch (virtual or static)
-            if (func.IsVirtual || func.IsOverride)
-            {
-                var ownerTypeFqn = TypeRepository.GetFullyQualifiedOwnerName(func)!;
-                var vtableIndex = VTableManager.GetMethodVTableIndex(ownerTypeFqn, func.Name);
-                int thisPtrOnStackOffset = totalArgSize - 4;
-                Builder.AppendInstruction($"mov eax, [esp + {thisPtrOnStackOffset}]", "Get 'this' from stack for vcall");
-                Builder.AppendInstruction("mov eax, [eax]", "Get vtable pointer from object");
-                Builder.AppendInstruction($"mov eax, [eax + {vtableIndex * 4}]", $"Get method address from vtable[{vtableIndex}]");
-                Builder.AppendInstruction("call eax");
-            }
-            else
-            {
-                Builder.AppendInstruction($"call {NameMangler.Mangle(func)}");
+                diagnostics.Add(new Diagnostic(
+                   context.CompilationUnit.FilePath,
+                   $"Method '{func.Name}' is private and cannot be accessed from this context.",
+                   AstHelper.GetFirstToken(call.Callee).Line,
+                   AstHelper.GetFirstToken(call.Callee).Column
+               ));
             }
         }
-        else
+
+        // ** VALIDATE ARGUMENT COUNT **
+        int expectedArgs = func.OwnerStructName != null
+            ? func.Parameters.Count - 1 // Don't count implicit 'this'
+            : func.Parameters.Count;
+
+        if (call.Arguments.Count != expectedArgs)
         {
-            // Global function dispatch
-            string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
-            if (func.Body == null) ExternalFunctions.Add(func.Name);
-            Builder.AppendInstruction($"call {calleeTarget}");
+            diagnostics.Add(new Diagnostic(
+                context.CompilationUnit.FilePath,
+                $"Wrong number of arguments for call to '{func.Name}'. Expected {expectedArgs}, but got {call.Arguments.Count}.",
+                AstHelper.GetFirstToken(call).Line,
+                AstHelper.GetFirstToken(call).Column
+            ));
         }
 
-        // Phase 5: Cleanup stack.
-        if (totalArgSize > 0)
+
+        // Analyze arguments for their types
+        foreach (var arg in call.Arguments)
         {
-            Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up args");
+            _semanticAnalyzer.AnalyzeExpressionType(arg, context, diagnostics);
         }
 
-        if (returnsStructByValue)
-        {
-            Builder.AppendInstruction("lea eax, [esp]", "Get address of hidden return temporary");
-        }
+        // TODO: Validate argument types against function signature
+
+        return _semanticAnalyzer.GetFunctionReturnType(func, context);
     }
 }
 </file>
@@ -5153,35 +5178,55 @@ public class NewExpressionHandler : ExpressionHandlerBase
 </file>
 
 <file path="Generator\ExpressionHandlers\QualifiedAccessExpressionHandler.cs">
-using CTilde.Generator;
+using System; // Added for InvalidOperationException
+using System.Collections.Generic; // Added for List
+using CTilde.Diagnostics; // Added for Diagnostic
 
-namespace CTilde.Generator.ExpressionHandlers;
+namespace CTilde.Analysis.ExpressionAnalyzers; // Corrected namespace
 
-public class QualifiedAccessExpressionHandler : ExpressionHandlerBase
+public class QualifiedAccessExpressionAnalyzer : ExpressionAnalyzerBase // Corrected class name
 {
-    public QualifiedAccessExpressionHandler(CodeGenerator codeGenerator) : base(codeGenerator) { }
+    public QualifiedAccessExpressionAnalyzer( // Corrected constructor name
+        SemanticAnalyzer semanticAnalyzer,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        MemoryLayoutManager memoryLayoutManager)
+        : base(semanticAnalyzer, typeRepository, typeResolver, functionResolver, memoryLayoutManager) { }
 
-    public override void Generate(ExpressionNode expression, AnalysisContext context)
+    public override string Analyze(ExpressionNode expr, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        var qNode = (QualifiedAccessExpressionNode)expression;
+        var q = (QualifiedAccessExpressionNode)expr;
 
-        string potentialEnumTypeName = TypeResolver.ResolveQualifier(qNode.Left);
-        string memberName = qNode.Member.Value;
-        string? enumTypeFQN = TypeResolver.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction?.Namespace, context.CompilationUnit);
+        string qualifier = TypeResolver.ResolveQualifier(q.Left);
+        string memberName = q.Member.Value;
+
+        // 1. Try to resolve as an enum member (e.g., raylib::KeyboardKey::KEY_D)
+        string? enumTypeFQN = _typeResolver.ResolveEnumTypeName(qualifier, context.CurrentFunction?.Namespace, context.CompilationUnit);
         if (enumTypeFQN != null)
         {
-            var enumValue = FunctionResolver.GetEnumValue(enumTypeFQN, memberName);
-            if (enumValue.HasValue)
+            if (_functionResolver.GetEnumValue(enumTypeFQN, memberName).HasValue)
             {
-                Builder.AppendInstruction($"mov eax, {enumValue.Value}", $"Enum member {potentialEnumTypeName}::{memberName}");
-                return;
+                return "int"; // Enum members are integers.
             }
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Enum '{qualifier}' (resolved to '{enumTypeFQN}') does not contain member '{memberName}'.", q.Member.Line, q.Member.Column));
+            return "unknown";
         }
 
-        var func = FunctionResolver.ResolveFunctionCall(qNode, context);
-        string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
-        if (func.Body == null) ExternalFunctions.Add(func.Name);
-        Builder.AppendInstruction($"mov eax, {calleeTarget}");
+        // 2. Try to resolve as a qualified function (e.g., rl::InitWindow)
+        // If it's not an enum, but a qualified *function* name, its type is effectively a function pointer.
+        // We resolve it here, but its "type" for now is just void*.
+        try
+        {
+            _functionResolver.ResolveFunctionCall(q, context);
+            return "void*"; // Represents a function pointer type
+        }
+        catch (InvalidOperationException)
+        {
+            // Not an enum member, not a function. It's an error.
+            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Qualified access '{qualifier}::{memberName}' cannot be evaluated as a value directly. Only enum members or function calls are supported.", q.Member.Line, q.Member.Column));
+            return "unknown";
+        }
     }
 }
 </file>

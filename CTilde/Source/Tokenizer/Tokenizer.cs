@@ -26,7 +26,11 @@ public class Tokenizer
         "new",
         "delete",
         "operator",
-        "sizeof"
+        "sizeof",
+        "get",
+        "set",
+        "field",
+        "value"
     ];
 
     public static List<Token> Tokenize(string input)

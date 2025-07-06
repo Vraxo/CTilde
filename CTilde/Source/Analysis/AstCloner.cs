@@ -90,13 +90,28 @@ public class AstCloner
             node.Members.Select(Clone).ToList(),
             node.Methods.Select(Clone).ToList(),
             node.Constructors.Select(Clone).ToList(),
-            node.Destructors.Select(Clone).ToList()
+            node.Destructors.Select(Clone).ToList(),
+            node.Properties.Select(Clone).ToList()
         );
     }
 
     private MemberVariableNode Visit(MemberVariableNode node) => new(node.IsConst, Visit(node.Type), node.Name, node.AccessLevel);
     private ParameterNode Visit(ParameterNode node) => new(Visit(node.Type), node.Name);
     private BaseInitializerNode Visit(BaseInitializerNode node) => new(node.Arguments.Select(Clone).ToList());
+
+    private PropertyAccessorNode Visit(PropertyAccessorNode node) => new(node.AccessorKeyword, Clone(node.Body));
+    private PropertyDefinitionNode Visit(PropertyDefinitionNode node)
+    {
+        return new PropertyDefinitionNode(
+            Visit(node.Type),
+            node.Name,
+            node.AccessLevel,
+            node.IsVirtual,
+            node.IsOverride,
+            Clone(node.Getter),
+            Clone(node.Setter)
+        );
+    }
 
     private FunctionDeclarationNode Visit(FunctionDeclarationNode node)
     {

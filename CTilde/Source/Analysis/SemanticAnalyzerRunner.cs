@@ -85,6 +85,31 @@ public class SemanticAnalyzerRunner
                         WalkStatement(dtor.Body, context);
                         CheckForUnusedVariables(dummyFunctionForContext, context);
                     }
+                    foreach (var prop in s.Properties.ToList())
+                    {
+                        if (prop.Getter?.Body != null)
+                        {
+                            var dummyGetter = new FunctionDeclarationNode(
+                                prop.Type, $"get_{prop.Name.Value}", new List<ParameterNode>(), prop.Getter.Body,
+                                s.Name, prop.AccessLevel, prop.IsVirtual, prop.IsOverride, s.Namespace
+                            );
+                            var symbols = new SymbolTable(dummyGetter, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
+                            var context = new AnalysisContext(symbols, unit, dummyGetter);
+                            WalkStatement(prop.Getter.Body, context);
+                        }
+                        if (prop.Setter?.Body != null)
+                        {
+                            var valueParam = new ParameterNode(prop.Type, new Token(TokenType.Identifier, "value", -1, -1));
+                            var dummySetter = new FunctionDeclarationNode(
+                                new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), $"set_{prop.Name.Value}",
+                                new List<ParameterNode> { valueParam }, prop.Setter.Body,
+                                s.Name, prop.AccessLevel, prop.IsVirtual, prop.IsOverride, s.Namespace
+                            );
+                            var symbols = new SymbolTable(dummySetter, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
+                            var context = new AnalysisContext(symbols, unit, dummySetter);
+                            WalkStatement(prop.Setter.Body, context);
+                        }
+                    }
                 }
             }
 

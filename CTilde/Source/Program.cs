@@ -5,6 +5,10 @@ public class Program
     public static void Main(string[] args)
     {
         var compiler = new Compiler();
-        compiler.Compile("Code/main.c");
+        var options = new OptimizationOptions
+        {
+            EnableConstantFolding = false
+        };
+        compiler.Compile("Code/main.c", options);
     }
 }

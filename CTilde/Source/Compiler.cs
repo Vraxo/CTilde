@@ -5,12 +5,24 @@ using System.Linq;
 using CTilde.Diagnostics;
 using System.Diagnostics;
 using System.Text;
+using CTilde.Analysis;
 
 namespace CTilde;
 
 public class Compiler
 {
+    /// <summary>
+    /// Compiles the entry file with default options (no optimizations).
+    /// </summary>
     public void Compile(string entryFilePath)
+    {
+        Compile(entryFilePath, new OptimizationOptions());
+    }
+
+    /// <summary>
+    /// Compiles the entry file with the specified compilation options.
+    /// </summary>
+    public void Compile(string entryFilePath, OptimizationOptions options)
     {
         // 1. Discover all source files from #includes
         var preprocessor = new Preprocessor();
@@ -57,6 +69,13 @@ public class Compiler
         runner.Analyze();
 
         allDiagnostics.AddRange(runner.Diagnostics);
+
+        // 4.5 Perform Optimizations (if enabled)
+        if (options.EnableConstantFolding)
+        {
+            var optimizer = new AstOptimizer();
+            programNode = optimizer.Optimize(programNode);
+        }
 
         // --- Print all diagnostics, but only fail on errors ---
         if (allDiagnostics.Any())

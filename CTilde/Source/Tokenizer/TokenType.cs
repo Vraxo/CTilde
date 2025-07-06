@@ -4,7 +4,6 @@ public enum TokenType
 {
     Unknown,
     Keyword,
-    Enum,
     Identifier,
     IntegerLiteral,
     HexLiteral,

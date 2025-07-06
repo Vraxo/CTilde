@@ -80,6 +80,8 @@ public class Parser
     public CompilationUnitNode Parse(string filePath)
     {
         _filePath = filePath;
+        _currentNamespace = null; // Reset namespace for each new file.
+
         var usings = new List<UsingDirectiveNode>();
         var structs = new List<StructDefinitionNode>();
         var functions = new List<FunctionDeclarationNode>();
@@ -192,7 +194,7 @@ public class Parser
         }
         else
         {
-            ReportError($"Expected a type name but found '{current.Type}' ('{current.Value}').", current);
+            ReportError($"Parser failed to identify a type at this location. Expected a type name but found '{current.Type}' ('{current.Value}'). This is likely the root cause of subsequent errors.", current);
             AdvancePosition(1); // Consume the bad token to prevent infinite loop
             return new SimpleTypeNode(new Token(TokenType.Identifier, "unknown", current.Line, current.Column));
         }

@@ -86,6 +86,11 @@ public static class NameMangler
         return MangleName(d.Namespace, d.OwnerStructName, $"{d.OwnerStructName}_dtor");
     }
 
+    public static string MangleBackingField(string propertyName)
+    {
+        return $"__{propertyName}_BackingField";
+    }
+
     public static string GetVTableLabel(string structFqn)
     {
         return $"_vtable_{structFqn.Replace("::", "_").Replace("<", "_").Replace(">", "").Replace("*", "p")}";

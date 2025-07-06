@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using CTilde.Diagnostics;
 
@@ -24,77 +25,86 @@ public class SemanticAnalyzerRunner
 
     public void Analyze()
     {
-        // Iterate over a copy of the compilation units, as monomorphization might add new structs
-        // to them, which in turn adds new methods that need analysis.
-        // A more sophisticated approach might use a worklist, but this is simpler for now.
-        bool changed;
-        do
+        try
         {
-            changed = false;
-            var currentStructs = _program.CompilationUnits.SelectMany(cu => cu.Structs).ToList();
-
-            foreach (var unit in _program.CompilationUnits.ToList())
+            // Iterate over a copy of the compilation units, as monomorphization might add new structs
+            // to them, which in turn adds new methods that need analysis.
+            // A more sophisticated approach might use a worklist, but this is simpler for now.
+            bool changed;
+            do
             {
-                foreach (var function in unit.Functions.ToList())
+                changed = false;
+                var currentStructs = _program.CompilationUnits.SelectMany(cu => cu.Structs).ToList();
+
+                foreach (var unit in _program.CompilationUnits.ToList())
                 {
-                    if (function.Body == null) continue;
-                    var symbols = new SymbolTable(function, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
-                    var context = new AnalysisContext(symbols, unit, function);
-                    WalkStatement(function.Body, context);
-                    CheckForUnusedVariables(function, context);
+                    foreach (var function in unit.Functions.ToList())
+                    {
+                        if (function.Body == null) continue;
+                        var symbols = new SymbolTable(function, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
+                        var context = new AnalysisContext(symbols, unit, function);
+                        WalkStatement(function.Body, context);
+                        CheckForUnusedVariables(function, context);
+                    }
+
+                    foreach (var s in unit.Structs.ToList())
+                    {
+                        // If it's a generic template (e.g. struct List<T>), skip analysis.
+                        // It will be monomorphized and analyzed on-demand when instantiated.
+                        if (s.GenericParameters.Any())
+                        {
+                            continue;
+                        }
+
+                        foreach (var method in s.Methods.ToList())
+                        {
+                            if (method.Body == null) continue;
+                            var symbols = new SymbolTable(method, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
+                            var context = new AnalysisContext(symbols, unit, method);
+                            WalkStatement(method.Body, context);
+                            CheckForUnusedVariables(method, context);
+                        }
+                        foreach (var ctor in s.Constructors.ToList())
+                        {
+                            var dummyFunctionForContext = new FunctionDeclarationNode(
+                                new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), ctor.OwnerStructName,
+                                ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
+                                false, false, ctor.Namespace
+                            );
+                            var symbols = new SymbolTable(ctor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
+                            var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
+                            WalkStatement(ctor.Body, context);
+                            CheckForUnusedVariables(dummyFunctionForContext, context);
+                        }
+                        foreach (var dtor in s.Destructors.ToList())
+                        {
+                            var dummyFunctionForContext = new FunctionDeclarationNode(
+                                new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), dtor.OwnerStructName,
+                                new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
+                                dtor.IsVirtual, false, dtor.Namespace
+                            );
+                            var symbols = new SymbolTable(dtor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
+                            var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
+                            WalkStatement(dtor.Body, context);
+                            CheckForUnusedVariables(dummyFunctionForContext, context);
+                        }
+                    }
                 }
 
-                foreach (var s in unit.Structs.ToList())
+                var newStructs = _program.CompilationUnits.SelectMany(cu => cu.Structs).ToList();
+                if (newStructs.Count > currentStructs.Count)
                 {
-                    // If it's a generic template (e.g. struct List<T>), skip analysis.
-                    // It will be monomorphized and analyzed on-demand when instantiated.
-                    if (s.GenericParameters.Any())
-                    {
-                        continue;
-                    }
-
-                    foreach (var method in s.Methods.ToList())
-                    {
-                        if (method.Body == null) continue;
-                        var symbols = new SymbolTable(method, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
-                        var context = new AnalysisContext(symbols, unit, method);
-                        WalkStatement(method.Body, context);
-                        CheckForUnusedVariables(method, context);
-                    }
-                    foreach (var ctor in s.Constructors.ToList())
-                    {
-                        var dummyFunctionForContext = new FunctionDeclarationNode(
-                            new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), ctor.OwnerStructName,
-                            ctor.Parameters, ctor.Body, ctor.OwnerStructName, ctor.AccessLevel,
-                            false, false, ctor.Namespace
-                        );
-                        var symbols = new SymbolTable(ctor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
-                        var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
-                        WalkStatement(ctor.Body, context);
-                        CheckForUnusedVariables(dummyFunctionForContext, context);
-                    }
-                    foreach (var dtor in s.Destructors.ToList())
-                    {
-                        var dummyFunctionForContext = new FunctionDeclarationNode(
-                            new SimpleTypeNode(new Token(TokenType.Keyword, "void", -1, -1)), dtor.OwnerStructName,
-                            new List<ParameterNode>(), dtor.Body, dtor.OwnerStructName, dtor.AccessLevel,
-                            dtor.IsVirtual, false, dtor.Namespace
-                        );
-                        var symbols = new SymbolTable(dtor, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
-                        var context = new AnalysisContext(symbols, unit, dummyFunctionForContext);
-                        WalkStatement(dtor.Body, context);
-                        CheckForUnusedVariables(dummyFunctionForContext, context);
-                    }
+                    changed = true;
                 }
-            }
 
-            var newStructs = _program.CompilationUnits.SelectMany(cu => cu.Structs).ToList();
-            if (newStructs.Count > currentStructs.Count)
-            {
-                changed = true;
-            }
-
-        } while (changed);
+            } while (changed);
+        }
+        catch (Exception ex)
+        {
+            // Catch any unexpected crashes during analysis and report them as a diagnostic.
+            // This ensures that parser-level diagnostics are still shown.
+            Diagnostics.Add(new Diagnostic("Compiler", $"FATAL ANALYSIS ERROR: {ex.Message}", 0, 0));
+        }
     }
 
     private void CheckForUnusedVariables(FunctionDeclarationNode function, AnalysisContext context)

@@ -58,6 +58,15 @@ public class MemoryLayoutManager
                     : structUnit; // If not a struct, use the owner struct's unit for context
                 size += GetSizeOfType(resolvedMemberType, memberUnit);
             }
+
+            foreach (var prop in structDef.Properties)
+            {
+                var resolvedPropType = _typeResolver.ResolveType(prop.Type, structDef.Namespace, structUnit);
+                var memberUnit = _typeRepository.IsStruct(resolvedPropType)
+                   ? _typeRepository.GetCompilationUnitForStruct(resolvedPropType.TrimEnd('*'))
+                   : structUnit;
+                size += GetSizeOfType(resolvedPropType, memberUnit);
+            }
             return size;
         }
         throw new System.InvalidOperationException($"Unknown type '{typeNameFqn}' for size calculation.");
@@ -65,9 +74,16 @@ public class MemoryLayoutManager
 
     public (int offset, string type) GetMemberInfo(string structName, string memberName, CompilationUnitNode context)
     {
-        var member = GetAllMembers(structName, context).FirstOrDefault(m => m.name == memberName);
-        if (member == default) throw new System.InvalidOperationException($"Struct '{structName}' has no member '{memberName}'");
-        return (member.offset, member.type);
+        var allMembers = GetAllMembers(structName, context);
+
+        var member = allMembers.FirstOrDefault(m => m.name == memberName);
+        if (member != default) return (member.offset, member.type);
+
+        var backingFieldName = NameMangler.MangleBackingField(memberName);
+        member = allMembers.FirstOrDefault(m => m.name == backingFieldName);
+        if (member != default) return (member.offset, member.type);
+
+        throw new System.InvalidOperationException($"Struct '{structName}' has no member or property '{memberName}'");
     }
 
     public List<(string name, string type, int offset, bool isConst)> GetAllMembers(string structFqn, CompilationUnitNode context)
@@ -103,6 +119,21 @@ public class MemoryLayoutManager
                 : ownUnit; // If not a struct, use the owner struct's unit for context
             currentOffset += GetSizeOfType(resolvedMemberType, memberUnit);
         }
+
+        foreach (var prop in structDef.Properties)
+        {
+            var ownUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
+            string resolvedPropType = _typeResolver.ResolveType(prop.Type, structDef.Namespace, ownUnit);
+
+            var backingFieldName = NameMangler.MangleBackingField(prop.Name.Value);
+            allMembers.Add((backingFieldName, resolvedPropType, currentOffset, false));
+
+            var propUnit = _typeRepository.IsStruct(resolvedPropType)
+                ? _typeRepository.GetCompilationUnitForStruct(resolvedPropType.TrimEnd('*'))
+                : ownUnit;
+            currentOffset += GetSizeOfType(resolvedPropType, propUnit);
+        }
+
         return allMembers;
     }
 }

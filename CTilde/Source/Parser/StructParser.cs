@@ -42,6 +42,7 @@ internal class StructParser
         _parser.Eat(TokenType.LeftBrace);
 
         var members = new List<MemberVariableNode>();
+        var properties = new List<PropertyDefinitionNode>();
         var methods = new List<FunctionDeclarationNode>();
         var constructors = new List<ConstructorDeclarationNode>();
         var destructors = new List<DestructorDeclarationNode>();
@@ -116,6 +117,11 @@ internal class StructParser
                 var methodNode = _functionParser.FinishParsingFunction(type, name.Value, structName.Value, currentAccess, isVirtual, isOverride, _parser._currentNamespace, true);
                 methods.Add(methodNode);
             }
+            else if (_parser.Current.Type == TokenType.LeftBrace)
+            {
+                if (isVirtual || isOverride || isConst) _parser.ReportError("Properties cannot be marked 'virtual', 'override', or 'const'.", startToken);
+                properties.Add(ParsePropertyDefinition(type, name, currentAccess));
+            }
             else
             {
                 if (isVirtual || isOverride) _parser.ReportError("Only methods can be marked 'virtual' or 'override'.", startToken);
@@ -126,7 +132,31 @@ internal class StructParser
 
         _parser.Eat(TokenType.RightBrace);
         _parser.Eat(TokenType.Semicolon);
-        return new StructDefinitionNode(structName.Value, genericParameters, baseStructName, _parser._currentNamespace, members, methods, constructors, destructors);
+        return new StructDefinitionNode(structName.Value, genericParameters, baseStructName, _parser._currentNamespace, members, properties, methods, constructors, destructors);
+    }
+
+    private PropertyDefinitionNode ParsePropertyDefinition(TypeNode type, Token name, AccessSpecifier access)
+    {
+        _parser.Eat(TokenType.LeftBrace);
+        var accessors = new List<PropertyAccessorNode>();
+        while (_parser.Current.Type != TokenType.RightBrace && _parser.Current.Type != TokenType.Unknown)
+        {
+            var keyword = _parser.Current;
+            if (keyword.Type == TokenType.Keyword && (keyword.Value == "get" || keyword.Value == "set"))
+            {
+                _parser.Eat(TokenType.Keyword);
+                accessors.Add(new PropertyAccessorNode(keyword));
+                _parser.Eat(TokenType.Semicolon);
+            }
+            else
+            {
+                _parser.ReportError("Expected 'get' or 'set' accessor in property declaration.", keyword);
+                _parser.AdvancePosition(1); // skip bad token
+            }
+        }
+        _parser.Eat(TokenType.RightBrace);
+        _parser.Eat(TokenType.Semicolon); // Require a semicolon after a property block for parser stability.
+        return new PropertyDefinitionNode(type, name, access, accessors);
     }
 
 

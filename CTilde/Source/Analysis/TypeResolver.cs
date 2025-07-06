@@ -46,6 +46,13 @@ public class TypeResolver
 
     public string ResolveSimpleTypeName(string name, string? currentNamespace, CompilationUnitNode context)
     {
+        if (name == "unknown")
+        {
+            // This indicates a prior parser error that was recovered from.
+            // We throw here to provide a more specific message than "Type 'unknown' could not be resolved".
+            throw new InvalidOperationException("Attempted to resolve a type that the parser could not identify (marked as 'unknown'). This is likely due to a syntax error in a type declaration earlier in the parsing process.");
+        }
+
         if (name is "int" or "char" or "void")
         {
             return name;

@@ -64,7 +64,22 @@ public class FunctionResolver
             if (func == null) throw new InvalidOperationException($"Function '{resolvedNamespace}::{funcName}' not found.");
             return func;
         }
-        throw new NotSupportedException($"Unsupported callee type for resolution: {callee.GetType().Name}");
+
+        // --- ENHANCED DEBUGGING EXCEPTION ---
+        string parentInfo = "null";
+        if (callee.Parent != null)
+        {
+            parentInfo = callee.Parent.GetType().Name;
+            if (callee.Parent is CallExpressionNode callParent)
+            {
+                var calleeType = callParent.Callee.GetType().Name;
+                var allArgs = string.Join(", ", callParent.Arguments.Select(a => a.GetType().Name));
+                parentInfo += $" (Callee: {calleeType}, Args: [{allArgs}])";
+            }
+        }
+        var token = AstHelper.GetFirstToken(callee);
+        var detailedMessage = $"Unsupported callee type for resolution: {callee.GetType().Name} with value '{token.Value}'. Parent is {parentInfo}.";
+        throw new InvalidOperationException(detailedMessage);
     }
 
     private FunctionDeclarationNode ResolveFunctionByName(string name, string? currentNamespace, CompilationUnitNode context)

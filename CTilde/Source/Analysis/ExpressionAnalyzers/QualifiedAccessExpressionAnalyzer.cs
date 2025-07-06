@@ -1,6 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using CTilde.Diagnostics;
+﻿using CTilde.Diagnostics;
 
 namespace CTilde.Analysis.ExpressionAnalyzers;
 
@@ -17,35 +15,65 @@ public class QualifiedAccessExpressionAnalyzer : ExpressionAnalyzerBase
     public override string Analyze(ExpressionNode expr, AnalysisContext context, List<Diagnostic> diagnostics)
     {
         var q = (QualifiedAccessExpressionNode)expr;
-
         string qualifier = TypeResolver.ResolveQualifier(q.Left);
         string memberName = q.Member.Value;
 
-        // 1. Try to resolve as an enum member (e.g., raylib::KeyboardKey::KEY_D)
-        string? enumTypeFQN = _typeResolver.ResolveEnumTypeName(qualifier, context.CurrentFunction?.Namespace, context.CompilationUnit);
-        if (enumTypeFQN is not null)
+        string? enumAnalysisResult = AnalyzeAsEnumMember(q, qualifier, memberName, context, diagnostics);
+
+        if (enumAnalysisResult is not null)
         {
-            if (_functionResolver.GetEnumValue(enumTypeFQN, memberName).HasValue)
-            {
-                return "int"; // Enum members are integers.
-            }
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Enum '{qualifier}' (resolved to '{enumTypeFQN}') does not contain member '{memberName}'.", q.Member.Line, q.Member.Column));
-            return "unknown";
+            return enumAnalysisResult;
         }
 
-        // 2. Try to resolve as a qualified function (e.g., rl::InitWindow)
-        // If it's not an enum, but a qualified *function* name, its type is effectively a function pointer.
-        // We resolve it here, but its "type" for now is just void*.
+        string? functionAnalysisResult = AnalyzeAsFunctionPointer(q, context);
+
+        if (functionAnalysisResult is not null)
+        {
+            return functionAnalysisResult;
+        }
+
+        diagnostics.Add(new(
+            context.CompilationUnit.FilePath,
+            $"Qualified access '{qualifier}::{memberName}' cannot be evaluated as a value. Only enum members or static function references are supported.",
+            q.Member.Line,
+            q.Member.Column));
+
+        return "unknown";
+    }
+
+    private string? AnalyzeAsEnumMember(QualifiedAccessExpressionNode q, string qualifier, string memberName, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        string? enumTypeFQN = _typeResolver.ResolveEnumTypeName(qualifier, context.CurrentFunction?.Namespace, context.CompilationUnit);
+        
+        if (enumTypeFQN is null)
+        {
+            return null;
+        }
+
+        if (_functionResolver.GetEnumValue(enumTypeFQN, memberName).HasValue)
+        {
+            return "int";
+        }
+
+        diagnostics.Add(new(
+            context.CompilationUnit.FilePath,
+            $"Enum '{qualifier}' (resolved to '{enumTypeFQN}') does not contain member '{memberName}'.",
+            q.Member.Line,
+            q.Member.Column));
+
+        return "unknown";
+    }
+
+    private string? AnalyzeAsFunctionPointer(QualifiedAccessExpressionNode q, AnalysisContext context)
+    {
         try
         {
             _functionResolver.ResolveFunctionCall(q, context);
-            return "void*"; // Represents a function pointer type
+            return "void*";
         }
         catch (InvalidOperationException)
         {
-            // Not an enum member, not a function. It's an error.
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Qualified access '{qualifier}::{memberName}' cannot be evaluated as a value directly. Only enum members or function calls are supported.", q.Member.Line, q.Member.Column));
-            return "unknown";
+            return null;
         }
     }
 }

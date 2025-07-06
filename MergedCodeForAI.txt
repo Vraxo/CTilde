@@ -1,96 +1,165 @@
 <file path="Compiler.cs">
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using CTilde.Diagnostics;
 using System.Diagnostics;
 using System.Text;
+using CTilde.Analysis;
+using CTilde.Diagnostics;
 
 namespace CTilde;
 
 public class Compiler
 {
+    private string? _entryFilePath;
+    private OptimizationOptions _options;
+    private List<string>? _allFiles;
+    private readonly List<Diagnostic> _allDiagnostics = [];
+    private readonly Dictionary<string, string[]> _sourceFileCache = [];
+    private ProgramNode? _programNode;
+
+    private TypeRepository? _typeRepository;
+    private TypeResolver? _typeResolver;
+    private VTableManager? _vtableManager;
+    private MemoryLayoutManager? _memoryLayoutManager;
+    private FunctionResolver? _functionResolver;
+    private SemanticAnalyzer? _semanticAnalyzer;
+
     public void Compile(string entryFilePath)
     {
-        // 1. Discover all source files from #includes
-        var preprocessor = new Preprocessor();
-        var allFiles = preprocessor.DiscoverDependencies(entryFilePath);
+        Compile(entryFilePath, new());
+    }
 
-        // 2. Parse each file into a CompilationUnit
-        var compilationUnits = new List<CompilationUnitNode>();
-        var allImports = new List<ImportDirectiveNode>();
-        var allDiagnostics = new List<Diagnostic>();
-        var sourceFileCache = new Dictionary<string, string[]>();
+    public void Compile(string entryFilePath, OptimizationOptions options)
+    {
+        // 1. Initialize state for this compilation run
+        _entryFilePath = entryFilePath;
+        _options = options;
+        _allDiagnostics.Clear();
+        _sourceFileCache.Clear();
+        // Other fields will be overwritten, no need to clear/null them.
 
-        foreach (var file in allFiles)
+        // 2. Discover all source files
+        _allFiles = GetAllFiles(_entryFilePath);
+
+        // 3. Parse each file into a CompilationUnit
+        ParseIntoCompilationUnits();
+
+        // 4. Create analysis services
+        CreateAnalysisServices();
+
+        // 5. Perform Semantic Analysis
+        PerformSemanticAnalysis();
+
+        // 6. Perform Optimizations (if enabled)
+        Optimize();
+
+        // 7. Print all diagnostics and check for fatal errors before proceeding
+        PrintDiagnostics();
+        if (_allDiagnostics.Any(d => d.Severity == DiagnosticSeverity.Error))
         {
-            var code = File.ReadAllText(file);
-            sourceFileCache[file] = code.Split('\n');
+            return;
+        }
 
-            var tokens = Tokenizer.Tokenize(code);
-            var parser = new Parser(tokens);
-            var unit = parser.Parse(file);
+        // 8. Generate Code
+        string? asmCode = GenerateCode();
 
-            allDiagnostics.AddRange(parser.Diagnostics);
+        // 9. Output to file
+        string? outputAsmPath = OutputAssembly(asmCode);
 
-            var importsInFile = parser.GetImports();
+        // 10. Execute FASM to assemble the code
+        Assemble(outputAsmPath);
+    }
+
+    private void ParseIntoCompilationUnits()
+    {
+        List<CompilationUnitNode>? compilationUnits = [];
+        List<ImportDirectiveNode>? allImports = [];
+
+        foreach (string file in _allFiles)
+        {
+            string? code = File.ReadAllText(file);
+            _sourceFileCache[file] = code.Split('\n');
+
+            List<Token>? tokens = Tokenizer.Tokenize(code);
+            Parser? parser = new(tokens);
+            CompilationUnitNode? unit = parser.Parse(file);
+
+            _allDiagnostics.AddRange(parser.Diagnostics);
+
+            List<ImportDirectiveNode>? importsInFile = parser.GetImports();
             allImports.AddRange(importsInFile);
 
             compilationUnits.Add(unit);
         }
 
-        var programNode = new ProgramNode(allImports.DistinctBy(i => i.LibraryName).ToList(), compilationUnits);
-
-        // 3. Create analysis services ONCE
-        var typeRepository = new TypeRepository(programNode);
-        var monomorphizer = new Monomorphizer(typeRepository);
-        var typeResolver = new TypeResolver(typeRepository, monomorphizer);
-        monomorphizer.SetResolver(typeResolver); // Break circular dependency
-        var vtableManager = new VTableManager(typeRepository, typeResolver);
-        var memoryLayoutManager = new MemoryLayoutManager(typeRepository, typeResolver, vtableManager);
-        var functionResolver = new FunctionResolver(typeRepository, typeResolver, programNode);
-        var semanticAnalyzer = new SemanticAnalyzer(typeRepository, typeResolver, functionResolver, memoryLayoutManager);
-        functionResolver.SetSemanticAnalyzer(semanticAnalyzer); // Break circular dependency
-
-        // 4. Perform Semantic Analysis
-        var runner = new SemanticAnalyzerRunner(programNode, typeRepository, typeResolver, functionResolver, memoryLayoutManager, semanticAnalyzer);
-        runner.Analyze();
-
-        allDiagnostics.AddRange(runner.Diagnostics);
-
-        // --- Print all diagnostics, but only fail on errors ---
-        if (allDiagnostics.Any())
-        {
-            var printer = new DiagnosticPrinter(allDiagnostics, sourceFileCache);
-            printer.Print();
-
-            var errorCount = allDiagnostics.Count(d => d.Severity == DiagnosticSeverity.Error);
-            if (errorCount > 0)
-            {
-                Console.WriteLine($"\nCompilation failed with {errorCount} error(s).");
-                return;
-            }
-        }
-
-        // 5. Generate Code
-        var generator = new CodeGenerator(programNode, typeRepository, typeResolver, functionResolver, vtableManager, memoryLayoutManager, semanticAnalyzer);
-        string asmCode = generator.Generate();
-
-        // 6. Output
-        string outputAsmPath = "Code/Output/output.asm";
-        File.WriteAllText(outputAsmPath, asmCode);
-        Console.WriteLine($"Compilation successful. Assembly code written to {outputAsmPath}");
-
-        // 7. Execute FASM directly
-        ExecuteFasm(outputAsmPath);
+        _programNode = new(allImports.DistinctBy(i => i.LibraryName).ToList(), compilationUnits);
     }
 
-    private void ExecuteFasm(string relativeAsmPath)
+    private void CreateAnalysisServices()
+    {
+        _typeRepository = new(_programNode);
+        Monomorphizer? monomorphizer = new(_typeRepository);
+        _typeResolver = new(_typeRepository, monomorphizer);
+        monomorphizer.SetResolver(_typeResolver); // Break circular dependency
+        _vtableManager = new(_typeRepository, _typeResolver);
+        _memoryLayoutManager = new(_typeRepository, _typeResolver, _vtableManager);
+        _functionResolver = new(_typeRepository, _typeResolver, _programNode);
+        _semanticAnalyzer = new(_typeRepository, _typeResolver, _functionResolver, _memoryLayoutManager);
+        _functionResolver.SetSemanticAnalyzer(_semanticAnalyzer); // Break circular dependency
+    }
+
+    private void PerformSemanticAnalysis()
+    {
+        var runner = new SemanticAnalyzerRunner(_programNode, _typeRepository, _typeResolver, _functionResolver, _memoryLayoutManager, _semanticAnalyzer);
+        runner.Analyze();
+        _allDiagnostics.AddRange(runner.Diagnostics);
+    }
+
+    private void Optimize()
+    {
+        if (_options.EnableConstantFolding)
+        {
+            AstOptimizer? optimizer = new();
+            _programNode = optimizer.Optimize(_programNode);
+        }
+    }
+
+    private void PrintDiagnostics()
+    {
+        if (_allDiagnostics.Count == 0)
+        {
+            return;
+        }
+
+        DiagnosticPrinter? printer = new(_allDiagnostics, _sourceFileCache);
+        printer.Print();
+
+        int? errorCount = _allDiagnostics.Count(d => d.Severity == DiagnosticSeverity.Error);
+
+        if (errorCount > 0)
+        {
+            Console.WriteLine($"\nCompilation failed with {errorCount} error(s).");
+        }
+    }
+
+    private string GenerateCode()
+    {
+        CodeGenerator? generator = new(_programNode, _typeRepository, _typeResolver, _functionResolver, _vtableManager, _memoryLayoutManager, _semanticAnalyzer);
+        string? asmCode = generator.Generate();
+        return asmCode;
+    }
+
+    private static string OutputAssembly(string asmCode)
+    {
+        string? outputAsmPath = "Code/Output/output.asm";
+        File.WriteAllText(outputAsmPath, asmCode);
+        Console.WriteLine($"Compilation successful. Assembly code written to {outputAsmPath}");
+        return outputAsmPath;
+    }
+
+    private static void Assemble(string relativeAsmPath)
     {
         // Define paths for FASM. A more advanced implementation could find this in PATH or via configuration.
-        string fasmPath = @"D:\Program Files\FASM\fasm.exe";
-        string fasmIncludePath = @"D:\Program Files\FASM\INCLUDE";
+        string? fasmPath = @"D:\Program Files\FASM\fasm.exe";
+        string? fasmIncludePath = @"D:\Program Files\FASM\INCLUDE";
 
         if (!File.Exists(fasmPath))
         {
@@ -109,51 +178,55 @@ public class Compiler
         {
             Console.WriteLine($"\nExecuting FASM assembler...");
 
-            string fullAsmPath = Path.GetFullPath(relativeAsmPath);
-            string workingDirectory = Path.GetDirectoryName(fullAsmPath) ?? ".";
+            string? fullAsmPath = Path.GetFullPath(relativeAsmPath);
+            string? workingDirectory = Path.GetDirectoryName(fullAsmPath) ?? ".";
 
             // The fasm command needs the output file path relative to its working directory.
             // Since we set the working directory to the same folder as the asm file, we only need the filename.
-            string fasmArgument = Path.GetFileName(fullAsmPath);
+            string? fasmArgument = Path.GetFileName(fullAsmPath);
 
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = fasmPath,
-                Arguments = fasmArgument,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WorkingDirectory = workingDirectory
-            };
+            ProcessStartInfo? startInfo = StartAssemblerProcess(fasmPath, workingDirectory, fasmArgument);
 
             // Set the INCLUDE environment variable specifically for the FASM process
             startInfo.EnvironmentVariables["INCLUDE"] = fasmIncludePath;
 
-            using (var process = new Process { StartInfo = startInfo })
+            using Process? process = new() { StartInfo = startInfo };
+            StringBuilder? outputBuilder = new();
+            StringBuilder? errorBuilder = new();
+
+            process.OutputDataReceived += (sender, args) =>
             {
-                var outputBuilder = new StringBuilder();
-                var errorBuilder = new StringBuilder();
-
-                process.OutputDataReceived += (sender, args) => { if (args.Data != null) outputBuilder.AppendLine(args.Data); };
-                process.ErrorDataReceived += (sender, args) => { if (args.Data != null) errorBuilder.AppendLine(args.Data); };
-
-                process.Start();
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-                process.WaitForExit();
-
-                Console.Write(outputBuilder.ToString());
-                Console.Error.Write(errorBuilder.ToString());
-
-                if (process.ExitCode == 0)
+                if (args.Data is null)
                 {
-                    Console.WriteLine("FASM execution successful.");
+                    return;
                 }
-                else
+
+                outputBuilder.AppendLine(args.Data);
+            };
+
+            process.ErrorDataReceived += (sender, args) =>
+            {
+                if (args.Data is not null)
                 {
-                    Console.Error.WriteLine($"FASM execution failed with exit code {process.ExitCode}.");
+                    errorBuilder.AppendLine(args.Data);
                 }
+            };
+
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            process.WaitForExit();
+
+            Console.Write(outputBuilder.ToString());
+            Console.Error.Write(errorBuilder.ToString());
+
+            if (process.ExitCode == 0)
+            {
+                Console.WriteLine("FASM execution successful.");
+            }
+            else
+            {
+                Console.Error.WriteLine($"FASM execution failed with exit code {process.ExitCode}.");
             }
         }
         catch (Exception ex)
@@ -161,6 +234,34 @@ public class Compiler
             Console.Error.WriteLine($"Error executing FASM: {ex.Message}");
         }
     }
+
+    private static ProcessStartInfo StartAssemblerProcess(string fasmPath, string workingDirectory, string fasmArgument)
+    {
+        return new()
+        {
+            FileName = fasmPath,
+            Arguments = fasmArgument,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = workingDirectory
+        };
+    }
+
+    private static List<string> GetAllFiles(string entryFilePath)
+    {
+        return new Preprocessor().DiscoverDependencies(entryFilePath);
+    }
+}
+</file>
+
+<file path="OptimizationOptions.cs">
+namespace CTilde;
+
+public class OptimizationOptions
+{
+    public bool EnableConstantFolding { get; set; } = false;
 }
 </file>
 
@@ -228,10 +329,16 @@ namespace CTilde;
 
 public class Program
 {
-    public static void Main(string[] args)
+    public static void Main()
     {
-        var compiler = new Compiler();
-        compiler.Compile("Code/main.c");
+        Compiler compiler = new();
+
+        OptimizationOptions options = new()
+        {
+            EnableConstantFolding = true
+        };
+
+        compiler.Compile("Code/main.c", options);
     }
 }
 </file>
@@ -267,7 +374,7 @@ public class AstCloner
 
     public T Clone<T>(T? node) where T : AstNode
     {
-        if (node == null) return null!;
+        if (node is null) return null!;
         return (T)Visit((dynamic)node);
     }
 
@@ -390,6 +497,177 @@ public class AstCloner
 }
 </file>
 
+<file path="Analysis\AstOptimizer.cs">
+namespace CTilde.Analysis;
+
+public class AstOptimizer
+{
+    private readonly Parser _dummyParser = new([]);
+
+    public ProgramNode Optimize(ProgramNode programNode)
+    {
+        ProgramNode newProgram = Visit(programNode);
+        _dummyParser.SetParents(newProgram, null);
+
+        return newProgram;
+    }
+
+    private T? Visit<T>(T? node) where T : AstNode
+    {
+        return node is null 
+            ? null 
+            : (T)Visit((dynamic)node);
+    }
+
+    private AstNode Visit(AstNode node)
+    {
+        return node;
+    }
+
+    private ProgramNode Visit(ProgramNode node)
+    {
+        return new(
+            node.Imports.Select(Visit).ToList(),
+            node.CompilationUnits.Select(Visit).ToList()
+        );
+    }
+
+    private CompilationUnitNode Visit(CompilationUnitNode node)
+    {
+        return new(
+            node.FilePath,
+            node.Usings.Select(Visit).ToList(),
+            node.Structs.Select(Visit).ToList(),
+            node.Functions.Select(Visit).ToList(),
+            node.Enums.Select(Visit).ToList()
+        );
+    }
+
+    private FunctionDeclarationNode Visit(FunctionDeclarationNode node)
+    {
+        return new(
+            node.ReturnType, node.Name, node.Parameters, Visit(node.Body),
+            node.OwnerStructName, node.AccessLevel, node.IsVirtual, node.IsOverride, node.Namespace
+        );
+    }
+
+    private ConstructorDeclarationNode Visit(ConstructorDeclarationNode node)
+    {
+        return new(
+            node.OwnerStructName, node.Namespace, node.AccessLevel,
+            node.Parameters, Visit(node.Initializer), Visit(node.Body)
+        );
+    }
+
+    private DestructorDeclarationNode Visit(DestructorDeclarationNode node)
+    {
+        return new(
+            node.OwnerStructName, node.Namespace, node.AccessLevel,
+            node.IsVirtual, Visit(node.Body)
+        );
+    }
+
+    private StatementNode Visit(StatementNode node)
+    {
+        return node switch
+        {
+            BlockStatementNode b => new BlockStatementNode(b.Statements.Select(Visit).ToList()),
+            ReturnStatementNode r => new ReturnStatementNode(Visit(r.Expression)),
+            WhileStatementNode w => new WhileStatementNode(Visit(w.Condition), Visit(w.Body)),
+            IfStatementNode i => new IfStatementNode(Visit(i.Condition), Visit(i.ThenBody), Visit(i.ElseBody)),
+            DeclarationStatementNode d => new DeclarationStatementNode(d.IsConst, d.Type, d.Identifier, Visit(d.Initializer), d.ConstructorArguments?.Select(Visit).ToList()),
+            ExpressionStatementNode e => new ExpressionStatementNode(Visit(e.Expression)),
+            DeleteStatementNode del => new DeleteStatementNode(Visit(del.Expression)),
+            _ => node
+        };
+    }
+
+    private ExpressionNode Visit(ExpressionNode node)
+    {
+        return node switch
+        {
+            InitializerListExpressionNode il => new InitializerListExpressionNode(il.OpeningBrace, il.Values.Select(Visit).ToList()),
+            UnaryExpressionNode u => new UnaryExpressionNode(u.Operator, Visit(u.Right)),
+            AssignmentExpressionNode a => new AssignmentExpressionNode(Visit(a.Left), Visit(a.Right)),
+            CallExpressionNode c => new CallExpressionNode(Visit(c.Callee), c.Arguments.Select(Visit).ToList()),
+            BinaryExpressionNode b => Visit(b), // Special handling
+            MemberAccessExpressionNode ma => new MemberAccessExpressionNode(Visit(ma.Left), ma.Operator, ma.Member),
+            QualifiedAccessExpressionNode qa => new QualifiedAccessExpressionNode(Visit(qa.Left), qa.Member),
+            NewExpressionNode n => new NewExpressionNode(n.Type, n.Arguments.Select(Visit).ToList()),
+            _ => node,
+        };
+    }
+
+    private ExpressionNode Visit(BinaryExpressionNode node)
+    {
+        ExpressionNode left = Visit(node.Left);
+        ExpressionNode right = Visit(node.Right);
+
+        if (left is IntegerLiteralNode l && right is IntegerLiteralNode r)
+        {
+            Token token = l.Token;
+
+            switch (node.Operator.Type)
+            {
+                case TokenType.Plus:
+                    return new IntegerLiteralNode(token, l.Value + r.Value);
+                case TokenType.Minus:
+                    return new IntegerLiteralNode(token, l.Value - r.Value);
+                case TokenType.Star:
+                    return new IntegerLiteralNode(token, l.Value * r.Value);
+                case TokenType.Slash:
+                    if (r.Value != 0) // Avoid division by zero at compile time
+                    {
+                        return new IntegerLiteralNode(token, l.Value / r.Value);
+                    }
+
+                    break; // Fall through to not optimize
+                case TokenType.DoubleEquals:
+                    return new IntegerLiteralNode(token, l.Value == r.Value ? 1 : 0);
+                case TokenType.NotEquals:
+                    return new IntegerLiteralNode(token, l.Value != r.Value ? 1 : 0);
+                case TokenType.LessThan:
+                    return new IntegerLiteralNode(token, l.Value < r.Value ? 1 : 0);
+                case TokenType.GreaterThan:
+                    return new IntegerLiteralNode(token, l.Value > r.Value ? 1 : 0);
+            }
+        }
+
+        if (ReferenceEquals(left, node.Left) && ReferenceEquals(right, node.Right))
+        {
+            return node;
+        }
+
+        return new BinaryExpressionNode(left, node.Operator, right);
+    }
+
+    private ImportDirectiveNode Visit(ImportDirectiveNode n)
+    {
+        return n;
+    }
+
+    private UsingDirectiveNode Visit(UsingDirectiveNode n) 
+    {
+        return n;
+    }
+
+    private StructDefinitionNode Visit(StructDefinitionNode n) 
+    {
+        return n;
+    }
+
+    private EnumDefinitionNode Visit(EnumDefinitionNode n) 
+    {
+        return n;
+    }
+
+    private BaseInitializerNode Visit(BaseInitializerNode n)
+    {
+        return n;
+    }
+}
+</file>
+
 <file path="Analysis\FunctionResolver.cs">
 using System;
 using System.Collections.Generic;
@@ -428,13 +706,13 @@ public class FunctionResolver
         if (callee is VariableExpressionNode varNode)
         {
             // If inside a method, first try resolving as an implicit 'this' call.
-            if (currentFunction?.OwnerStructName != null)
+            if (currentFunction?.OwnerStructName is not null)
             {
                 var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(currentFunction);
-                if (ownerFqn != null)
+                if (ownerFqn is not null)
                 {
                     var method = ResolveMethod(ownerFqn, varNode.Identifier.Value);
-                    if (method != null)
+                    if (method is not null)
                     {
                         return method;
                     }
@@ -450,17 +728,17 @@ public class FunctionResolver
             var funcName = qNode.Member.Value;
             string? resolvedNamespace = qualifier;
             var aliased = context.Usings.FirstOrDefault(u => u.Alias == qualifier);
-            if (aliased != null) resolvedNamespace = aliased.Namespace;
+            if (aliased is not null) resolvedNamespace = aliased.Namespace;
 
             var globalFunctions = _program.CompilationUnits.SelectMany(cu => cu.Functions);
-            var func = globalFunctions.FirstOrDefault(f => f.OwnerStructName == null && f.Namespace == resolvedNamespace && f.Name == funcName);
-            if (func == null) throw new InvalidOperationException($"Function '{resolvedNamespace}::{funcName}' not found.");
+            var func = globalFunctions.FirstOrDefault(f => f.OwnerStructName is null && f.Namespace == resolvedNamespace && f.Name == funcName);
+            if (func is null) throw new InvalidOperationException($"Function '{resolvedNamespace}::{funcName}' not found.");
             return func;
         }
 
         // --- ENHANCED DEBUGGING EXCEPTION ---
         string parentInfo = "null";
-        if (callee.Parent != null)
+        if (callee.Parent is not null)
         {
             parentInfo = callee.Parent.GetType().Name;
             if (callee.Parent is CallExpressionNode callParent)
@@ -478,8 +756,8 @@ public class FunctionResolver
     private FunctionDeclarationNode ResolveFunctionByName(string name, string? currentNamespace, CompilationUnitNode context)
     {
         var globalFunctions = _program.CompilationUnits.SelectMany(cu => cu.Functions);
-        var candidates = globalFunctions.Where(f => f.OwnerStructName == null && f.Name == name)
-            .Where(f => f.Namespace == currentNamespace || f.Namespace == null || context.Usings.Any(u => u.Alias == null && u.Namespace == f.Namespace)).ToList();
+        var candidates = globalFunctions.Where(f => f.OwnerStructName is null && f.Name == name)
+            .Where(f => f.Namespace == currentNamespace || f.Namespace is null || context.Usings.Any(u => u.Alias is null && u.Namespace == f.Namespace)).ToList();
         if (candidates.Count == 0) throw new InvalidOperationException($"Function '{name}' could not be resolved in the current context.");
         if (candidates.Select(f => f.Namespace).Distinct().Count() > 1) throw new InvalidOperationException($"Function call '{name}' is ambiguous.");
         return candidates.First();
@@ -488,13 +766,13 @@ public class FunctionResolver
     public FunctionDeclarationNode? ResolveMethod(string ownerFqn, string name)
     {
         var structFqn = ownerFqn;
-        while (structFqn != null)
+        while (structFqn is not null)
         {
             var structDef = _typeRepository.FindStruct(structFqn);
-            if (structDef == null) return null; // Should not happen if ownerFqn is valid
+            if (structDef is null) return null; // Should not happen if ownerFqn is valid
 
             var method = structDef.Methods.FirstOrDefault(m => m.Name == name);
-            if (method != null) return method;
+            if (method is not null) return method;
 
             if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
 
@@ -514,7 +792,7 @@ public class FunctionResolver
     public ConstructorDeclarationNode? FindConstructor(string structFqn, List<string> argTypeFqns)
     {
         var structDef = _typeRepository.FindStruct(structFqn);
-        if (structDef == null) return null;
+        if (structDef is null) return null;
 
         var ctorUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
 
@@ -570,7 +848,7 @@ public class FunctionResolver
     public int? ResolveUnqualifiedEnumMember(string memberName, CompilationUnitNode context, string? currentContextNamespace)
     {
         var namespacesToCheck = new List<string?> { currentContextNamespace }
-            .Concat(context.Usings.Where(u => u.Alias == null).Select(u => u.Namespace))
+            .Concat(context.Usings.Where(u => u.Alias is null).Select(u => u.Namespace))
             .Append(null);
 
         foreach (var ns in namespacesToCheck.Distinct())
@@ -820,7 +1098,7 @@ public class SemanticAnalyzer
         {
             var structDef = _typeRepository.FindStruct(declaredTypeFqn);
 
-            if (structDef == null)
+            if (structDef is null)
             {
                 var token = decl.Type.GetFirstToken();
                 diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{declaredTypeFqn}' is not a struct and cannot be initialized with an initializer list.", token.Line, token.Column));
@@ -851,7 +1129,7 @@ public class SemanticAnalyzer
                 }
             }
         }
-        else if (decl.Initializer != null)
+        else if (decl.Initializer is not null)
         {
             // Analyze other initializers (e.g., assignment)
             var initializerType = AnalyzeExpressionType(decl.Initializer, context, diagnostics);
@@ -867,7 +1145,7 @@ public class SemanticAnalyzer
                 diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{initializerType}' to '{declaredTypeFqn}'.", AstHelper.GetFirstToken(decl.Initializer).Line, AstHelper.GetFirstToken(decl.Initializer).Column));
             }
         }
-        else if (decl.ConstructorArguments != null)
+        else if (decl.ConstructorArguments is not null)
         {
             foreach (var arg in decl.ConstructorArguments)
             {
@@ -889,7 +1167,7 @@ public class SemanticAnalyzer
     {
         var funcReturnType = GetFunctionReturnType(context.CurrentFunction, context);
 
-        if (ret.Expression == null)
+        if (ret.Expression is null)
         {
             if (funcReturnType != "void")
             {
@@ -979,7 +1257,7 @@ public class SemanticAnalyzerRunner
                 {
                     foreach (var function in unit.Functions.ToList())
                     {
-                        if (function.Body == null) continue;
+                        if (function.Body is null) continue;
                         var symbols = new SymbolTable(function, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                         var context = new AnalysisContext(symbols, unit, function);
                         WalkStatement(function.Body, context);
@@ -997,7 +1275,7 @@ public class SemanticAnalyzerRunner
 
                         foreach (var method in s.Methods.ToList())
                         {
-                            if (method.Body == null) continue;
+                            if (method.Body is null) continue;
                             var symbols = new SymbolTable(method, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                             var context = new AnalysisContext(symbols, unit, method);
                             WalkStatement(method.Body, context);
@@ -1049,7 +1327,7 @@ public class SemanticAnalyzerRunner
     private void CheckForUnusedVariables(FunctionDeclarationNode function, AnalysisContext context)
     {
         var localDeclarations = new List<DeclarationStatementNode>();
-        if (function.Body != null)
+        if (function.Body is not null)
         {
             FindAllDeclarations(function.Body, localDeclarations);
         }
@@ -1082,7 +1360,7 @@ public class SemanticAnalyzerRunner
                 break;
             case IfStatementNode i:
                 FindAllDeclarations(i.ThenBody, declarations);
-                if (i.ElseBody != null) FindAllDeclarations(i.ElseBody, declarations);
+                if (i.ElseBody is not null) FindAllDeclarations(i.ElseBody, declarations);
                 break;
             case WhileStatementNode w:
                 FindAllDeclarations(w.Body, declarations);
@@ -1130,7 +1408,7 @@ public class SemanticAnalyzerRunner
             case IfStatementNode ifStmt:
                 _analyzer.AnalyzeExpressionType(ifStmt.Condition, context, Diagnostics);
                 WalkStatement(ifStmt.ThenBody, context);
-                if (ifStmt.ElseBody != null) WalkStatement(ifStmt.ElseBody, context);
+                if (ifStmt.ElseBody is not null) WalkStatement(ifStmt.ElseBody, context);
                 break;
             case WhileStatementNode whileStmt:
                 _analyzer.AnalyzeExpressionType(whileStmt.Condition, context, Diagnostics);
@@ -1222,26 +1500,26 @@ public class TypeResolver
             var nsPart = parts[0];
             var typeName = parts[1];
             var aliased = context.Usings.FirstOrDefault(u => u.Alias == nsPart);
-            if (aliased != null)
+            if (aliased is not null)
             {
                 var fqn = $"{aliased.Namespace}::{typeName}";
-                return _typeRepository.FindStruct(fqn) != null ? fqn : throw new InvalidOperationException($"Type '{name}' with aliased namespace '{nsPart}' not found.");
+                return _typeRepository.FindStruct(fqn) is not null ? fqn : throw new InvalidOperationException($"Type '{name}' with aliased namespace '{nsPart}' not found.");
             }
-            return _typeRepository.FindStruct(name) != null ? name : throw new InvalidOperationException($"Type '{name}' not found.");
+            return _typeRepository.FindStruct(name) is not null ? name : throw new InvalidOperationException($"Type '{name}' not found.");
         }
 
         var candidates = new List<string>();
-        if (currentNamespace != null)
+        if (currentNamespace is not null)
         {
             var fqn = $"{currentNamespace}::{name}";
-            if (_typeRepository.FindStruct(fqn) != null) candidates.Add(fqn);
+            if (_typeRepository.FindStruct(fqn) is not null) candidates.Add(fqn);
         }
-        foreach (var u in context.Usings.Where(u => u.Alias == null))
+        foreach (var u in context.Usings.Where(u => u.Alias is null))
         {
             string fqn = $"{u.Namespace}::{name}";
-            if (_typeRepository.FindStruct(fqn) != null) candidates.Add(fqn);
+            if (_typeRepository.FindStruct(fqn) is not null) candidates.Add(fqn);
         }
-        if (_typeRepository.FindStruct(name) != null) candidates.Add(name);
+        if (_typeRepository.FindStruct(name) is not null) candidates.Add(name);
 
         if (candidates.Count == 0) throw new InvalidOperationException($"Type '{name}' could not be resolved in the current context.");
         if (candidates.Distinct().Count() > 1) throw new InvalidOperationException($"Type '{name}' is ambiguous between: {string.Join(", ", candidates.Distinct())}");
@@ -1254,18 +1532,18 @@ public class TypeResolver
         {
             var parts = name.Split("::");
             var aliased = context.Usings.FirstOrDefault(u => u.Alias == parts[0]);
-            var fqn = aliased != null ? $"{aliased.Namespace}::{parts[1]}" : name;
-            return _typeRepository.FindEnum(fqn) != null ? fqn : null;
+            var fqn = aliased is not null ? $"{aliased.Namespace}::{parts[1]}" : name;
+            return _typeRepository.FindEnum(fqn) is not null ? fqn : null;
         }
 
         var namespacesToCheck = new List<string?> { currentNamespace }
-            .Concat(context.Usings.Where(u => u.Alias == null).Select(u => u.Namespace))
+            .Concat(context.Usings.Where(u => u.Alias is null).Select(u => u.Namespace))
             .Append(null);
 
         foreach (var ns in namespacesToCheck.Distinct())
         {
-            var fqn = ns != null ? $"{ns}::{name}" : name;
-            if (_typeRepository.FindEnum(fqn) != null) return fqn;
+            var fqn = ns is not null ? $"{ns}::{name}" : name;
+            if (_typeRepository.FindEnum(fqn) is not null) return fqn;
         }
 
         return null;
@@ -1288,7 +1566,7 @@ public abstract record AstNode
     public IEnumerable<AstNode> Ancestors()
     {
         var current = Parent;
-        while (current != null)
+        while (current is not null)
         {
             yield return current;
             current = current.Parent;
@@ -1615,7 +1893,7 @@ public class CodeGenerator
         FindAllStringLiterals(Program);
 
         foreach (var unit in Program.CompilationUnits)
-            foreach (var f in unit.Functions.Where(f => f.Body == null))
+            foreach (var f in unit.Functions.Where(f => f.Body is null))
             {
                 ExternalFunctions.Add(f.Name);
             }
@@ -1631,7 +1909,7 @@ public class CodeGenerator
 
         foreach (var unit in Program.CompilationUnits)
         {
-            foreach (var function in unit.Functions.Where(f => f.Body != null))
+            foreach (var function in unit.Functions.Where(f => f.Body is not null))
             {
                 _declarationGenerator.GenerateFunction(function, unit, null);
                 Builder.AppendBlankLine();
@@ -1639,7 +1917,7 @@ public class CodeGenerator
 
             foreach (var s in unit.Structs)
             {
-                foreach (var method in s.Methods.Where(m => m.Body != null))
+                foreach (var method in s.Methods.Where(m => m.Body is not null))
                 {
                     _declarationGenerator.GenerateFunction(method, unit, s);
                     Builder.AppendBlankLine();
@@ -1748,7 +2026,7 @@ public class DeclarationGenerator
         Builder.AppendLabel(NameMangler.Mangle(ctor));
         GeneratePrologue(symbols);
 
-        if (ctor.Initializer != null)
+        if (ctor.Initializer is not null)
         {
             var ownerStruct = TypeRepository.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
 
@@ -1822,7 +2100,7 @@ public class DeclarationGenerator
         Builder.AppendLabel(mangledName);
         GeneratePrologue(symbols);
 
-        if (function.Body != null) StatementGenerator.GenerateStatement(function.Body, context);
+        if (function.Body is not null) StatementGenerator.GenerateStatement(function.Body, context);
 
         GenerateEpilogue(destructibleLocals);
     }
@@ -1852,7 +2130,7 @@ public class DeclarationGenerator
             foreach (var (name, offset, type) in destructibleLocals.AsEnumerable().Reverse())
             {
                 var dtor = FunctionResolver.FindDestructor(type);
-                if (dtor != null)
+                if (dtor is not null)
                 {
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of '{name}' for dtor");
                     Builder.AppendInstruction("push eax");
@@ -2039,7 +2317,7 @@ public class FasmWriter
                 .Select(i => i.LibraryName)
                 .FirstOrDefault(lib => lib != "kernel32.dll" && lib != "msvcrt.dll");
 
-            if (ownerLib != null)
+            if (ownerLib is not null)
             {
                 libraries[ownerLib].Add(funcName);
             }
@@ -2137,7 +2415,7 @@ public class LValueGenerator
             return;
         }
 
-        if (context.CurrentFunction?.OwnerStructName != null)
+        if (context.CurrentFunction?.OwnerStructName is not null)
         {
             try
             {
@@ -2214,7 +2492,7 @@ public class MemoryLayoutManager
         {
             int size = 0;
             var structUnit = _typeRepository.GetCompilationUnitForStruct(typeNameFqn);
-            if (structDef.BaseStructName != null)
+            if (structDef.BaseStructName is not null)
             {
                 var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
                 string baseFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, structUnit);
@@ -2272,7 +2550,7 @@ public class MemoryLayoutManager
         var allMembers = new List<(string, string, int, bool)>();
         int currentOffset = 0;
 
-        if (structDef.BaseStructName != null)
+        if (structDef.BaseStructName is not null)
         {
             var structUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
             var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
@@ -2330,7 +2608,7 @@ public static class NameMangler
     {
         var ownerName = f.OwnerStructName;
         // If the owner is a mangled generic name already, don't re-mangle it.
-        if (ownerName != null && ownerName.Contains("__"))
+        if (ownerName is not null && ownerName.Contains("__"))
         {
             return $"_{ownerName}_{f.Name}";
         }
@@ -2479,7 +2757,7 @@ public class StatementGenerator
                     {
                         // The temporary is on the stack but its value is unused. We must destroy it.
                         var tempDtor = FunctionResolver.FindDestructor(exprType);
-                        if (tempDtor != null)
+                        if (tempDtor is not null)
                         {
                             Builder.AppendInstruction(null, "Destroying temporary from expression statement");
                             Builder.AppendInstruction("lea eax, [esp]"); // Address of temporary is at ESP
@@ -2526,7 +2804,7 @@ public class StatementGenerator
         else
         {
             var dtor = FunctionResolver.FindDestructor(objectType);
-            if (dtor != null)
+            if (dtor is not null)
             {
                 Builder.AppendInstruction("push edi", "Push 'this' pointer for non-virtual dtor call");
                 Builder.AppendInstruction($"call {NameMangler.Mangle(dtor)}");
@@ -2554,7 +2832,7 @@ public class StatementGenerator
                 Builder.AppendInstruction($"mov dword [eax], {vtableLabel}", "Set vtable pointer");
             }
 
-            if (decl.ConstructorArguments != null) // e.g. string s("hello");
+            if (decl.ConstructorArguments is not null) // e.g. string s("hello");
             {
                 var argTypes = decl.ConstructorArguments
                     .Select(arg => _context.SemanticAnalyzer.AnalyzeExpressionType(arg, context))
@@ -2574,7 +2852,7 @@ public class StatementGenerator
                 Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
                 Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
             }
-            else if (decl.Initializer != null)
+            else if (decl.Initializer is not null)
             {
                 if (decl.Initializer is InitializerListExpressionNode initList) // e.g. MyStruct s = {1, 2};
                 {
@@ -2609,17 +2887,17 @@ public class StatementGenerator
                         var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType });
 
                         bool takeAddressOfInitializer = false;
-                        if (ctor == null && TypeRepository.IsStruct(initializerType))
+                        if (ctor is null && TypeRepository.IsStruct(initializerType))
                         {
                             // Try to find a copy constructor that takes a pointer, e.g. string(string*)
                             ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType + "*" });
-                            if (ctor != null)
+                            if (ctor is not null)
                             {
                                 takeAddressOfInitializer = true;
                             }
                         }
 
-                        if (ctor == null)
+                        if (ctor is null)
                         {
                             throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
                         }
@@ -2647,7 +2925,7 @@ public class StatementGenerator
                             _context.TypeRepository.IsStruct(initializerType) && !initializerType.EndsWith("*"))
                         {
                             var tempDtor = FunctionResolver.FindDestructor(initializerType);
-                            if (tempDtor != null)
+                            if (tempDtor is not null)
                             {
                                 Builder.AppendInstruction(null, "Destroying temporary from initialization");
                                 Builder.AppendInstruction("lea eax, [esp]");
@@ -2673,7 +2951,7 @@ public class StatementGenerator
             else // Default constructor call, e.g. List textObjects;
             {
                 var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string>());
-                if (ctor != null)
+                if (ctor is not null)
                 {
                     Builder.AppendInstruction(null, $"Calling default constructor for {variableName}");
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
@@ -2683,7 +2961,7 @@ public class StatementGenerator
                 }
             }
         }
-        else if (decl.Initializer != null) // Primitive types
+        else if (decl.Initializer is not null) // Primitive types
         {
             ExpressionGenerator.GenerateExpression(decl.Initializer, context);
             if (MemoryLayoutManager.GetSizeOfType(varTypeFqn, context.CompilationUnit) == 1)
@@ -2698,7 +2976,7 @@ public class StatementGenerator
         var returnTypeFqn = _context.SemanticAnalyzer.GetFunctionReturnType(context.CurrentFunction, context);
         if (TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
-            if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");
+            if (ret.Expression is null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");
 
             // Get the address of the local object being returned (e.g. &result)
             ExpressionGenerator.GenerateExpression(ret.Expression, context);
@@ -2711,7 +2989,7 @@ public class StatementGenerator
             // Find a copy constructor, e.g. string(string*)
             var copyCtor = FunctionResolver.FindConstructor(returnTypeFqn, new List<string> { returnTypeFqn + "*" });
 
-            if (copyCtor != null)
+            if (copyCtor is not null)
             {
                 Builder.AppendInstruction(null, "Calling copy constructor for return value");
                 Builder.AppendInstruction("push esi", "Push source pointer argument");
@@ -2733,7 +3011,7 @@ public class StatementGenerator
         else
         {
             // Handle return for primitive types
-            if (ret.Expression != null) ExpressionGenerator.GenerateExpression(ret.Expression, context);
+            if (ret.Expression is not null) ExpressionGenerator.GenerateExpression(ret.Expression, context);
         }
 
         // The actual `ret` instruction is in the epilogue to ensure destructors are called.
@@ -2756,9 +3034,9 @@ public class StatementGenerator
         int idx = _context.GetNextLabelId();
         ExpressionGenerator.GenerateExpression(i.Condition, context);
         Builder.AppendInstruction("cmp eax, 0");
-        Builder.AppendInstruction(i.ElseBody != null ? $"je _if_else_{idx}" : $"je _if_end_{idx}");
+        Builder.AppendInstruction(i.ElseBody is not null ? $"je _if_else_{idx}" : $"je _if_end_{idx}");
         GenerateStatement(i.ThenBody, context);
-        if (i.ElseBody != null)
+        if (i.ElseBody is not null)
         {
             Builder.AppendInstruction($"jmp _if_end_{idx}");
             Builder.AppendLabel($"_if_else_{idx}");
@@ -2801,7 +3079,7 @@ public class SymbolTable
         // If the owner's name is mangled, it's already an FQN. Otherwise, construct the FQN.
         string thisTypeName = ctor.OwnerStructName.Contains("__")
             ? ctor.OwnerStructName
-            : (ctor.Namespace != null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName);
+            : (ctor.Namespace is not null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName);
 
         var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
         var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
@@ -2820,7 +3098,7 @@ public class SymbolTable
         // If the owner's name is mangled, it's already an FQN. Otherwise, construct the FQN.
         string thisTypeName = dtor.OwnerStructName.Contains("__")
             ? dtor.OwnerStructName
-            : (dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName);
+            : (dtor.Namespace is not null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName);
 
         var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
         var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
@@ -2889,7 +3167,7 @@ public class SymbolTable
 
     private void CollectDeclarations(AstNode? node, List<DeclarationStatementNode> declarations)
     {
-        if (node == null) return;
+        if (node is null) return;
         if (node is DeclarationStatementNode decl) declarations.Add(decl);
         else if (node is BlockStatementNode block) foreach (var stmt in block.Statements) CollectDeclarations(stmt, declarations);
         else if (node is IfStatementNode ifStmt) { CollectDeclarations(ifStmt.ThenBody, declarations); CollectDeclarations(ifStmt.ElseBody, declarations); }
@@ -2901,7 +3179,7 @@ public class SymbolTable
         var result = new List<(string, int, string)>();
         foreach (var (name, (offset, type, _, _)) in _symbols)
         {
-            if (offset < 0 && functionResolver.FindDestructor(type) != null) // Locals have negative offset
+            if (offset < 0 && functionResolver.FindDestructor(type) is not null) // Locals have negative offset
             {
                 result.Add((name, offset, type));
             }
@@ -2972,12 +3250,12 @@ public class TypeRepository
         _structUnitMap[fqn] = originalUnit;
     }
 
-    public static string GetFullyQualifiedName(StructDefinitionNode s) => s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name;
-    public static string GetFullyQualifiedName(EnumDefinitionNode e) => e.Namespace != null ? $"{e.Namespace}::{e.Name}" : e.Name;
+    public static string GetFullyQualifiedName(StructDefinitionNode s) => s.Namespace is not null ? $"{s.Namespace}::{s.Name}" : s.Name;
+    public static string GetFullyQualifiedName(EnumDefinitionNode e) => e.Namespace is not null ? $"{e.Namespace}::{e.Name}" : e.Name;
 
     public string? GetFullyQualifiedOwnerName(FunctionDeclarationNode func)
     {
-        if (func.OwnerStructName == null) return null;
+        if (func.OwnerStructName is null) return null;
 
         // If the owner's name is mangled (contains "__"), it's already the FQN.
         if (func.OwnerStructName.Contains("__"))
@@ -2986,7 +3264,7 @@ public class TypeRepository
         }
 
         // Otherwise, construct the FQN from the namespace and name.
-        return func.Namespace != null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName;
+        return func.Namespace is not null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName;
     }
 
     public StructDefinitionNode? FindStruct(string qualifiedName) => _structs.TryGetValue(qualifiedName, out var def) ? def : null;
@@ -2996,7 +3274,7 @@ public class TypeRepository
         // Handle already-mangled names from monomorphization
         if (name.Contains("__")) return FindStruct(name);
 
-        var fqn = currentNamespace != null ? $"{currentNamespace}::{name}" : name;
+        var fqn = currentNamespace is not null ? $"{currentNamespace}::{name}" : name;
         if (_structs.TryGetValue(fqn, out var def)) return def;
         return _structs.TryGetValue(name, out def) ? def : null;
     }
@@ -3050,7 +3328,7 @@ public class VTableManager
         if (_hasVTableCache.TryGetValue(structFqn, out var hasVTable)) return hasVTable;
 
         var structDef = _typeRepository.FindStruct(structFqn);
-        if (structDef == null) return false;
+        if (structDef is null) return false;
 
         bool result = structDef.Methods.Any(m => m.IsVirtual) || structDef.Destructors.Any(d => d.IsVirtual);
         if (result)
@@ -3059,7 +3337,7 @@ public class VTableManager
             return true;
         }
 
-        if (structDef.BaseStructName != null)
+        if (structDef.BaseStructName is not null)
         {
             var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
             var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
@@ -3078,7 +3356,7 @@ public class VTableManager
         var structDef = _typeRepository.FindStruct(structFqn) ?? throw new InvalidOperationException($"Struct {structFqn} not found.");
 
         var newVTable = new List<AstNode>();
-        if (structDef.BaseStructName != null)
+        if (structDef.BaseStructName is not null)
         {
             var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
             var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
@@ -3091,7 +3369,7 @@ public class VTableManager
         // A derived dtor is implicitly virtual if the base is virtual.
         bool isBaseDtorVirtual = newVTable.FirstOrDefault() is DestructorDeclarationNode;
 
-        if (dtor != null && (dtor.IsVirtual || isBaseDtorVirtual))
+        if (dtor is not null && (dtor.IsVirtual || isBaseDtorVirtual))
         {
             // If the base had a virtual dtor, we override it.
             if (isBaseDtorVirtual)
@@ -3274,7 +3552,7 @@ internal class ExpressionParser
         if (_parser.Current.Type != TokenType.RightBrace)
         {
             do { values.Add(ParseExpression()); }
-            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
         }
         _parser.Eat(TokenType.RightBrace);
         return new InitializerListExpressionNode(openingBrace, values);
@@ -3383,7 +3661,7 @@ internal class ExpressionParser
         if (_parser.Current.Type != TokenType.RightParen)
         {
             do { arguments.Add(ParseExpression()); }
-            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
         }
         _parser.Eat(TokenType.RightParen);
 
@@ -3402,7 +3680,7 @@ internal class ExpressionParser
                 if (_parser.Current.Type != TokenType.RightParen)
                 {
                     do { arguments.Add(ParseExpression()); }
-                    while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+                    while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
                 }
                 _parser.Eat(TokenType.RightParen);
                 expr = new CallExpressionNode(expr, arguments);
@@ -3489,7 +3767,7 @@ internal class FunctionParser
     {
         var parameters = ParseParameterList();
 
-        if (isMethod && ownerStructName != null)
+        if (isMethod && ownerStructName is not null)
         {
             // The `this` pointer type will be resolved later during semantic analysis.
             // For now, we create a placeholder.
@@ -3523,7 +3801,7 @@ internal class FunctionParser
                 var paramType = _parser.ParseTypeNode();
                 var paramName = _parser.Eat(TokenType.Identifier);
                 parameters.Add(new ParameterNode(paramType, paramName));
-            } while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+            } while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
         }
         _parser.Eat(TokenType.RightParen);
         return parameters;
@@ -3740,7 +4018,7 @@ public class Parser
             Eat(TokenType.LessThan);
             var typeArgs = new List<TypeNode>();
             do { typeArgs.Add(ParseTypeNode()); }
-            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) is not null);
             Eat(TokenType.GreaterThan);
             typeNode = new GenericInstantiationTypeNode(baseTypeToken, typeArgs);
         }
@@ -3909,7 +4187,7 @@ internal class StatementParser
             if (_parser.Current.Type != TokenType.RightParen)
             {
                 do { ctorArgs.Add(_expressionParser.ParseExpression()); }
-                while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+                while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
             }
             _parser.Eat(TokenType.RightParen);
         }
@@ -3973,7 +4251,7 @@ internal class StructParser
         {
             _parser.Eat(TokenType.LessThan);
             do { genericParameters.Add(_parser.Eat(TokenType.Identifier)); }
-            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
             _parser.Eat(TokenType.GreaterThan);
         }
 
@@ -4113,7 +4391,7 @@ internal class StructParser
         BaseInitializerNode? baseInitializer = null;
         if (_parser.Current.Type == TokenType.Colon)
         {
-            if (baseStructName == null) _parser.ReportError($"Struct '{ownerStructName}' cannot have a base initializer because it does not inherit from another struct.", nameToken);
+            if (baseStructName is null) _parser.ReportError($"Struct '{ownerStructName}' cannot have a base initializer because it does not inherit from another struct.", nameToken);
             _parser.Eat(TokenType.Colon);
             var baseName = _parser.Eat(TokenType.Identifier);
             // No error here, Eat will report if baseName.Value != baseStructName
@@ -4123,7 +4401,7 @@ internal class StructParser
             if (_parser.Current.Type != TokenType.RightParen)
             {
                 do { arguments.Add(_expressionParser.ParseExpression()); }
-                while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+                while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
             }
             _parser.Eat(TokenType.RightParen);
             baseInitializer = new BaseInitializerNode(arguments);
@@ -4480,7 +4758,7 @@ public class BinaryExpressionAnalyzer : ExpressionAnalyzerBase
                 var opName = $"operator_{NameMangler.MangleOperator(bin.Operator.Value)}";
                 var overload = _functionResolver.ResolveMethod(leftTypeFqn, opName);
 
-                if (overload != null)
+                if (overload is not null)
                 {
                     return _semanticAnalyzer.GetFunctionReturnType(overload, context);
                 }
@@ -4536,7 +4814,7 @@ public class CallExpressionAnalyzer : ExpressionAnalyzerBase
         }
 
         // ** ENFORCE ACCESS SPECIFIER FOR METHODS **
-        if (func.OwnerStructName != null && func.AccessLevel == AccessSpecifier.Private)
+        if (func.OwnerStructName is not null && func.AccessLevel == AccessSpecifier.Private)
         {
             var definingStructFqn = _typeRepository.GetFullyQualifiedOwnerName(func);
             var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction);
@@ -4553,7 +4831,7 @@ public class CallExpressionAnalyzer : ExpressionAnalyzerBase
         }
 
         // ** VALIDATE ARGUMENT COUNT **
-        int expectedArgs = func.OwnerStructName != null
+        int expectedArgs = func.OwnerStructName is not null
             ? func.Parameters.Count - 1 // Don't count implicit 'this'
             : func.Parameters.Count;
 
@@ -4707,24 +4985,24 @@ public class MemberAccessExpressionAnalyzer : ExpressionAnalyzerBase
         PropertyDefinitionNode? property = null;
         StructDefinitionNode? definingStruct = null;
 
-        while (currentStructFqn != null)
+        while (currentStructFqn is not null)
         {
             var structDef = _typeRepository.FindStruct(currentStructFqn);
-            if (structDef == null)
+            if (structDef is null)
             {
                 diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{baseStructType}' is not a struct and has no members.", AstHelper.GetFirstToken(ma.Left).Line, AstHelper.GetFirstToken(ma.Left).Column));
                 return "unknown";
             }
 
             member = structDef.Members.FirstOrDefault(m => m.Name.Value == ma.Member.Value);
-            if (member != null)
+            if (member is not null)
             {
                 definingStruct = structDef;
                 break;
             }
 
             property = structDef.Properties.FirstOrDefault(p => p.Name.Value == ma.Member.Value);
-            if (property != null)
+            if (property is not null)
             {
                 definingStruct = structDef;
                 break;
@@ -4737,13 +5015,13 @@ public class MemberAccessExpressionAnalyzer : ExpressionAnalyzerBase
             currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
         }
 
-        if (member == null && property == null)
+        if (member is null && property is null)
         {
             diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{baseStructType}' has no member or property named '{ma.Member.Value}'.", ma.Member.Line, ma.Member.Column));
             return "unknown";
         }
 
-        if (member != null)
+        if (member is not null)
         {
             if (member.AccessLevel == AccessSpecifier.Private)
             {
@@ -4876,7 +5154,7 @@ public class QualifiedAccessExpressionAnalyzer : ExpressionAnalyzerBase
 
         // 1. Try to resolve as an enum member (e.g., raylib::KeyboardKey::KEY_D)
         string? enumTypeFQN = _typeResolver.ResolveEnumTypeName(qualifier, context.CurrentFunction?.Namespace, context.CompilationUnit);
-        if (enumTypeFQN != null)
+        if (enumTypeFQN is not null)
         {
             if (_functionResolver.GetEnumValue(enumTypeFQN, memberName).HasValue)
             {
@@ -5033,7 +5311,7 @@ public class VariableExpressionAnalyzer : ExpressionAnalyzerBase
         }
 
         // 3. If in a method, try resolving as an implicit `this->member`.
-        if (context.CurrentFunction?.OwnerStructName != null)
+        if (context.CurrentFunction?.OwnerStructName is not null)
         {
             string ownerStructFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
 
@@ -5042,13 +5320,13 @@ public class VariableExpressionAnalyzer : ExpressionAnalyzerBase
             MemberVariableNode? member = null;
             StructDefinitionNode? definingStruct = null;
 
-            while (currentStructFqn != null)
+            while (currentStructFqn is not null)
             {
                 var structDef = _typeRepository.FindStruct(currentStructFqn);
-                if (structDef == null) break;
+                if (structDef is null) break;
 
                 member = structDef.Members.FirstOrDefault(m => m.Name.Value == v.Identifier.Value);
-                if (member != null)
+                if (member is not null)
                 {
                     definingStruct = structDef;
                     break;
@@ -5061,7 +5339,7 @@ public class VariableExpressionAnalyzer : ExpressionAnalyzerBase
                 currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
             }
 
-            if (member != null && definingStruct != null)
+            if (member is not null && definingStruct is not null)
             {
                 context.Symbols.MarkAsRead("this");
                 if (member.AccessLevel == AccessSpecifier.Private)
@@ -5261,7 +5539,7 @@ public class CallExpressionHandler : ExpressionHandlerBase
         }
 
         // Phase 4: Push `this` pointer (if it's a method) and dispatch the call.
-        bool isMethodCall = func.OwnerStructName != null;
+        bool isMethodCall = func.OwnerStructName is not null;
         if (isMethodCall)
         {
             if (callExpr.Callee is MemberAccessExpressionNode ma)
@@ -5298,8 +5576,8 @@ public class CallExpressionHandler : ExpressionHandlerBase
         else
         {
             // Global function dispatch
-            string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
-            if (func.Body == null) ExternalFunctions.Add(func.Name);
+            string calleeTarget = func.Body is null ? $"[{func.Name}]" : NameMangler.Mangle(func);
+            if (func.Body is null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
         }
 
@@ -5465,7 +5743,7 @@ public class QualifiedAccessExpressionHandler : ExpressionHandlerBase
         string potentialEnumTypeName = TypeResolver.ResolveQualifier(qNode.Left);
         string memberName = qNode.Member.Value;
         string? enumTypeFQN = TypeResolver.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction?.Namespace, context.CompilationUnit);
-        if (enumTypeFQN != null)
+        if (enumTypeFQN is not null)
         {
             var enumValue = FunctionResolver.GetEnumValue(enumTypeFQN, memberName);
             if (enumValue.HasValue)
@@ -5476,8 +5754,8 @@ public class QualifiedAccessExpressionHandler : ExpressionHandlerBase
         }
 
         var func = FunctionResolver.ResolveFunctionCall(qNode, context);
-        string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
-        if (func.Body == null) ExternalFunctions.Add(func.Name);
+        string calleeTarget = func.Body is null ? $"[{func.Name}]" : NameMangler.Mangle(func);
+        if (func.Body is null) ExternalFunctions.Add(func.Name);
         Builder.AppendInstruction($"mov eax, {calleeTarget}");
     }
 }
@@ -5590,7 +5868,7 @@ public class VariableExpressionHandler : ExpressionHandlerBase
             return;
         }
 
-        if (context.CurrentFunction?.OwnerStructName != null)
+        if (context.CurrentFunction?.OwnerStructName is not null)
         {
             // Re-route implicit `this->member` access to the member access handler.
             var thisExpr = new VariableExpressionNode(new Token(TokenType.Identifier, "this", -1, -1));
@@ -5620,7 +5898,7 @@ void printf(char* format, int value);
 
 int main() 
 {
-    const int screenWidth = 800;
+    const int screenWidth = 800 + 0;
     const int screenHeight = 600;
 
     rl::InitWindow(screenWidth, screenHeight, "CTilde Generic List Demo");

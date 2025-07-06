@@ -1,6 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using CTilde.Diagnostics;
+﻿using CTilde.Diagnostics;
 
 namespace CTilde.Analysis.ExpressionAnalyzers;
 
@@ -18,11 +16,11 @@ public class AssignmentExpressionAnalyzer : ExpressionAnalyzerBase
     {
         var a = (AssignmentExpressionNode)expr;
 
-        var leftType = _semanticAnalyzer.AnalyzeExpressionType(a.Left, context, diagnostics);
-        var rightType = _semanticAnalyzer.AnalyzeExpressionType(a.Right, context, diagnostics);
+        string leftType = _semanticAnalyzer.AnalyzeExpressionType(a.Left, context, diagnostics);
+        string rightType = _semanticAnalyzer.AnalyzeExpressionType(a.Right, context, diagnostics);
 
         // Allow int to pointer conversion (for malloc etc)
-        bool isIntToPointerConversion = leftType.EndsWith("*") && rightType == "int";
+        bool isIntToPointerConversion = leftType.EndsWith('*') && rightType == "int";
         // Allow int literal to char conversion
         bool isIntToCharLiteralConversion = leftType == "char" && rightType == "int" && a.Right is IntegerLiteralNode;
         // HACK: Allow assignments to/from a generic type parameter inside a monomorphized method.
@@ -31,8 +29,8 @@ public class AssignmentExpressionAnalyzer : ExpressionAnalyzerBase
 
         if (rightType != "unknown" && leftType != "unknown" && leftType != rightType && !isIntToPointerConversion && !isIntToCharLiteralConversion && !isGenericAssignment)
         {
-            var token = AstHelper.GetFirstToken(a.Right);
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{rightType}' to '{leftType}'.", token.Line, token.Column));
+            Token token = AstHelper.GetFirstToken(a.Right);
+            diagnostics.Add(new(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{rightType}' to '{leftType}'.", token.Line, token.Column));
         }
 
         return leftType; // Type of assignment is type of l-value

@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using CTilde.Diagnostics;
+﻿using CTilde.Diagnostics;
 
 namespace CTilde.Analysis.ExpressionAnalyzers;
 
@@ -19,67 +16,81 @@ public class BinaryExpressionAnalyzer : ExpressionAnalyzerBase
     {
         var bin = (BinaryExpressionNode)expr;
 
-        var leftTypeFqn = _semanticAnalyzer.AnalyzeExpressionType(bin.Left, context, diagnostics);
-        var rightTypeFqn = _semanticAnalyzer.AnalyzeExpressionType(bin.Right, context, diagnostics);
+        string leftTypeFqn = _semanticAnalyzer.AnalyzeExpressionType(bin.Left, context, diagnostics);
+        string rightTypeFqn = _semanticAnalyzer.AnalyzeExpressionType(bin.Right, context, diagnostics);
 
-        if (leftTypeFqn == "unknown" || rightTypeFqn == "unknown") return "unknown";
-
-        // Handle pointer arithmetic
-        if (bin.Operator.Type is TokenType.Plus or TokenType.Minus)
+        if (leftTypeFqn == "unknown" || rightTypeFqn == "unknown")
         {
-            if (leftTypeFqn.EndsWith("*") && rightTypeFqn == "int")
-            {
-                return leftTypeFqn; // e.g., char* + int -> char*
-            }
-            if (leftTypeFqn == "int" && rightTypeFqn.EndsWith("*") && bin.Operator.Type == TokenType.Plus)
-            {
-                return rightTypeFqn; // e.g., int + char* -> char*
-            }
-            // Pointer subtraction (ptr - ptr -> int)
-            if (leftTypeFqn.EndsWith("*") && rightTypeFqn.EndsWith("*") && bin.Operator.Type == TokenType.Minus)
-            {
-                // TODO: Check if base types are compatible
-                return "int";
-            }
+            return "unknown";
         }
 
-        // Handle pointer comparisons
-        if (bin.Operator.Type is TokenType.DoubleEquals or TokenType.NotEquals or TokenType.LessThan or TokenType.GreaterThan)
+        string? pointerOperationResult = AnalyzePointerOperation(bin.Operator.Type, leftTypeFqn, rightTypeFqn);
+        if (pointerOperationResult is not null)
         {
-            bool leftIsPtr = leftTypeFqn.EndsWith("*");
-            bool rightIsPtr = rightTypeFqn.EndsWith("*");
-            bool leftIsInt = leftTypeFqn == "int";
-            bool rightIsInt = rightTypeFqn == "int";
-
-            // Allow ptr <=> ptr and ptr <=> int
-            if ((leftIsPtr && rightIsPtr) || (leftIsPtr && rightIsInt) || (leftIsInt && rightIsPtr))
-            {
-                return "int"; // Result of any comparison is an int.
-            }
+            return pointerOperationResult;
         }
 
         if (_typeRepository.IsStruct(leftTypeFqn))
         {
-            try
-            {
-                var opName = $"operator_{NameMangler.MangleOperator(bin.Operator.Value)}";
-                var overload = _functionResolver.ResolveMethod(leftTypeFqn, opName);
-
-                if (overload is not null)
-                {
-                    return _semanticAnalyzer.GetFunctionReturnType(overload, context);
-                }
-            }
-            catch (NotImplementedException)
-            {
-                // This operator is not overloadable.
-            }
-            // Error handling for missing operator overload
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Operator '{bin.Operator.Value}' is not defined for type '{leftTypeFqn}'.", bin.Operator.Line, bin.Operator.Column));
-            return "unknown"; // Sentinel type
+            return AnalyzeStructOperatorOverloading(bin, leftTypeFqn, context, diagnostics);
         }
 
-        // For other primitive operations (int + int, comparisons, etc.), the result is always int.
         return "int";
+    }
+
+    private static string? AnalyzePointerOperation(TokenType opType, string leftTypeFqn, string rightTypeFqn)
+    {
+        bool leftIsPtr = leftTypeFqn.EndsWith("*");
+        bool rightIsPtr = rightTypeFqn.EndsWith("*");
+        bool leftIsInt = leftTypeFqn == "int";
+        bool rightIsInt = rightTypeFqn == "int";
+
+        if (opType is TokenType.Plus or TokenType.Minus)
+        {
+            if (leftIsPtr && rightIsInt)
+            {
+                return leftTypeFqn;
+            }
+
+            if (leftIsInt && rightIsPtr && opType == TokenType.Plus)
+            {
+                return rightTypeFqn;
+            }
+
+            if (leftIsPtr && rightIsPtr && opType == TokenType.Minus)
+            {
+                return "int";
+            }
+        }
+
+        if (opType is TokenType.DoubleEquals or TokenType.NotEquals or TokenType.LessThan or TokenType.GreaterThan)
+        {
+            if (leftIsPtr && rightIsPtr || leftIsPtr && rightIsInt || leftIsInt && rightIsPtr)
+            {
+                return "int";
+            }
+        }
+
+        return null;
+    }
+
+    private string AnalyzeStructOperatorOverloading(BinaryExpressionNode bin, string typeFqn, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        try
+        {
+            string opName = $"operator_{NameMangler.MangleOperator(bin.Operator.Value)}";
+            FunctionDeclarationNode? overload = _functionResolver.ResolveMethod(typeFqn, opName);
+
+            if (overload is not null)
+            {
+                return _semanticAnalyzer.GetFunctionReturnType(overload, context);
+            }
+        }
+        catch (NotImplementedException)
+        {
+        }
+
+        diagnostics.Add(new(context.CompilationUnit.FilePath, $"Operator '{bin.Operator.Value}' is not defined for type '{typeFqn}'.", bin.Operator.Line, bin.Operator.Column));
+        return "unknown";
     }
 }

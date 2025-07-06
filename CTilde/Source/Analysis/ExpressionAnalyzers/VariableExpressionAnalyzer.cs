@@ -1,12 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using CTilde.Diagnostics;
+﻿using CTilde.Diagnostics;
 
 namespace CTilde.Analysis.ExpressionAnalyzers;
 
 public class VariableExpressionAnalyzer : ExpressionAnalyzerBase
 {
+    private record ImplicitMemberSearchResult(MemberVariableNode Member, StructDefinitionNode DefiningStruct);
+
     public VariableExpressionAnalyzer(
         SemanticAnalyzer semanticAnalyzer,
         TypeRepository typeRepository,
@@ -19,70 +18,106 @@ public class VariableExpressionAnalyzer : ExpressionAnalyzerBase
     {
         var v = (VariableExpressionNode)expr;
 
-        // 1. Check local variables and parameters in the symbol table.
         if (context.Symbols.TryGetSymbol(v.Identifier.Value, out _, out var type, out _))
         {
             context.Symbols.MarkAsRead(v.Identifier.Value);
             return type;
         }
 
-        // 2. Try resolving as an unqualified enum member (e.g., `KEY_D`).
-        var unqualifiedEnumValue = _functionResolver.ResolveUnqualifiedEnumMember(v.Identifier.Value, context.CompilationUnit, context.CurrentFunction?.Namespace);
+        int? unqualifiedEnumValue = _functionResolver.ResolveUnqualifiedEnumMember(
+            v.Identifier.Value,
+            context.CompilationUnit,
+            context.CurrentFunction?.Namespace);
+        
         if (unqualifiedEnumValue.HasValue)
         {
             return "int";
         }
 
-        // 3. If in a method, try resolving as an implicit `this->member`.
-        if (context.CurrentFunction?.OwnerStructName is not null)
+        string? implicitMemberType = AnalyzeAsImplicitThisMember(v, context, diagnostics);
+        
+        if (implicitMemberType is not null)
         {
-            string ownerStructFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
+            return implicitMemberType;
+        }
 
-            // Walk up the inheritance chain to find the member
-            string? currentStructFqn = ownerStructFqn;
-            MemberVariableNode? member = null;
-            StructDefinitionNode? definingStruct = null;
+        diagnostics.Add(new(
+            context.CompilationUnit.FilePath,
+            $"Cannot determine type for undefined variable '{v.Identifier.Value}'.",
+            v.Identifier.Line,
+            v.Identifier.Column));
 
-            while (currentStructFqn is not null)
+        return "unknown";
+    }
+
+    private string? AnalyzeAsImplicitThisMember(VariableExpressionNode v, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        if (context.CurrentFunction?.OwnerStructName is null)
+        {
+            return null;
+        }
+
+        string ownerStructFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
+        ImplicitMemberSearchResult? searchResult = FindImplicitMemberInHierarchy(v.Identifier.Value, ownerStructFqn, context);
+
+        if (searchResult is null)
+        {
+            return null;
+        }
+
+        context.Symbols.MarkAsRead("this");
+
+        if (searchResult.Member.AccessLevel == AccessSpecifier.Private)
+        {
+            string definingStructFqn = TypeRepository.GetFullyQualifiedName(searchResult.DefiningStruct);
+            string currentFunctionOwnerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
+
+            if (definingStructFqn != currentFunctionOwnerFqn)
             {
-                var structDef = _typeRepository.FindStruct(currentStructFqn);
-                if (structDef is null) break;
-
-                member = structDef.Members.FirstOrDefault(m => m.Name.Value == v.Identifier.Value);
-                if (member is not null)
-                {
-                    definingStruct = structDef;
-                    break;
-                }
-
-                if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
-
-                var unit = _typeRepository.GetCompilationUnitForStruct(currentStructFqn);
-                var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
-                currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
-            }
-
-            if (member is not null && definingStruct is not null)
-            {
-                context.Symbols.MarkAsRead("this");
-                if (member.AccessLevel == AccessSpecifier.Private)
-                {
-                    if (context.CurrentFunction.OwnerStructName != definingStruct.Name || context.CurrentFunction.Namespace != definingStruct.Namespace)
-                    {
-                        diagnostics.Add(new Diagnostic(
-                            context.CompilationUnit.FilePath,
-                            $"Member '{definingStruct.Name}::{member.Name.Value}' is private and cannot be accessed from this context.",
-                            v.Identifier.Line,
-                            v.Identifier.Column
-                        ));
-                    }
-                }
-                var (_, memberTypeResolved) = _memoryLayoutManager.GetMemberInfo(ownerStructFqn, v.Identifier.Value, context.CompilationUnit);
-                return memberTypeResolved;
+                diagnostics.Add(new(
+                    context.CompilationUnit.FilePath,
+                    $"Member '{searchResult.DefiningStruct.Name}::{searchResult.Member.Name.Value}' is private and cannot be accessed from this context.",
+                    v.Identifier.Line,
+                    v.Identifier.Column
+                ));
             }
         }
 
-        diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot determine type for undefined variable '{v.Identifier.Value}'.", v.Identifier.Line, v.Identifier.Column));
-        return "unknown"; // Sentinel value
+        (int _, string memberTypeResolved) = _memoryLayoutManager.GetMemberInfo(ownerStructFqn, v.Identifier.Value, context.CompilationUnit);
+        
+        return memberTypeResolved;
+    }
+
+    private ImplicitMemberSearchResult? FindImplicitMemberInHierarchy(string memberName, string ownerStructFqn, AnalysisContext context)
+    {
+        string? currentStructFqn = ownerStructFqn;
+        
+        while (currentStructFqn is not null)
+        {
+            StructDefinitionNode? structDef = _typeRepository.FindStruct(currentStructFqn);
+            
+            if (structDef is null)
+            {
+                break;
+            }
+
+            MemberVariableNode? member = structDef.Members.FirstOrDefault(m => m.Name.Value == memberName);
+            
+            if (member is not null)
+            {
+                return new(member, structDef);
+            }
+
+            if (string.IsNullOrEmpty(structDef.BaseStructName))
+            {
+                break;
+            }
+
+            CompilationUnitNode unit = _typeRepository.GetCompilationUnitForStruct(currentStructFqn);
+            SimpleTypeNode baseTypeNode = new(new(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
+        }
+
+        return null;
     }
 }

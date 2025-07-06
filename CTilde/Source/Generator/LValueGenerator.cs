@@ -38,7 +38,7 @@ public class LValueGenerator
             return;
         }
 
-        if (context.CurrentFunction?.OwnerStructName != null)
+        if (context.CurrentFunction?.OwnerStructName is not null)
         {
             try
             {

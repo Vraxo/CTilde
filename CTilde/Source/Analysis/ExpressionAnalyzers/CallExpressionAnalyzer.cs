@@ -33,7 +33,7 @@ public class CallExpressionAnalyzer : ExpressionAnalyzerBase
         }
 
         // ** ENFORCE ACCESS SPECIFIER FOR METHODS **
-        if (func.OwnerStructName != null && func.AccessLevel == AccessSpecifier.Private)
+        if (func.OwnerStructName is not null && func.AccessLevel == AccessSpecifier.Private)
         {
             var definingStructFqn = _typeRepository.GetFullyQualifiedOwnerName(func);
             var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction);
@@ -50,7 +50,7 @@ public class CallExpressionAnalyzer : ExpressionAnalyzerBase
         }
 
         // ** VALIDATE ARGUMENT COUNT **
-        int expectedArgs = func.OwnerStructName != null
+        int expectedArgs = func.OwnerStructName is not null
             ? func.Parameters.Count - 1 // Don't count implicit 'this'
             : func.Parameters.Count;
 

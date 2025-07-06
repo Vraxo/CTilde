@@ -35,7 +35,7 @@ public class MemoryLayoutManager
         {
             int size = 0;
             var structUnit = _typeRepository.GetCompilationUnitForStruct(typeNameFqn);
-            if (structDef.BaseStructName != null)
+            if (structDef.BaseStructName is not null)
             {
                 var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
                 string baseFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, structUnit);
@@ -93,7 +93,7 @@ public class MemoryLayoutManager
         var allMembers = new List<(string, string, int, bool)>();
         int currentOffset = 0;
 
-        if (structDef.BaseStructName != null)
+        if (structDef.BaseStructName is not null)
         {
             var structUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
             var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));

@@ -39,7 +39,7 @@ public class StatementGenerator
                     {
                         // The temporary is on the stack but its value is unused. We must destroy it.
                         var tempDtor = FunctionResolver.FindDestructor(exprType);
-                        if (tempDtor != null)
+                        if (tempDtor is not null)
                         {
                             Builder.AppendInstruction(null, "Destroying temporary from expression statement");
                             Builder.AppendInstruction("lea eax, [esp]"); // Address of temporary is at ESP
@@ -86,7 +86,7 @@ public class StatementGenerator
         else
         {
             var dtor = FunctionResolver.FindDestructor(objectType);
-            if (dtor != null)
+            if (dtor is not null)
             {
                 Builder.AppendInstruction("push edi", "Push 'this' pointer for non-virtual dtor call");
                 Builder.AppendInstruction($"call {NameMangler.Mangle(dtor)}");
@@ -114,7 +114,7 @@ public class StatementGenerator
                 Builder.AppendInstruction($"mov dword [eax], {vtableLabel}", "Set vtable pointer");
             }
 
-            if (decl.ConstructorArguments != null) // e.g. string s("hello");
+            if (decl.ConstructorArguments is not null) // e.g. string s("hello");
             {
                 var argTypes = decl.ConstructorArguments
                     .Select(arg => _context.SemanticAnalyzer.AnalyzeExpressionType(arg, context))
@@ -134,7 +134,7 @@ public class StatementGenerator
                 Builder.AppendInstruction($"call {NameMangler.Mangle(ctor)}");
                 Builder.AppendInstruction($"add esp, {totalArgSize}", "Clean up ctor args");
             }
-            else if (decl.Initializer != null)
+            else if (decl.Initializer is not null)
             {
                 if (decl.Initializer is InitializerListExpressionNode initList) // e.g. MyStruct s = {1, 2};
                 {
@@ -169,17 +169,17 @@ public class StatementGenerator
                         var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType });
 
                         bool takeAddressOfInitializer = false;
-                        if (ctor == null && TypeRepository.IsStruct(initializerType))
+                        if (ctor is null && TypeRepository.IsStruct(initializerType))
                         {
                             // Try to find a copy constructor that takes a pointer, e.g. string(string*)
                             ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string> { initializerType + "*" });
-                            if (ctor != null)
+                            if (ctor is not null)
                             {
                                 takeAddressOfInitializer = true;
                             }
                         }
 
-                        if (ctor == null)
+                        if (ctor is null)
                         {
                             throw new InvalidOperationException($"No constructor found for '{varTypeFqn}' that takes an argument of type '{initializerType}'.");
                         }
@@ -207,7 +207,7 @@ public class StatementGenerator
                             _context.TypeRepository.IsStruct(initializerType) && !initializerType.EndsWith("*"))
                         {
                             var tempDtor = FunctionResolver.FindDestructor(initializerType);
-                            if (tempDtor != null)
+                            if (tempDtor is not null)
                             {
                                 Builder.AppendInstruction(null, "Destroying temporary from initialization");
                                 Builder.AppendInstruction("lea eax, [esp]");
@@ -233,7 +233,7 @@ public class StatementGenerator
             else // Default constructor call, e.g. List textObjects;
             {
                 var ctor = FunctionResolver.FindConstructor(varTypeFqn, new List<string>());
-                if (ctor != null)
+                if (ctor is not null)
                 {
                     Builder.AppendInstruction(null, $"Calling default constructor for {variableName}");
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Push 'this' for constructor");
@@ -243,7 +243,7 @@ public class StatementGenerator
                 }
             }
         }
-        else if (decl.Initializer != null) // Primitive types
+        else if (decl.Initializer is not null) // Primitive types
         {
             ExpressionGenerator.GenerateExpression(decl.Initializer, context);
             if (MemoryLayoutManager.GetSizeOfType(varTypeFqn, context.CompilationUnit) == 1)
@@ -258,7 +258,7 @@ public class StatementGenerator
         var returnTypeFqn = _context.SemanticAnalyzer.GetFunctionReturnType(context.CurrentFunction, context);
         if (TypeRepository.IsStruct(returnTypeFqn) && !returnTypeFqn.EndsWith("*"))
         {
-            if (ret.Expression == null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");
+            if (ret.Expression is null) throw new InvalidOperationException("Must return a value from a function with a struct return type.");
 
             // Get the address of the local object being returned (e.g. &result)
             ExpressionGenerator.GenerateExpression(ret.Expression, context);
@@ -271,7 +271,7 @@ public class StatementGenerator
             // Find a copy constructor, e.g. string(string*)
             var copyCtor = FunctionResolver.FindConstructor(returnTypeFqn, new List<string> { returnTypeFqn + "*" });
 
-            if (copyCtor != null)
+            if (copyCtor is not null)
             {
                 Builder.AppendInstruction(null, "Calling copy constructor for return value");
                 Builder.AppendInstruction("push esi", "Push source pointer argument");
@@ -293,7 +293,7 @@ public class StatementGenerator
         else
         {
             // Handle return for primitive types
-            if (ret.Expression != null) ExpressionGenerator.GenerateExpression(ret.Expression, context);
+            if (ret.Expression is not null) ExpressionGenerator.GenerateExpression(ret.Expression, context);
         }
 
         // The actual `ret` instruction is in the epilogue to ensure destructors are called.
@@ -316,9 +316,9 @@ public class StatementGenerator
         int idx = _context.GetNextLabelId();
         ExpressionGenerator.GenerateExpression(i.Condition, context);
         Builder.AppendInstruction("cmp eax, 0");
-        Builder.AppendInstruction(i.ElseBody != null ? $"je _if_else_{idx}" : $"je _if_end_{idx}");
+        Builder.AppendInstruction(i.ElseBody is not null ? $"je _if_else_{idx}" : $"je _if_end_{idx}");
         GenerateStatement(i.ThenBody, context);
-        if (i.ElseBody != null)
+        if (i.ElseBody is not null)
         {
             Builder.AppendInstruction($"jmp _if_end_{idx}");
             Builder.AppendLabel($"_if_else_{idx}");

@@ -2,13 +2,15 @@
 
 public class Program
 {
-    public static void Main(string[] args)
+    public static void Main()
     {
-        var compiler = new Compiler();
-        var options = new OptimizationOptions
+        Compiler compiler = new();
+
+        OptimizationOptions options = new()
         {
-            EnableConstantFolding = false
+            EnableConstantFolding = true
         };
+
         compiler.Compile("Code/main.c", options);
     }
 }

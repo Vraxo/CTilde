@@ -23,7 +23,7 @@ public class VTableManager
         if (_hasVTableCache.TryGetValue(structFqn, out var hasVTable)) return hasVTable;
 
         var structDef = _typeRepository.FindStruct(structFqn);
-        if (structDef == null) return false;
+        if (structDef is null) return false;
 
         bool result = structDef.Methods.Any(m => m.IsVirtual) || structDef.Destructors.Any(d => d.IsVirtual);
         if (result)
@@ -32,7 +32,7 @@ public class VTableManager
             return true;
         }
 
-        if (structDef.BaseStructName != null)
+        if (structDef.BaseStructName is not null)
         {
             var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
             var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
@@ -51,7 +51,7 @@ public class VTableManager
         var structDef = _typeRepository.FindStruct(structFqn) ?? throw new InvalidOperationException($"Struct {structFqn} not found.");
 
         var newVTable = new List<AstNode>();
-        if (structDef.BaseStructName != null)
+        if (structDef.BaseStructName is not null)
         {
             var unit = _typeRepository.GetCompilationUnitForStruct(structFqn);
             var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
@@ -64,7 +64,7 @@ public class VTableManager
         // A derived dtor is implicitly virtual if the base is virtual.
         bool isBaseDtorVirtual = newVTable.FirstOrDefault() is DestructorDeclarationNode;
 
-        if (dtor != null && (dtor.IsVirtual || isBaseDtorVirtual))
+        if (dtor is not null && (dtor.IsVirtual || isBaseDtorVirtual))
         {
             // If the base had a virtual dtor, we override it.
             if (isBaseDtorVirtual)

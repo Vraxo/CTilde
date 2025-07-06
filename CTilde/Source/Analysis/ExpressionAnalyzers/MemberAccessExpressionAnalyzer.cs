@@ -30,24 +30,24 @@ public class MemberAccessExpressionAnalyzer : ExpressionAnalyzerBase
         PropertyDefinitionNode? property = null;
         StructDefinitionNode? definingStruct = null;
 
-        while (currentStructFqn != null)
+        while (currentStructFqn is not null)
         {
             var structDef = _typeRepository.FindStruct(currentStructFqn);
-            if (structDef == null)
+            if (structDef is null)
             {
                 diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{baseStructType}' is not a struct and has no members.", AstHelper.GetFirstToken(ma.Left).Line, AstHelper.GetFirstToken(ma.Left).Column));
                 return "unknown";
             }
 
             member = structDef.Members.FirstOrDefault(m => m.Name.Value == ma.Member.Value);
-            if (member != null)
+            if (member is not null)
             {
                 definingStruct = structDef;
                 break;
             }
 
             property = structDef.Properties.FirstOrDefault(p => p.Name.Value == ma.Member.Value);
-            if (property != null)
+            if (property is not null)
             {
                 definingStruct = structDef;
                 break;
@@ -60,13 +60,13 @@ public class MemberAccessExpressionAnalyzer : ExpressionAnalyzerBase
             currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
         }
 
-        if (member == null && property == null)
+        if (member is null && property is null)
         {
             diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{baseStructType}' has no member or property named '{ma.Member.Value}'.", ma.Member.Line, ma.Member.Column));
             return "unknown";
         }
 
-        if (member != null)
+        if (member is not null)
         {
             if (member.AccessLevel == AccessSpecifier.Private)
             {

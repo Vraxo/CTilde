@@ -34,7 +34,7 @@ public class VariableExpressionHandler : ExpressionHandlerBase
             return;
         }
 
-        if (context.CurrentFunction?.OwnerStructName != null)
+        if (context.CurrentFunction?.OwnerStructName is not null)
         {
             // Re-route implicit `this->member` access to the member access handler.
             var thisExpr = new VariableExpressionNode(new Token(TokenType.Identifier, "this", -1, -1));

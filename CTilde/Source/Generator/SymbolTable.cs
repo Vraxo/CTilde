@@ -29,7 +29,7 @@ public class SymbolTable
         // If the owner's name is mangled, it's already an FQN. Otherwise, construct the FQN.
         string thisTypeName = ctor.OwnerStructName.Contains("__")
             ? ctor.OwnerStructName
-            : (ctor.Namespace != null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName);
+            : (ctor.Namespace is not null ? $"{ctor.Namespace}::{ctor.OwnerStructName}" : ctor.OwnerStructName);
 
         var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
         var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
@@ -48,7 +48,7 @@ public class SymbolTable
         // If the owner's name is mangled, it's already an FQN. Otherwise, construct the FQN.
         string thisTypeName = dtor.OwnerStructName.Contains("__")
             ? dtor.OwnerStructName
-            : (dtor.Namespace != null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName);
+            : (dtor.Namespace is not null ? $"{dtor.Namespace}::{dtor.OwnerStructName}" : dtor.OwnerStructName);
 
         var thisTypeNode = new PointerTypeNode(new SimpleTypeNode(new Token(TokenType.Identifier, thisTypeName, -1, -1)));
         var thisParam = new ParameterNode(thisTypeNode, new Token(TokenType.Identifier, "this", -1, -1));
@@ -117,7 +117,7 @@ public class SymbolTable
 
     private void CollectDeclarations(AstNode? node, List<DeclarationStatementNode> declarations)
     {
-        if (node == null) return;
+        if (node is null) return;
         if (node is DeclarationStatementNode decl) declarations.Add(decl);
         else if (node is BlockStatementNode block) foreach (var stmt in block.Statements) CollectDeclarations(stmt, declarations);
         else if (node is IfStatementNode ifStmt) { CollectDeclarations(ifStmt.ThenBody, declarations); CollectDeclarations(ifStmt.ElseBody, declarations); }
@@ -129,7 +129,7 @@ public class SymbolTable
         var result = new List<(string, int, string)>();
         foreach (var (name, (offset, type, _, _)) in _symbols)
         {
-            if (offset < 0 && functionResolver.FindDestructor(type) != null) // Locals have negative offset
+            if (offset < 0 && functionResolver.FindDestructor(type) is not null) // Locals have negative offset
             {
                 result.Add((name, offset, type));
             }

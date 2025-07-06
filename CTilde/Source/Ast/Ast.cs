@@ -12,7 +12,7 @@ public abstract record AstNode
     public IEnumerable<AstNode> Ancestors()
     {
         var current = Parent;
-        while (current != null)
+        while (current is not null)
         {
             yield return current;
             current = current.Parent;

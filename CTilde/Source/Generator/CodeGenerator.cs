@@ -50,7 +50,7 @@ public class CodeGenerator
         FindAllStringLiterals(Program);
 
         foreach (var unit in Program.CompilationUnits)
-            foreach (var f in unit.Functions.Where(f => f.Body == null))
+            foreach (var f in unit.Functions.Where(f => f.Body is null))
             {
                 ExternalFunctions.Add(f.Name);
             }
@@ -66,7 +66,7 @@ public class CodeGenerator
 
         foreach (var unit in Program.CompilationUnits)
         {
-            foreach (var function in unit.Functions.Where(f => f.Body != null))
+            foreach (var function in unit.Functions.Where(f => f.Body is not null))
             {
                 _declarationGenerator.GenerateFunction(function, unit, null);
                 Builder.AppendBlankLine();
@@ -74,7 +74,7 @@ public class CodeGenerator
 
             foreach (var s in unit.Structs)
             {
-                foreach (var method in s.Methods.Where(m => m.Body != null))
+                foreach (var method in s.Methods.Where(m => m.Body is not null))
                 {
                     _declarationGenerator.GenerateFunction(method, unit, s);
                     Builder.AppendBlankLine();

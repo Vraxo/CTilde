@@ -35,13 +35,13 @@ public class FunctionResolver
         if (callee is VariableExpressionNode varNode)
         {
             // If inside a method, first try resolving as an implicit 'this' call.
-            if (currentFunction?.OwnerStructName != null)
+            if (currentFunction?.OwnerStructName is not null)
             {
                 var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(currentFunction);
-                if (ownerFqn != null)
+                if (ownerFqn is not null)
                 {
                     var method = ResolveMethod(ownerFqn, varNode.Identifier.Value);
-                    if (method != null)
+                    if (method is not null)
                     {
                         return method;
                     }
@@ -57,17 +57,17 @@ public class FunctionResolver
             var funcName = qNode.Member.Value;
             string? resolvedNamespace = qualifier;
             var aliased = context.Usings.FirstOrDefault(u => u.Alias == qualifier);
-            if (aliased != null) resolvedNamespace = aliased.Namespace;
+            if (aliased is not null) resolvedNamespace = aliased.Namespace;
 
             var globalFunctions = _program.CompilationUnits.SelectMany(cu => cu.Functions);
-            var func = globalFunctions.FirstOrDefault(f => f.OwnerStructName == null && f.Namespace == resolvedNamespace && f.Name == funcName);
-            if (func == null) throw new InvalidOperationException($"Function '{resolvedNamespace}::{funcName}' not found.");
+            var func = globalFunctions.FirstOrDefault(f => f.OwnerStructName is null && f.Namespace == resolvedNamespace && f.Name == funcName);
+            if (func is null) throw new InvalidOperationException($"Function '{resolvedNamespace}::{funcName}' not found.");
             return func;
         }
 
         // --- ENHANCED DEBUGGING EXCEPTION ---
         string parentInfo = "null";
-        if (callee.Parent != null)
+        if (callee.Parent is not null)
         {
             parentInfo = callee.Parent.GetType().Name;
             if (callee.Parent is CallExpressionNode callParent)
@@ -85,8 +85,8 @@ public class FunctionResolver
     private FunctionDeclarationNode ResolveFunctionByName(string name, string? currentNamespace, CompilationUnitNode context)
     {
         var globalFunctions = _program.CompilationUnits.SelectMany(cu => cu.Functions);
-        var candidates = globalFunctions.Where(f => f.OwnerStructName == null && f.Name == name)
-            .Where(f => f.Namespace == currentNamespace || f.Namespace == null || context.Usings.Any(u => u.Alias == null && u.Namespace == f.Namespace)).ToList();
+        var candidates = globalFunctions.Where(f => f.OwnerStructName is null && f.Name == name)
+            .Where(f => f.Namespace == currentNamespace || f.Namespace is null || context.Usings.Any(u => u.Alias is null && u.Namespace == f.Namespace)).ToList();
         if (candidates.Count == 0) throw new InvalidOperationException($"Function '{name}' could not be resolved in the current context.");
         if (candidates.Select(f => f.Namespace).Distinct().Count() > 1) throw new InvalidOperationException($"Function call '{name}' is ambiguous.");
         return candidates.First();
@@ -95,13 +95,13 @@ public class FunctionResolver
     public FunctionDeclarationNode? ResolveMethod(string ownerFqn, string name)
     {
         var structFqn = ownerFqn;
-        while (structFqn != null)
+        while (structFqn is not null)
         {
             var structDef = _typeRepository.FindStruct(structFqn);
-            if (structDef == null) return null; // Should not happen if ownerFqn is valid
+            if (structDef is null) return null; // Should not happen if ownerFqn is valid
 
             var method = structDef.Methods.FirstOrDefault(m => m.Name == name);
-            if (method != null) return method;
+            if (method is not null) return method;
 
             if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
 
@@ -121,7 +121,7 @@ public class FunctionResolver
     public ConstructorDeclarationNode? FindConstructor(string structFqn, List<string> argTypeFqns)
     {
         var structDef = _typeRepository.FindStruct(structFqn);
-        if (structDef == null) return null;
+        if (structDef is null) return null;
 
         var ctorUnit = _typeRepository.GetCompilationUnitForStruct(structFqn);
 
@@ -177,7 +177,7 @@ public class FunctionResolver
     public int? ResolveUnqualifiedEnumMember(string memberName, CompilationUnitNode context, string? currentContextNamespace)
     {
         var namespacesToCheck = new List<string?> { currentContextNamespace }
-            .Concat(context.Usings.Where(u => u.Alias == null).Select(u => u.Namespace))
+            .Concat(context.Usings.Where(u => u.Alias is null).Select(u => u.Namespace))
             .Append(null);
 
         foreach (var ns in namespacesToCheck.Distinct())

@@ -23,7 +23,7 @@ public class QualifiedAccessExpressionAnalyzer : ExpressionAnalyzerBase
 
         // 1. Try to resolve as an enum member (e.g., raylib::KeyboardKey::KEY_D)
         string? enumTypeFQN = _typeResolver.ResolveEnumTypeName(qualifier, context.CurrentFunction?.Namespace, context.CompilationUnit);
-        if (enumTypeFQN != null)
+        if (enumTypeFQN is not null)
         {
             if (_functionResolver.GetEnumValue(enumTypeFQN, memberName).HasValue)
             {

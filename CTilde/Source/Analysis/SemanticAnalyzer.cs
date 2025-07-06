@@ -96,7 +96,7 @@ public class SemanticAnalyzer
         {
             var structDef = _typeRepository.FindStruct(declaredTypeFqn);
 
-            if (structDef == null)
+            if (structDef is null)
             {
                 var token = decl.Type.GetFirstToken();
                 diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{declaredTypeFqn}' is not a struct and cannot be initialized with an initializer list.", token.Line, token.Column));
@@ -127,7 +127,7 @@ public class SemanticAnalyzer
                 }
             }
         }
-        else if (decl.Initializer != null)
+        else if (decl.Initializer is not null)
         {
             // Analyze other initializers (e.g., assignment)
             var initializerType = AnalyzeExpressionType(decl.Initializer, context, diagnostics);
@@ -143,7 +143,7 @@ public class SemanticAnalyzer
                 diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{initializerType}' to '{declaredTypeFqn}'.", AstHelper.GetFirstToken(decl.Initializer).Line, AstHelper.GetFirstToken(decl.Initializer).Column));
             }
         }
-        else if (decl.ConstructorArguments != null)
+        else if (decl.ConstructorArguments is not null)
         {
             foreach (var arg in decl.ConstructorArguments)
             {
@@ -165,7 +165,7 @@ public class SemanticAnalyzer
     {
         var funcReturnType = GetFunctionReturnType(context.CurrentFunction, context);
 
-        if (ret.Expression == null)
+        if (ret.Expression is null)
         {
             if (funcReturnType != "void")
             {

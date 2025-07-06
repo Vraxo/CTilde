@@ -28,7 +28,7 @@ internal class StructParser
         {
             _parser.Eat(TokenType.LessThan);
             do { genericParameters.Add(_parser.Eat(TokenType.Identifier)); }
-            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
             _parser.Eat(TokenType.GreaterThan);
         }
 
@@ -168,7 +168,7 @@ internal class StructParser
         BaseInitializerNode? baseInitializer = null;
         if (_parser.Current.Type == TokenType.Colon)
         {
-            if (baseStructName == null) _parser.ReportError($"Struct '{ownerStructName}' cannot have a base initializer because it does not inherit from another struct.", nameToken);
+            if (baseStructName is null) _parser.ReportError($"Struct '{ownerStructName}' cannot have a base initializer because it does not inherit from another struct.", nameToken);
             _parser.Eat(TokenType.Colon);
             var baseName = _parser.Eat(TokenType.Identifier);
             // No error here, Eat will report if baseName.Value != baseStructName
@@ -178,7 +178,7 @@ internal class StructParser
             if (_parser.Current.Type != TokenType.RightParen)
             {
                 do { arguments.Add(_expressionParser.ParseExpression()); }
-                while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+                while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
             }
             _parser.Eat(TokenType.RightParen);
             baseInitializer = new BaseInitializerNode(arguments);

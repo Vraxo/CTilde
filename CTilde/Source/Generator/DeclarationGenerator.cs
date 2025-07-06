@@ -32,7 +32,7 @@ public class DeclarationGenerator
         Builder.AppendLabel(NameMangler.Mangle(ctor));
         GeneratePrologue(symbols);
 
-        if (ctor.Initializer != null)
+        if (ctor.Initializer is not null)
         {
             var ownerStruct = TypeRepository.FindStructByUnqualifiedName(ctor.OwnerStructName, ctor.Namespace) ?? throw new InvalidOperationException("Owner struct not found");
 
@@ -106,7 +106,7 @@ public class DeclarationGenerator
         Builder.AppendLabel(mangledName);
         GeneratePrologue(symbols);
 
-        if (function.Body != null) StatementGenerator.GenerateStatement(function.Body, context);
+        if (function.Body is not null) StatementGenerator.GenerateStatement(function.Body, context);
 
         GenerateEpilogue(destructibleLocals);
     }
@@ -136,7 +136,7 @@ public class DeclarationGenerator
             foreach (var (name, offset, type) in destructibleLocals.AsEnumerable().Reverse())
             {
                 var dtor = FunctionResolver.FindDestructor(type);
-                if (dtor != null)
+                if (dtor is not null)
                 {
                     Builder.AppendInstruction($"lea eax, [ebp + {offset}]", $"Get address of '{name}' for dtor");
                     Builder.AppendInstruction("push eax");

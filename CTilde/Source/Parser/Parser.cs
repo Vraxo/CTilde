@@ -206,7 +206,7 @@ public class Parser
             Eat(TokenType.LessThan);
             var typeArgs = new List<TypeNode>();
             do { typeArgs.Add(ParseTypeNode()); }
-            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) != null);
+            while (Current.Type == TokenType.Comma && Eat(TokenType.Comma) is not null);
             Eat(TokenType.GreaterThan);
             typeNode = new GenericInstantiationTypeNode(baseTypeToken, typeArgs);
         }

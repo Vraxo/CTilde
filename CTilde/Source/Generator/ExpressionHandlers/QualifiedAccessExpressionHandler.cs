@@ -13,7 +13,7 @@ public class QualifiedAccessExpressionHandler : ExpressionHandlerBase
         string potentialEnumTypeName = TypeResolver.ResolveQualifier(qNode.Left);
         string memberName = qNode.Member.Value;
         string? enumTypeFQN = TypeResolver.ResolveEnumTypeName(potentialEnumTypeName, context.CurrentFunction?.Namespace, context.CompilationUnit);
-        if (enumTypeFQN != null)
+        if (enumTypeFQN is not null)
         {
             var enumValue = FunctionResolver.GetEnumValue(enumTypeFQN, memberName);
             if (enumValue.HasValue)
@@ -24,8 +24,8 @@ public class QualifiedAccessExpressionHandler : ExpressionHandlerBase
         }
 
         var func = FunctionResolver.ResolveFunctionCall(qNode, context);
-        string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
-        if (func.Body == null) ExternalFunctions.Add(func.Name);
+        string calleeTarget = func.Body is null ? $"[{func.Name}]" : NameMangler.Mangle(func);
+        if (func.Body is null) ExternalFunctions.Add(func.Name);
         Builder.AppendInstruction($"mov eax, {calleeTarget}");
     }
 }

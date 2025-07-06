@@ -72,7 +72,7 @@ public class FasmWriter
                 .Select(i => i.LibraryName)
                 .FirstOrDefault(lib => lib != "kernel32.dll" && lib != "msvcrt.dll");
 
-            if (ownerLib != null)
+            if (ownerLib is not null)
             {
                 libraries[ownerLib].Add(funcName);
             }

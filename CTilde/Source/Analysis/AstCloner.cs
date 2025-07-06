@@ -18,7 +18,7 @@ public class AstCloner
 
     public T Clone<T>(T? node) where T : AstNode
     {
-        if (node == null) return null!;
+        if (node is null) return null!;
         return (T)Visit((dynamic)node);
     }
 

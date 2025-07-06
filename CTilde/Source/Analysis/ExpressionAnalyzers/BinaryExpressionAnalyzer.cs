@@ -65,7 +65,7 @@ public class BinaryExpressionAnalyzer : ExpressionAnalyzerBase
                 var opName = $"operator_{NameMangler.MangleOperator(bin.Operator.Value)}";
                 var overload = _functionResolver.ResolveMethod(leftTypeFqn, opName);
 
-                if (overload != null)
+                if (overload is not null)
                 {
                     return _semanticAnalyzer.GetFunctionReturnType(overload, context);
                 }

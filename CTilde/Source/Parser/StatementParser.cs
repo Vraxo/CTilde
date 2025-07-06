@@ -146,7 +146,7 @@ internal class StatementParser
             if (_parser.Current.Type != TokenType.RightParen)
             {
                 do { ctorArgs.Add(_expressionParser.ParseExpression()); }
-                while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+                while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
             }
             _parser.Eat(TokenType.RightParen);
         }

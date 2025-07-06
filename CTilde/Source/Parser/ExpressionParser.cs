@@ -21,7 +21,7 @@ internal class ExpressionParser
         if (_parser.Current.Type != TokenType.RightBrace)
         {
             do { values.Add(ParseExpression()); }
-            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
         }
         _parser.Eat(TokenType.RightBrace);
         return new InitializerListExpressionNode(openingBrace, values);
@@ -130,7 +130,7 @@ internal class ExpressionParser
         if (_parser.Current.Type != TokenType.RightParen)
         {
             do { arguments.Add(ParseExpression()); }
-            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+            while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
         }
         _parser.Eat(TokenType.RightParen);
 
@@ -149,7 +149,7 @@ internal class ExpressionParser
                 if (_parser.Current.Type != TokenType.RightParen)
                 {
                     do { arguments.Add(ParseExpression()); }
-                    while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+                    while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
                 }
                 _parser.Eat(TokenType.RightParen);
                 expr = new CallExpressionNode(expr, arguments);

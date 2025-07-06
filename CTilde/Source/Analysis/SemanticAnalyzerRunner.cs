@@ -40,7 +40,7 @@ public class SemanticAnalyzerRunner
                 {
                     foreach (var function in unit.Functions.ToList())
                     {
-                        if (function.Body == null) continue;
+                        if (function.Body is null) continue;
                         var symbols = new SymbolTable(function, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                         var context = new AnalysisContext(symbols, unit, function);
                         WalkStatement(function.Body, context);
@@ -58,7 +58,7 @@ public class SemanticAnalyzerRunner
 
                         foreach (var method in s.Methods.ToList())
                         {
-                            if (method.Body == null) continue;
+                            if (method.Body is null) continue;
                             var symbols = new SymbolTable(method, _typeResolver, _functionResolver, _memoryLayoutManager, unit);
                             var context = new AnalysisContext(symbols, unit, method);
                             WalkStatement(method.Body, context);
@@ -110,7 +110,7 @@ public class SemanticAnalyzerRunner
     private void CheckForUnusedVariables(FunctionDeclarationNode function, AnalysisContext context)
     {
         var localDeclarations = new List<DeclarationStatementNode>();
-        if (function.Body != null)
+        if (function.Body is not null)
         {
             FindAllDeclarations(function.Body, localDeclarations);
         }
@@ -143,7 +143,7 @@ public class SemanticAnalyzerRunner
                 break;
             case IfStatementNode i:
                 FindAllDeclarations(i.ThenBody, declarations);
-                if (i.ElseBody != null) FindAllDeclarations(i.ElseBody, declarations);
+                if (i.ElseBody is not null) FindAllDeclarations(i.ElseBody, declarations);
                 break;
             case WhileStatementNode w:
                 FindAllDeclarations(w.Body, declarations);
@@ -191,7 +191,7 @@ public class SemanticAnalyzerRunner
             case IfStatementNode ifStmt:
                 _analyzer.AnalyzeExpressionType(ifStmt.Condition, context, Diagnostics);
                 WalkStatement(ifStmt.ThenBody, context);
-                if (ifStmt.ElseBody != null) WalkStatement(ifStmt.ElseBody, context);
+                if (ifStmt.ElseBody is not null) WalkStatement(ifStmt.ElseBody, context);
                 break;
             case WhileStatementNode whileStmt:
                 _analyzer.AnalyzeExpressionType(whileStmt.Condition, context, Diagnostics);

@@ -34,7 +34,7 @@ public class VariableExpressionAnalyzer : ExpressionAnalyzerBase
         }
 
         // 3. If in a method, try resolving as an implicit `this->member`.
-        if (context.CurrentFunction?.OwnerStructName != null)
+        if (context.CurrentFunction?.OwnerStructName is not null)
         {
             string ownerStructFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction)!;
 
@@ -43,13 +43,13 @@ public class VariableExpressionAnalyzer : ExpressionAnalyzerBase
             MemberVariableNode? member = null;
             StructDefinitionNode? definingStruct = null;
 
-            while (currentStructFqn != null)
+            while (currentStructFqn is not null)
             {
                 var structDef = _typeRepository.FindStruct(currentStructFqn);
-                if (structDef == null) break;
+                if (structDef is null) break;
 
                 member = structDef.Members.FirstOrDefault(m => m.Name.Value == v.Identifier.Value);
-                if (member != null)
+                if (member is not null)
                 {
                     definingStruct = structDef;
                     break;
@@ -62,7 +62,7 @@ public class VariableExpressionAnalyzer : ExpressionAnalyzerBase
                 currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
             }
 
-            if (member != null && definingStruct != null)
+            if (member is not null && definingStruct is not null)
             {
                 context.Symbols.MarkAsRead("this");
                 if (member.AccessLevel == AccessSpecifier.Private)

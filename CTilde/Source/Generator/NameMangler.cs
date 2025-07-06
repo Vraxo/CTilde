@@ -9,7 +9,7 @@ public static class NameMangler
     {
         var ownerName = f.OwnerStructName;
         // If the owner is a mangled generic name already, don't re-mangle it.
-        if (ownerName != null && ownerName.Contains("__"))
+        if (ownerName is not null && ownerName.Contains("__"))
         {
             return $"_{ownerName}_{f.Name}";
         }

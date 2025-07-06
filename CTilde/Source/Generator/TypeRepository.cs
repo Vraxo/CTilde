@@ -38,12 +38,12 @@ public class TypeRepository
         _structUnitMap[fqn] = originalUnit;
     }
 
-    public static string GetFullyQualifiedName(StructDefinitionNode s) => s.Namespace != null ? $"{s.Namespace}::{s.Name}" : s.Name;
-    public static string GetFullyQualifiedName(EnumDefinitionNode e) => e.Namespace != null ? $"{e.Namespace}::{e.Name}" : e.Name;
+    public static string GetFullyQualifiedName(StructDefinitionNode s) => s.Namespace is not null ? $"{s.Namespace}::{s.Name}" : s.Name;
+    public static string GetFullyQualifiedName(EnumDefinitionNode e) => e.Namespace is not null ? $"{e.Namespace}::{e.Name}" : e.Name;
 
     public string? GetFullyQualifiedOwnerName(FunctionDeclarationNode func)
     {
-        if (func.OwnerStructName == null) return null;
+        if (func.OwnerStructName is null) return null;
 
         // If the owner's name is mangled (contains "__"), it's already the FQN.
         if (func.OwnerStructName.Contains("__"))
@@ -52,7 +52,7 @@ public class TypeRepository
         }
 
         // Otherwise, construct the FQN from the namespace and name.
-        return func.Namespace != null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName;
+        return func.Namespace is not null ? $"{func.Namespace}::{func.OwnerStructName}" : func.OwnerStructName;
     }
 
     public StructDefinitionNode? FindStruct(string qualifiedName) => _structs.TryGetValue(qualifiedName, out var def) ? def : null;
@@ -62,7 +62,7 @@ public class TypeRepository
         // Handle already-mangled names from monomorphization
         if (name.Contains("__")) return FindStruct(name);
 
-        var fqn = currentNamespace != null ? $"{currentNamespace}::{name}" : name;
+        var fqn = currentNamespace is not null ? $"{currentNamespace}::{name}" : name;
         if (_structs.TryGetValue(fqn, out var def)) return def;
         return _structs.TryGetValue(name, out def) ? def : null;
     }

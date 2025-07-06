@@ -22,7 +22,7 @@ internal class FunctionParser
     {
         var parameters = ParseParameterList();
 
-        if (isMethod && ownerStructName != null)
+        if (isMethod && ownerStructName is not null)
         {
             // The `this` pointer type will be resolved later during semantic analysis.
             // For now, we create a placeholder.
@@ -56,7 +56,7 @@ internal class FunctionParser
                 var paramType = _parser.ParseTypeNode();
                 var paramName = _parser.Eat(TokenType.Identifier);
                 parameters.Add(new ParameterNode(paramType, paramName));
-            } while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) != null);
+            } while (_parser.Current.Type == TokenType.Comma && _parser.Eat(TokenType.Comma) is not null);
         }
         _parser.Eat(TokenType.RightParen);
         return parameters;

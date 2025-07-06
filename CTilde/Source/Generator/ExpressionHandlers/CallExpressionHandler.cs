@@ -33,7 +33,7 @@ public class CallExpressionHandler : ExpressionHandlerBase
         }
 
         // Phase 4: Push `this` pointer (if it's a method) and dispatch the call.
-        bool isMethodCall = func.OwnerStructName != null;
+        bool isMethodCall = func.OwnerStructName is not null;
         if (isMethodCall)
         {
             if (callExpr.Callee is MemberAccessExpressionNode ma)
@@ -70,8 +70,8 @@ public class CallExpressionHandler : ExpressionHandlerBase
         else
         {
             // Global function dispatch
-            string calleeTarget = func.Body == null ? $"[{func.Name}]" : NameMangler.Mangle(func);
-            if (func.Body == null) ExternalFunctions.Add(func.Name);
+            string calleeTarget = func.Body is null ? $"[{func.Name}]" : NameMangler.Mangle(func);
+            if (func.Body is null) ExternalFunctions.Add(func.Name);
             Builder.AppendInstruction($"call {calleeTarget}");
         }
 

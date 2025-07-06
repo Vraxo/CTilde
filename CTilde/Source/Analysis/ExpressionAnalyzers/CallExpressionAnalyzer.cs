@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using CTilde.Diagnostics;
+﻿using CTilde.Diagnostics;
 
 namespace CTilde.Analysis.ExpressionAnalyzers;
 
@@ -18,61 +15,86 @@ public class CallExpressionAnalyzer : ExpressionAnalyzerBase
     public override string Analyze(ExpressionNode expr, AnalysisContext context, List<Diagnostic> diagnostics)
     {
         var call = (CallExpressionNode)expr;
-        FunctionDeclarationNode? func = null;
-        string funcNameForDiags;
 
-        try
+        FunctionDeclarationNode? func = ResolveFunction(call, context, diagnostics);
+        
+        if (func is null)
         {
-            func = _functionResolver.ResolveFunctionCall(call.Callee, context);
-            funcNameForDiags = func.Name;
-        }
-        catch (InvalidOperationException ex)
-        {
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, ex.Message, AstHelper.GetFirstToken(call.Callee).Line, AstHelper.GetFirstToken(call.Callee).Column));
             return "unknown";
         }
 
-        // ** ENFORCE ACCESS SPECIFIER FOR METHODS **
-        if (func.OwnerStructName is not null && func.AccessLevel == AccessSpecifier.Private)
-        {
-            var definingStructFqn = _typeRepository.GetFullyQualifiedOwnerName(func);
-            var ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction);
+        ValidateAccessSpecifier(func, call, context, diagnostics);
+        ValidateArgumentCount(func, call, context, diagnostics);
+        AnalyzeArguments(call, context, diagnostics);
 
-            if (definingStructFqn != ownerFqn)
-            {
-                diagnostics.Add(new Diagnostic(
-                   context.CompilationUnit.FilePath,
-                   $"Method '{func.Name}' is private and cannot be accessed from this context.",
-                   AstHelper.GetFirstToken(call.Callee).Line,
-                   AstHelper.GetFirstToken(call.Callee).Column
-               ));
-            }
+        return _semanticAnalyzer.GetFunctionReturnType(func, context);
+    }
+
+    private FunctionDeclarationNode? ResolveFunction(CallExpressionNode call, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        try
+        {
+            return _functionResolver.ResolveFunctionCall(call.Callee, context);
+        }
+        catch (InvalidOperationException ex)
+        {
+            diagnostics.Add(new(
+                context.CompilationUnit.FilePath,
+                ex.Message,
+                AstHelper.GetFirstToken(call.Callee).Line,
+                AstHelper.GetFirstToken(call.Callee).Column));
+
+            return null;
+        }
+    }
+
+    private void ValidateAccessSpecifier(FunctionDeclarationNode func, CallExpressionNode call, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        if (func.OwnerStructName is null || func.AccessLevel != AccessSpecifier.Private)
+        {
+            return;
         }
 
-        // ** VALIDATE ARGUMENT COUNT **
+        string? definingStructFqn = _typeRepository.GetFullyQualifiedOwnerName(func);
+        string? ownerFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction);
+
+        if (definingStructFqn == ownerFqn)
+        {
+            return;
+        }
+
+        diagnostics.Add(new(
+           context.CompilationUnit.FilePath,
+           $"Method '{func.Name}' is private and cannot be accessed from this context.",
+           AstHelper.GetFirstToken(call.Callee).Line,
+           AstHelper.GetFirstToken(call.Callee).Column
+       ));
+    }
+
+    private static void ValidateArgumentCount(FunctionDeclarationNode func, CallExpressionNode call, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
         int expectedArgs = func.OwnerStructName is not null
-            ? func.Parameters.Count - 1 // Don't count implicit 'this'
+            ? func.Parameters.Count - 1
             : func.Parameters.Count;
 
-        if (call.Arguments.Count != expectedArgs)
+        if (call.Arguments.Count == expectedArgs)
         {
-            diagnostics.Add(new Diagnostic(
-                context.CompilationUnit.FilePath,
-                $"Wrong number of arguments for call to '{func.Name}'. Expected {expectedArgs}, but got {call.Arguments.Count}.",
-                AstHelper.GetFirstToken(call).Line,
-                AstHelper.GetFirstToken(call).Column
-            ));
+            return;
         }
 
+        diagnostics.Add(new(
+            context.CompilationUnit.FilePath,
+            $"Wrong number of arguments for call to '{func.Name}'. Expected {expectedArgs}, but got {call.Arguments.Count}.",
+            AstHelper.GetFirstToken(call).Line,
+            AstHelper.GetFirstToken(call).Column
+        ));
+    }
 
-        // Analyze arguments for their types
-        foreach (var arg in call.Arguments)
+    private void AnalyzeArguments(CallExpressionNode call, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        foreach (ExpressionNode arg in call.Arguments)
         {
             _semanticAnalyzer.AnalyzeExpressionType(arg, context, diagnostics);
         }
-
-        // TODO: Validate argument types against function signature
-
-        return _semanticAnalyzer.GetFunctionReturnType(func, context);
     }
 }

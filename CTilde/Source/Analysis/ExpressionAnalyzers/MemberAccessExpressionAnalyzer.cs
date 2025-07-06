@@ -1,12 +1,14 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using CTilde.Diagnostics;
+﻿using CTilde.Diagnostics;
 
 namespace CTilde.Analysis.ExpressionAnalyzers;
 
 public class MemberAccessExpressionAnalyzer : ExpressionAnalyzerBase
 {
+    private record MemberSearchResult(
+        MemberVariableNode? Member,
+        PropertyDefinitionNode? Property,
+        StructDefinitionNode DefiningStruct);
+
     public MemberAccessExpressionAnalyzer(
         SemanticAnalyzer semanticAnalyzer,
         TypeRepository typeRepository,
@@ -19,102 +21,154 @@ public class MemberAccessExpressionAnalyzer : ExpressionAnalyzerBase
     {
         var ma = (MemberAccessExpressionNode)expr;
 
-        var leftType = _semanticAnalyzer.AnalyzeExpressionType(ma.Left, context, diagnostics);
-        if (leftType == "unknown") return "unknown";
-
-        string baseStructType = leftType.TrimEnd('*');
-
-        // Walk up the inheritance chain to find the member or property
-        string? currentStructFqn = baseStructType;
-        MemberVariableNode? member = null;
-        PropertyDefinitionNode? property = null;
-        StructDefinitionNode? definingStruct = null;
-
-        while (currentStructFqn is not null)
+        string leftType = _semanticAnalyzer.AnalyzeExpressionType(ma.Left, context, diagnostics);
+        
+        if (leftType == "unknown")
         {
-            var structDef = _typeRepository.FindStruct(currentStructFqn);
-            if (structDef is null)
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{baseStructType}' is not a struct and has no members.", AstHelper.GetFirstToken(ma.Left).Line, AstHelper.GetFirstToken(ma.Left).Column));
-                return "unknown";
-            }
-
-            member = structDef.Members.FirstOrDefault(m => m.Name.Value == ma.Member.Value);
-            if (member is not null)
-            {
-                definingStruct = structDef;
-                break;
-            }
-
-            property = structDef.Properties.FirstOrDefault(p => p.Name.Value == ma.Member.Value);
-            if (property is not null)
-            {
-                definingStruct = structDef;
-                break;
-            }
-
-            if (string.IsNullOrEmpty(structDef.BaseStructName)) break;
-
-            var unit = _typeRepository.GetCompilationUnitForStruct(currentStructFqn);
-            var baseTypeNode = new SimpleTypeNode(new Token(TokenType.Identifier, structDef.BaseStructName, -1, -1));
-            currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
-        }
-
-        if (member is null && property is null)
-        {
-            diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Type '{baseStructType}' has no member or property named '{ma.Member.Value}'.", ma.Member.Line, ma.Member.Column));
             return "unknown";
         }
 
-        if (member is not null)
+        string baseStructType = leftType.TrimEnd('*');
+
+        MemberSearchResult? searchResult = FindMemberOrPropertyInHierarchy(baseStructType, ma, context, diagnostics);
+
+        if (searchResult is null)
         {
-            if (member.AccessLevel == AccessSpecifier.Private)
-            {
-                if (context.CurrentFunction.OwnerStructName != definingStruct!.Name || context.CurrentFunction.Namespace != definingStruct.Namespace)
-                {
-                    diagnostics.Add(new Diagnostic(
-                        context.CompilationUnit.FilePath,
-                        $"Member '{definingStruct.Name}::{member.Name.Value}' is private and cannot be accessed from this context.",
-                        ma.Member.Line,
-                        ma.Member.Column
-                    ));
-                }
-            }
-            var (_, resolvedMemberType) = _memoryLayoutManager.GetMemberInfo(baseStructType, ma.Member.Value, context.CompilationUnit);
-            return resolvedMemberType;
+            return "unknown";
         }
-        else // property must be non-null
+
+        if (searchResult.Member is not null)
         {
-            if (property!.AccessLevel == AccessSpecifier.Private)
+            return AnalyzeFoundMember(searchResult.Member, searchResult.DefiningStruct, baseStructType, ma, context, diagnostics);
+        }
+
+        return AnalyzeFoundProperty(searchResult.Property!, searchResult.DefiningStruct, ma, context, diagnostics);
+    }
+
+    private MemberSearchResult? FindMemberOrPropertyInHierarchy(string baseStructFqn, MemberAccessExpressionNode ma, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        string? currentStructFqn = baseStructFqn;
+
+        while (currentStructFqn is not null)
+        {
+            StructDefinitionNode? structDef = _typeRepository.FindStruct(currentStructFqn);
+            
+            if (structDef is null)
             {
-                if (context.CurrentFunction.OwnerStructName != definingStruct!.Name || context.CurrentFunction.Namespace != definingStruct.Namespace)
-                {
-                    diagnostics.Add(new Diagnostic(
-                        context.CompilationUnit.FilePath,
-                        $"Property '{definingStruct.Name}::{property.Name.Value}' is private and cannot be accessed from this context.",
-                        ma.Member.Line,
-                        ma.Member.Column
-                    ));
-                }
+                diagnostics.Add(new(
+                    context.CompilationUnit.FilePath,
+                    $"Type '{baseStructFqn}' is not a defined struct.",
+                    AstHelper.GetFirstToken(ma.Left).Line,
+                    AstHelper.GetFirstToken(ma.Left).Column));
+
+                return null;
             }
 
-            bool isLValue = ma.Parent is AssignmentExpressionNode assn && assn.Left == ma;
-            if (isLValue) // It's a 'set'
+            MemberVariableNode? member = structDef.Members.FirstOrDefault(m => m.Name.Value == ma.Member.Value);
+            
+            if (member is not null)
             {
-                if (!property.Accessors.Any(a => a.AccessorKeyword.Value == "set"))
-                {
-                    diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Property '{property.Name.Value}' does not have a 'set' accessor.", ma.Member.Line, ma.Member.Column));
-                }
-            }
-            else // It's a 'get'
-            {
-                if (!property.Accessors.Any(a => a.AccessorKeyword.Value == "get"))
-                {
-                    diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Property '{property.Name.Value}' does not have a 'get' accessor.", ma.Member.Line, ma.Member.Column));
-                }
+                return new MemberSearchResult(member, null, structDef);
             }
 
-            return _typeResolver.ResolveType(property.Type, definingStruct!.Namespace, context.CompilationUnit);
+            PropertyDefinitionNode? property = structDef.Properties.FirstOrDefault(p => p.Name.Value == ma.Member.Value);
+            
+            if (property is not null)
+            {
+                return new MemberSearchResult(null, property, structDef);
+            }
+
+            if (string.IsNullOrEmpty(structDef.BaseStructName))
+            {
+                break;
+            }
+
+            CompilationUnitNode unit = _typeRepository.GetCompilationUnitForStruct(currentStructFqn);
+            SimpleTypeNode baseTypeNode = new(new(TokenType.Identifier, structDef.BaseStructName, -1, -1));
+            currentStructFqn = _typeResolver.ResolveType(baseTypeNode, structDef.Namespace, unit);
         }
+
+        diagnostics.Add(new(
+            context.CompilationUnit.FilePath,
+            $"Type '{baseStructFqn}' has no member or property named '{ma.Member.Value}'.",
+            ma.Member.Line,
+            ma.Member.Column));
+
+        return null;
+    }
+
+    private string AnalyzeFoundMember(MemberVariableNode member,
+        StructDefinitionNode definingStruct,
+        string baseStructType,
+        MemberAccessExpressionNode ma,
+        AnalysisContext context,
+        List<Diagnostic> diagnostics)
+    {
+        if (member.AccessLevel == AccessSpecifier.Private)
+        {
+            string? ownerStructFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction);
+            
+            if (ownerStructFqn != TypeRepository.GetFullyQualifiedName(definingStruct))
+            {
+                diagnostics.Add(new(
+                   context.CompilationUnit.FilePath,
+                   $"Member '{definingStruct.Name}::{member.Name.Value}' is private and cannot be accessed from this context.",
+                   ma.Member.Line,
+                   ma.Member.Column
+               ));
+            }
+        }
+
+        (int _, string resolvedMemberType) = _memoryLayoutManager.GetMemberInfo(
+            baseStructType,
+            ma.Member.Value,
+            context.CompilationUnit);
+
+        return resolvedMemberType;
+    }
+
+    private string AnalyzeFoundProperty(PropertyDefinitionNode property,
+        StructDefinitionNode definingStruct,
+        MemberAccessExpressionNode ma,
+        AnalysisContext context,
+        List<Diagnostic> diagnostics)
+    {
+        if (property.AccessLevel == AccessSpecifier.Private)
+        {
+            string? ownerStructFqn = _typeRepository.GetFullyQualifiedOwnerName(context.CurrentFunction);
+            
+            if (ownerStructFqn != TypeRepository.GetFullyQualifiedName(definingStruct))
+            {
+                diagnostics.Add(new Diagnostic(
+                    context.CompilationUnit.FilePath,
+                    $"Property '{definingStruct.Name}::{property.Name.Value}' is private and cannot be accessed from this context.",
+                    ma.Member.Line,
+                    ma.Member.Column
+                ));
+            }
+        }
+
+        bool isLValue = ma.Parent is AssignmentExpressionNode assn && assn.Left == ma;
+
+        if (isLValue)
+        {
+            if (!property.Accessors.Any(a => a.AccessorKeyword.Value == "set"))
+            {
+                diagnostics.Add(new(
+                    context.CompilationUnit.FilePath,
+                    $"Property '{property.Name.Value}' does not have a 'set' accessor.",
+                    ma.Member.Line,
+                    ma.Member.Column));
+            }
+        }
+        else
+        {
+            if (!property.Accessors.Any(a => a.AccessorKeyword.Value == "get"))
+            {
+                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Property '{property.Name.Value}' does not have a 'get' accessor.", ma.Member.Line, ma.Member.Column));
+            }
+        }
+
+        return _typeResolver.ResolveType(property.Type, definingStruct.Namespace, context.CompilationUnit);
     }
 }

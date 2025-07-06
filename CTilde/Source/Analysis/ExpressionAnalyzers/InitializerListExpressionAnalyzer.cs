@@ -1,5 +1,4 @@
-﻿using System.Collections.Generic;
-using CTilde.Diagnostics;
+﻿using CTilde.Diagnostics;
 
 namespace CTilde.Analysis.ExpressionAnalyzers;
 
@@ -16,9 +15,13 @@ public class InitializerListExpressionAnalyzer : ExpressionAnalyzerBase
     public override string Analyze(ExpressionNode expr, AnalysisContext context, List<Diagnostic> diagnostics)
     {
         var il = (InitializerListExpressionNode)expr;
-        // This method is only called if an initializer list is used as a standalone expression,
-        // which is illegal. AnalyzeDeclarationStatement handles the valid case directly.
-        diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, "Initializer lists can only be used to initialize a variable.", il.OpeningBrace.Line, il.OpeningBrace.Column));
+
+        diagnostics.Add(new(
+            context.CompilationUnit.FilePath,
+            "Initializer lists can only be used to initialize a variable.",
+            il.OpeningBrace.Line,
+            il.OpeningBrace.Column));
+
         return "unknown";
     }
 }

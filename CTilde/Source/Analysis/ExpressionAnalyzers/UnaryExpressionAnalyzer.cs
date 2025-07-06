@@ -1,6 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using CTilde.Diagnostics;
+﻿using CTilde.Diagnostics;
 
 namespace CTilde.Analysis.ExpressionAnalyzers;
 
@@ -18,26 +16,46 @@ public class UnaryExpressionAnalyzer : ExpressionAnalyzerBase
     {
         var u = (UnaryExpressionNode)expr;
 
-        if (u.Operator.Type == TokenType.Ampersand) // Address-of operator
+        return u.Operator.Type switch
         {
-            var operandType = _semanticAnalyzer.AnalyzeExpressionType(u.Right, context, diagnostics);
-            if (operandType == "unknown") return "unknown";
-            return operandType + "*";
+            TokenType.Ampersand => AnalyzeAddressOfOperator(u, context, diagnostics),
+            TokenType.Star => AnalyzeDereferenceOperator(u, context, diagnostics),
+            _ => _semanticAnalyzer.AnalyzeExpressionType(u.Right, context, diagnostics),
+        };
+    }
+
+    private string AnalyzeAddressOfOperator(UnaryExpressionNode u, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        string operandType = _semanticAnalyzer.AnalyzeExpressionType(u.Right, context, diagnostics);
+        
+        if (operandType == "unknown")
+        {
+            return "unknown";
         }
 
-        if (u.Operator.Type == TokenType.Star) // Dereference operator
+        return operandType + "*";
+    }
+
+    private string AnalyzeDereferenceOperator(UnaryExpressionNode u, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        string operandType = _semanticAnalyzer.AnalyzeExpressionType(u.Right, context, diagnostics);
+        
+        if (operandType == "unknown")
         {
-            var operandType = _semanticAnalyzer.AnalyzeExpressionType(u.Right, context, diagnostics);
-            if (operandType == "unknown") return "unknown";
-            if (!operandType.EndsWith("*"))
-            {
-                diagnostics.Add(new Diagnostic(context.CompilationUnit.FilePath, $"Cannot dereference non-pointer type '{operandType}'.", u.Operator.Line, u.Operator.Column));
-                return "unknown";
-            }
-            return operandType[..^1]; // Remove one level of indirection
+            return "unknown";
         }
 
-        // For other unary operators like negation ('-'), the type does not change.
-        return _semanticAnalyzer.AnalyzeExpressionType(u.Right, context, diagnostics);
+        if (!operandType.EndsWith("*"))
+        {
+            diagnostics.Add(new(
+                context.CompilationUnit.FilePath,
+                $"Cannot dereference non-pointer type '{operandType}'.",
+                u.Operator.Line,
+                u.Operator.Column));
+
+            return "unknown";
+        }
+
+        return operandType[..^1];
     }
 }

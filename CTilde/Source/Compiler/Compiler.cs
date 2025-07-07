@@ -16,6 +16,13 @@ public class Compiler
     {
         // 1. Initialize state for this compilation run
         var compilation = new Compilation(entryFilePath, options);
+        using var logger = options.LogOptimizations ? new OptimizationLogger(options.OptimizationLogPath) : null;
+        compilation.OptimizationLogger = logger;
+
+        if (logger is not null)
+        {
+            Console.WriteLine($"Logging optimizations to '{Path.GetFullPath(options.OptimizationLogPath)}'");
+        }
 
         // 2. Run parsing stage
         if (!CompilationPipeline.RunParsingStage(compilation))

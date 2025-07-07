@@ -17,6 +17,8 @@ public class Program
             OptimizationOptions defaultOptions = new()
             {
                 EnableConstantFolding = true,
+                EnablePeepholeOptimization = true,
+                LogOptimizations = true,
                 OutputType = OutputType.Console
             };
 
@@ -38,6 +40,10 @@ public class Program
                         break;
                     case "--optimize":
                         cliOptions.EnableConstantFolding = true;
+                        cliOptions.EnablePeepholeOptimization = true;
+                        break;
+                    case "--log-opts":
+                        cliOptions.LogOptimizations = true;
                         break;
                     default:
                         Console.WriteLine($"Warning: Unknown argument '{args[i]}' ignored.");
@@ -48,6 +54,9 @@ public class Program
             Console.WriteLine($"Compiling '{entryFilePath}'...");
             Console.WriteLine($"  Output Type: {cliOptions.OutputType}");
             Console.WriteLine($"  Constant Folding: {(cliOptions.EnableConstantFolding ? "Enabled" : "Disabled")}");
+            Console.WriteLine($"  Peephole Optimization: {(cliOptions.EnablePeepholeOptimization ? "Enabled" : "Disabled")}");
+            Console.WriteLine($"  Log Optimizations: {(cliOptions.LogOptimizations ? "Enabled" : "Disabled")}");
+
 
             compiler.Compile(entryFilePath, cliOptions);
         }

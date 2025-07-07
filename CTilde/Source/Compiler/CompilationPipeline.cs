@@ -31,7 +31,7 @@ public static class CompilationPipeline
         if (compilation.Options.EnableConstantFolding && compilation.ProgramNode is not null)
         {
             AstOptimizer? optimizer = new();
-            compilation.ProgramNode = optimizer.Optimize(compilation.ProgramNode);
+            compilation.ProgramNode = optimizer.Optimize(compilation.ProgramNode, compilation.OptimizationLogger);
         }
     }
 
@@ -56,7 +56,15 @@ public static class CompilationPipeline
             compilation.SemanticAnalyzer,
             compilation.Options);
 
-        return generator.Generate();
+        string asmCode = generator.Generate();
+
+        if (compilation.Options.EnablePeepholeOptimization)
+        {
+            var peepholeOptimizer = new PeepholeOptimizer();
+            asmCode = peepholeOptimizer.Optimize(asmCode, compilation.OptimizationLogger);
+        }
+
+        return asmCode;
     }
 
     private static void ParseIntoCompilationUnits(Compilation compilation)

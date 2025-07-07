@@ -13,6 +13,7 @@ public class Compilation
     public Dictionary<string, string[]> SourceFileCache { get; } = new();
     public List<string> AllFiles { get; set; } = new();
     public ProgramNode? ProgramNode { get; set; }
+    public OptimizationLogger? OptimizationLogger { get; set; }
 
     // Analysis Services
     public TypeRepository? TypeRepository { get; set; }

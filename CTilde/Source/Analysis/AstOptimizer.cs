@@ -1,21 +1,40 @@
-﻿namespace CTilde.Analysis;
+﻿using System.Linq;
+using CTilde.Diagnostics;
+
+namespace CTilde.Analysis;
 
 public class AstOptimizer
 {
     private readonly Parser _dummyParser = new([]);
+    private OptimizationLogger? _logger;
 
-    public ProgramNode Optimize(ProgramNode programNode)
+    public ProgramNode Optimize(ProgramNode programNode, OptimizationLogger? logger)
     {
+        _logger = logger;
         ProgramNode newProgram = Visit(programNode);
         _dummyParser.SetParents(newProgram, null);
 
         return newProgram;
     }
 
+    private string GetContextString(AstNode node)
+    {
+        var func = node.Ancestors().OfType<FunctionDeclarationNode>().FirstOrDefault();
+        if (func != null) return $"Function '{func.Name}'";
+
+        var ctor = node.Ancestors().OfType<ConstructorDeclarationNode>().FirstOrDefault();
+        if (ctor != null) return $"Constructor for '{ctor.OwnerStructName}'";
+
+        var dtor = node.Ancestors().OfType<DestructorDeclarationNode>().FirstOrDefault();
+        if (dtor != null) return $"Destructor for '{dtor.OwnerStructName}'";
+
+        return "Global scope";
+    }
+
     private T? Visit<T>(T? node) where T : AstNode
     {
-        return node is null 
-            ? null 
+        return node is null
+            ? null
             : (T)Visit((dynamic)node);
     }
 
@@ -106,30 +125,49 @@ public class AstOptimizer
         if (left is IntegerLiteralNode l && right is IntegerLiteralNode r)
         {
             Token token = l.Token;
+            var originalExpression = $"{l.Value} {node.Operator.Value} {r.Value}";
+            IntegerLiteralNode? result = null;
 
             switch (node.Operator.Type)
             {
                 case TokenType.Plus:
-                    return new IntegerLiteralNode(token, l.Value + r.Value);
+                    result = new IntegerLiteralNode(token, l.Value + r.Value);
+                    break;
                 case TokenType.Minus:
-                    return new IntegerLiteralNode(token, l.Value - r.Value);
+                    result = new IntegerLiteralNode(token, l.Value - r.Value);
+                    break;
                 case TokenType.Star:
-                    return new IntegerLiteralNode(token, l.Value * r.Value);
+                    result = new IntegerLiteralNode(token, l.Value * r.Value);
+                    break;
                 case TokenType.Slash:
                     if (r.Value != 0) // Avoid division by zero at compile time
                     {
-                        return new IntegerLiteralNode(token, l.Value / r.Value);
+                        result = new IntegerLiteralNode(token, l.Value / r.Value);
                     }
-
                     break; // Fall through to not optimize
                 case TokenType.DoubleEquals:
-                    return new IntegerLiteralNode(token, l.Value == r.Value ? 1 : 0);
+                    result = new IntegerLiteralNode(token, l.Value == r.Value ? 1 : 0);
+                    break;
                 case TokenType.NotEquals:
-                    return new IntegerLiteralNode(token, l.Value != r.Value ? 1 : 0);
+                    result = new IntegerLiteralNode(token, l.Value != r.Value ? 1 : 0);
+                    break;
                 case TokenType.LessThan:
-                    return new IntegerLiteralNode(token, l.Value < r.Value ? 1 : 0);
+                    result = new IntegerLiteralNode(token, l.Value < r.Value ? 1 : 0);
+                    break;
                 case TokenType.GreaterThan:
-                    return new IntegerLiteralNode(token, l.Value > r.Value ? 1 : 0);
+                    result = new IntegerLiteralNode(token, l.Value > r.Value ? 1 : 0);
+                    break;
+            }
+
+            if (result is not null)
+            {
+                _logger?.Log(
+                    "Constant Folding",
+                    originalExpression,
+                    result.Value.ToString(),
+                    GetContextString(node)
+                );
+                return result;
             }
         }
 
@@ -146,17 +184,17 @@ public class AstOptimizer
         return n;
     }
 
-    private UsingDirectiveNode Visit(UsingDirectiveNode n) 
+    private UsingDirectiveNode Visit(UsingDirectiveNode n)
     {
         return n;
     }
 
-    private StructDefinitionNode Visit(StructDefinitionNode n) 
+    private StructDefinitionNode Visit(StructDefinitionNode n)
     {
         return n;
     }
 
-    private EnumDefinitionNode Visit(EnumDefinitionNode n) 
+    private EnumDefinitionNode Visit(EnumDefinitionNode n)
     {
         return n;
     }

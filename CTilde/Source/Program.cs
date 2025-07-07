@@ -8,7 +8,8 @@ public class Program
 
         OptimizationOptions options = new()
         {
-            EnableConstantFolding = true
+            EnableConstantFolding = true,
+            OutputType = OutputType.Console
         };
 
         compiler.Compile("Code/main.c", options);

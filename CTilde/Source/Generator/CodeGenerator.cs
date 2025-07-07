@@ -13,6 +13,7 @@ public class CodeGenerator
     internal VTableManager VTableManager { get; }
     internal MemoryLayoutManager MemoryLayoutManager { get; }
     internal SemanticAnalyzer SemanticAnalyzer { get; }
+    internal OptimizationOptions Options { get; }
     internal AssemblyBuilder Builder { get; } = new();
 
     private int _labelIdCounter;
@@ -30,7 +31,8 @@ public class CodeGenerator
         FunctionResolver functionResolver,
         VTableManager vtableManager,
         MemoryLayoutManager memoryLayoutManager,
-        SemanticAnalyzer semanticAnalyzer)
+        SemanticAnalyzer semanticAnalyzer,
+        OptimizationOptions options)
     {
         Program = program;
         TypeRepository = typeRepository;
@@ -39,6 +41,7 @@ public class CodeGenerator
         VTableManager = vtableManager;
         MemoryLayoutManager = memoryLayoutManager;
         SemanticAnalyzer = semanticAnalyzer;
+        Options = options;
 
         ExpressionGenerator = new ExpressionGenerator(this);
         StatementGenerator = new StatementGenerator(this);
@@ -56,7 +59,7 @@ public class CodeGenerator
             }
 
         var fasmWriter = new FasmWriter();
-        fasmWriter.WritePreamble(Builder);
+        fasmWriter.WritePreamble(Builder, Options.OutputType);
 
         GenerateVTables();
         fasmWriter.WriteDataSection(Builder, _stringLiterals);

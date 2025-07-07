@@ -53,7 +53,8 @@ public static class CompilationPipeline
             compilation.FunctionResolver,
             compilation.VTableManager,
             compilation.MemoryLayoutManager,
-            compilation.SemanticAnalyzer);
+            compilation.SemanticAnalyzer,
+            compilation.Options);
 
         return generator.Generate();
     }

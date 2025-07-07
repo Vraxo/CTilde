@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
@@ -6,9 +7,15 @@ namespace CTilde;
 
 public class FasmWriter
 {
-    public void WritePreamble(AssemblyBuilder builder)
+    public void WritePreamble(AssemblyBuilder builder, OutputType outputType)
     {
-        builder.AppendDirective("format PE GUI 4.0");
+        string formatDirective = outputType switch
+        {
+            OutputType.Console => "format PE console",
+            OutputType.Gui => "format PE GUI 4.0",
+            _ => throw new ArgumentOutOfRangeException(nameof(outputType), $"Unsupported output type: {outputType}")
+        };
+        builder.AppendDirective(formatDirective);
         builder.AppendDirective("entry start");
         builder.AppendBlankLine();
         builder.AppendDirective("include 'win32a.inc'");

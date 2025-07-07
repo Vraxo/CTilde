@@ -172,6 +172,8 @@ public class SemanticAnalyzerRunner
             return; // Do not process this statement further
         }
 
+        _analyzer.AnalyzeStatement(statement, context, Diagnostics);
+
         switch (statement)
         {
             case BlockStatementNode block:
@@ -182,27 +184,18 @@ public class SemanticAnalyzerRunner
                     if (s is ReturnStatementNode) blockIsReachable = false;
                 }
                 break;
-            case ExpressionStatementNode exprStmt:
-                _analyzer.AnalyzeExpressionType(exprStmt.Expression, context, Diagnostics);
-                break;
-            case ReturnStatementNode retStmt:
-                _analyzer.AnalyzeReturnStatement(retStmt, context, Diagnostics);
-                break;
             case IfStatementNode ifStmt:
-                _analyzer.AnalyzeExpressionType(ifStmt.Condition, context, Diagnostics);
                 WalkStatement(ifStmt.ThenBody, context);
                 if (ifStmt.ElseBody is not null) WalkStatement(ifStmt.ElseBody, context);
                 break;
             case WhileStatementNode whileStmt:
-                _analyzer.AnalyzeExpressionType(whileStmt.Condition, context, Diagnostics);
                 WalkStatement(whileStmt.Body, context);
                 break;
-            case DeclarationStatementNode decl:
-                // Special handling for declarations since initializer lists are not standalone expressions.
-                _analyzer.AnalyzeDeclarationStatement(decl, context, Diagnostics);
-                break;
-            case DeleteStatementNode deleteStmt:
-                _analyzer.AnalyzeDeleteStatement(deleteStmt, context, Diagnostics);
+            // Leaf statements that have already been analyzed and have no children to traverse.
+            case ExpressionStatementNode:
+            case ReturnStatementNode:
+            case DeclarationStatementNode:
+            case DeleteStatementNode:
                 break;
         }
     }

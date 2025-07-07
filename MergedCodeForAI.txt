@@ -4,24 +4,74 @@ namespace CTilde;
 public class OptimizationOptions
 {
     public bool EnableConstantFolding { get; set; } = false;
+    public OutputType OutputType { get; set; } = OutputType.Console;
+}
+</file>
+
+<file path="OutputType.cs">
+namespace CTilde;
+
+public enum OutputType
+{
+    Gui,
+    Console
 }
 </file>
 
 <file path="Program.cs">
+using System;
+
 namespace CTilde;
 
 public class Program
 {
-    public static void Main()
+    public static void Main(string[] args)
     {
         Compiler compiler = new();
 
-        OptimizationOptions options = new()
+        if (args.Length == 0)
         {
-            EnableConstantFolding = true
-        };
+            // Default behavior when no arguments are provided.
+            // This preserves the simple "F5 to run" development experience.
+            Console.WriteLine("No input file specified. Compiling default 'Code/main.c'...");
 
-        compiler.Compile("Code/main.c", options);
+            OptimizationOptions defaultOptions = new()
+            {
+                EnableConstantFolding = true,
+                OutputType = OutputType.Console
+            };
+
+            compiler.Compile("Code/main.c", defaultOptions);
+        }
+        else
+        {
+            // Behavior when command-line arguments are provided.
+            string entryFilePath = args[0];
+            OptimizationOptions cliOptions = new(); // Starts with defaults
+
+            // Simple argument parsing for flags.
+            for (int i = 1; i < args.Length; i++)
+            {
+                switch (args[i].ToLowerInvariant())
+                {
+                    case "--gui":
+                        cliOptions.OutputType = OutputType.Gui;
+                        break;
+                    case "--optimize":
+                        cliOptions.EnableConstantFolding = true;
+                        break;
+                    default:
+                        Console.WriteLine($"Warning: Unknown argument '{args[i]}' ignored.");
+                        break;
+                }
+            }
+
+            Console.WriteLine($"Compiling '{entryFilePath}'...");
+            Console.WriteLine($"  Output Type: {cliOptions.OutputType}");
+            Console.WriteLine($"  Constant Folding: {(cliOptions.EnableConstantFolding ? "Enabled" : "Disabled")}");
+
+            compiler.Compile(entryFilePath, cliOptions);
+        }
     }
 }
 </file>
@@ -687,6 +737,7 @@ public class Monomorphizer
 
 <file path="Analysis\SemanticAnalyzer.cs">
 using CTilde.Analysis.ExpressionAnalyzers;
+using CTilde.Analysis.StatementAnalyzers;
 using CTilde.Diagnostics;
 
 namespace CTilde;
@@ -699,6 +750,7 @@ public class SemanticAnalyzer
     private readonly MemoryLayoutManager _memoryLayoutManager;
 
     private readonly Dictionary<Type, IExpressionAnalyzer> _expressionAnalyzers;
+    private readonly Dictionary<Type, IStatementAnalyzer> _statementAnalyzers;
 
     public SemanticAnalyzer(TypeRepository typeRepository, TypeResolver typeResolver, FunctionResolver functionResolver, MemoryLayoutManager memoryLayoutManager)
     {
@@ -722,13 +774,23 @@ public class SemanticAnalyzer
             { typeof(BinaryExpressionNode), new BinaryExpressionAnalyzer(this, typeRepository, typeResolver, functionResolver, memoryLayoutManager) },
             { typeof(InitializerListExpressionNode), new InitializerListExpressionAnalyzer(this, typeRepository, typeResolver, functionResolver, memoryLayoutManager) }
         };
+
+        _statementAnalyzers = new()
+        {
+            { typeof(DeclarationStatementNode), new DeclarationStatementAnalyzer(this, typeRepository, typeResolver, functionResolver, memoryLayoutManager) },
+            { typeof(ReturnStatementNode), new ReturnStatementAnalyzer(this, typeRepository, typeResolver, functionResolver, memoryLayoutManager) },
+            { typeof(DeleteStatementNode), new DeleteStatementAnalyzer(this, typeRepository, typeResolver, functionResolver, memoryLayoutManager) },
+            { typeof(ExpressionStatementNode), new ExpressionStatementAnalyzer(this, typeRepository, typeResolver, functionResolver, memoryLayoutManager) },
+            { typeof(IfStatementNode), new IfStatementAnalyzer(this, typeRepository, typeResolver, functionResolver, memoryLayoutManager) },
+            { typeof(WhileStatementNode), new WhileStatementAnalyzer(this, typeRepository, typeResolver, functionResolver, memoryLayoutManager) }
+        };
     }
 
     public string AnalyzeExpressionType(ExpressionNode expr, AnalysisContext context)
     {
         List<Diagnostic> diagnostics = [];
         string type = AnalyzeExpressionType(expr, context, diagnostics);
-        
+
         if (diagnostics.Count != 0)
         {
             throw new InvalidOperationException($"Internal Compiler Error: Unexpected semantic error during code generation: {diagnostics.First().Message}");
@@ -762,185 +824,30 @@ public class SemanticAnalyzer
         }
     }
 
-    public void AnalyzeDeclarationStatement(DeclarationStatementNode decl, AnalysisContext context, List<Diagnostic> diagnostics)
+    public void AnalyzeStatement(StatementNode stmt, AnalysisContext context, List<Diagnostic> diagnostics)
     {
-        string declaredTypeFqn;
-
         try
         {
-            declaredTypeFqn = _typeResolver.ResolveType(decl.Type, context.CurrentFunction.Namespace, context.CompilationUnit);
+            if (_statementAnalyzers.TryGetValue(stmt.GetType(), out var analyzer))
+            {
+                analyzer.Analyze(stmt, context, diagnostics);
+            }
         }
         catch (InvalidOperationException ex)
         {
-            Token token = decl.Type.GetFirstToken();
+            Token token = AstHelper.GetFirstToken(stmt);
 
             diagnostics.Add(new(
                 context.CompilationUnit.FilePath,
                 ex.Message,
                 token.Line,
                 token.Column));
-
-            declaredTypeFqn = "unknown";
-        }
-
-        if (declaredTypeFqn == "unknown")
-        {
-            return;
-        }
-
-        if (decl.Initializer is InitializerListExpressionNode il)
-        {
-            StructDefinitionNode? structDef = _typeRepository.FindStruct(declaredTypeFqn);
-
-            if (structDef is null)
-            {
-                Token token = decl.Type.GetFirstToken();
-
-                diagnostics.Add(new(
-                    context.CompilationUnit.FilePath,
-                    $"Type '{declaredTypeFqn}' is not a struct and cannot be initialized with an initializer list.",
-                    token.Line,
-                    token.Column));
-
-                return;
-            }
-
-            List<(string name, string type, int offset, bool isConst)> members = _memoryLayoutManager.GetAllMembers(declaredTypeFqn, context.CompilationUnit);
-            
-            if (il.Values.Count > members.Count)
-            {
-                diagnostics.Add(new(
-                    context.CompilationUnit.FilePath,
-                    $"Too many elements in initializer list for type '{structDef.Name}'.",
-                    il.OpeningBrace.Line,
-                    il.OpeningBrace.Column));
-            }
-
-            for (int i = 0; i < Math.Min(il.Values.Count, members.Count); i++)
-            {
-                (string name, string type, _, _) = members[i];
-                ExpressionNode valueExpr = il.Values[i];
-                string valueType = AnalyzeExpressionType(valueExpr, context, diagnostics);
-
-                bool isIntToCharLiteralConversion =
-                    valueType == "int" && type == "char" && valueExpr is IntegerLiteralNode;
-
-                if (valueType != "unknown" && type != valueType && !isIntToCharLiteralConversion)
-                {
-                    Token token = AstHelper.GetFirstToken(valueExpr);
-
-                    diagnostics.Add(new(
-                        context.CompilationUnit.FilePath,
-                        $"Cannot initialize member '{name}' (type '{type}') with a value of type '{valueType}'.",
-                        token.Line,
-                        token.Column));
-                }
-            }
-        }
-        else if (decl.Initializer is not null)
-        {
-            string initializerType = AnalyzeExpressionType(decl.Initializer, context, diagnostics);
-            bool isIntToCharLiteralConversion = declaredTypeFqn == "char" && initializerType == "int" && decl.Initializer is IntegerLiteralNode;
-            bool isIntToPointerConversion = declaredTypeFqn.EndsWith('*') && initializerType == "int";
-
-            if (initializerType == "unknown" || declaredTypeFqn == initializerType || isIntToCharLiteralConversion || isIntToPointerConversion)
-            {
-                return;
-            }
-
-            diagnostics.Add(new(
-                context.CompilationUnit.FilePath,
-                $"Cannot implicitly convert type '{initializerType}' to '{declaredTypeFqn}'.",
-                AstHelper.GetFirstToken(decl.Initializer).Line,
-                AstHelper.GetFirstToken(decl.Initializer).Column));
-        }
-        else if (decl.ConstructorArguments is not null)
-        {
-            foreach (ExpressionNode arg in decl.ConstructorArguments)
-            {
-                AnalyzeExpressionType(arg, context, diagnostics);
-            }
         }
     }
 
     public string GetFunctionReturnType(FunctionDeclarationNode func, AnalysisContext context)
     {
         return _typeResolver.ResolveType(func.ReturnType, func.Namespace, context.CompilationUnit);
-    }
-
-    public void AnalyzeReturnStatement(ReturnStatementNode ret, AnalysisContext context, List<Diagnostic> diagnostics)
-    {
-        string funcReturnType = GetFunctionReturnType(context.CurrentFunction, context);
-
-        if (ret.Expression is null)
-        {
-            if (funcReturnType != "void")
-            {
-                Token _token = AstHelper.GetFirstToken(ret);
-
-                diagnostics.Add(new(
-                    context.CompilationUnit.FilePath,
-                    $"Non-void function '{context.CurrentFunction.Name}' must return a value.",
-                    _token.Line,
-                    _token.Column));
-            }
-
-            return;
-        }
-
-        if (funcReturnType == "void")
-        {
-            Token _token = AstHelper.GetFirstToken(ret);
-
-            diagnostics.Add(new(
-                context.CompilationUnit.FilePath,
-                $"Cannot return a value from void function '{context.CurrentFunction.Name}'.",
-                _token.Line,
-                _token.Column));
-
-            return;
-        }
-
-        string exprType = AnalyzeExpressionType(ret.Expression, context, diagnostics);
-
-        if (exprType == "unknown" || exprType == funcReturnType)
-        {
-            return;
-        }
-
-        bool isIntToCharLiteralConversion = funcReturnType == "char" && exprType == "int" && ret.Expression is IntegerLiteralNode;
-        bool isGenericReturn = funcReturnType.Length == 1 && char.IsUpper(funcReturnType[0]) || exprType.Length == 1 && char.IsUpper(exprType[0]);
-
-        if (isIntToCharLiteralConversion || isGenericReturn)
-        {
-            return;
-        }
-
-        Token token = AstHelper.GetFirstToken(ret.Expression);
-
-        diagnostics.Add(new(
-            context.CompilationUnit.FilePath,
-            $"Cannot implicitly convert return type '{exprType}' to '{funcReturnType}'.",
-            token.Line,
-            token.Column));
-    }
-
-    public void AnalyzeDeleteStatement(DeleteStatementNode deleteStmt, AnalysisContext context, List<Diagnostic> diagnostics)
-    {
-        string exprType = AnalyzeExpressionType(deleteStmt.Expression, context, diagnostics);
-
-        if (exprType == "unknown" || exprType.EndsWith('*'))
-        {
-            return;
-        }
-
-        Token token = AstHelper.GetFirstToken(deleteStmt.Expression);
-
-        diagnostics.Add(new(
-            context.CompilationUnit.FilePath,
-            $"'delete' operator can only be applied to pointers, not type '{exprType}'.",
-            token.Line,
-            token.Column));
     }
 }
 </file>
@@ -1120,6 +1027,8 @@ public class SemanticAnalyzerRunner
             return; // Do not process this statement further
         }
 
+        _analyzer.AnalyzeStatement(statement, context, Diagnostics);
+
         switch (statement)
         {
             case BlockStatementNode block:
@@ -1130,27 +1039,18 @@ public class SemanticAnalyzerRunner
                     if (s is ReturnStatementNode) blockIsReachable = false;
                 }
                 break;
-            case ExpressionStatementNode exprStmt:
-                _analyzer.AnalyzeExpressionType(exprStmt.Expression, context, Diagnostics);
-                break;
-            case ReturnStatementNode retStmt:
-                _analyzer.AnalyzeReturnStatement(retStmt, context, Diagnostics);
-                break;
             case IfStatementNode ifStmt:
-                _analyzer.AnalyzeExpressionType(ifStmt.Condition, context, Diagnostics);
                 WalkStatement(ifStmt.ThenBody, context);
                 if (ifStmt.ElseBody is not null) WalkStatement(ifStmt.ElseBody, context);
                 break;
             case WhileStatementNode whileStmt:
-                _analyzer.AnalyzeExpressionType(whileStmt.Condition, context, Diagnostics);
                 WalkStatement(whileStmt.Body, context);
                 break;
-            case DeclarationStatementNode decl:
-                // Special handling for declarations since initializer lists are not standalone expressions.
-                _analyzer.AnalyzeDeclarationStatement(decl, context, Diagnostics);
-                break;
-            case DeleteStatementNode deleteStmt:
-                _analyzer.AnalyzeDeleteStatement(deleteStmt, context, Diagnostics);
+            // Leaf statements that have already been analyzed and have no children to traverse.
+            case ExpressionStatementNode:
+            case ReturnStatementNode:
+            case DeclarationStatementNode:
+            case DeleteStatementNode:
                 break;
         }
     }
@@ -1627,7 +1527,8 @@ public static class CompilationPipeline
             compilation.FunctionResolver,
             compilation.VTableManager,
             compilation.MemoryLayoutManager,
-            compilation.SemanticAnalyzer);
+            compilation.SemanticAnalyzer,
+            compilation.Options);
 
         return generator.Generate();
     }
@@ -1791,7 +1692,7 @@ public class Compiler
         }
 
         // 7. Output to file
-        string? outputAsmPath = OutputAssembly(asmCode);
+        string? outputAsmPath = OutputAssembly(asmCode, compilation.EntryFilePath);
 
         // 8. Execute FASM to assemble the code
         var assembler = new Assembler();
@@ -1812,11 +1713,20 @@ public class Compiler
         }
     }
 
-    private static string OutputAssembly(string asmCode)
+    private static string OutputAssembly(string asmCode, string entryFilePath)
     {
-        string? outputAsmPath = "Code/Output/output.asm";
+        // Place the output relative to the source file, which is more intuitive.
+        string sourceDirectory = Path.GetDirectoryName(entryFilePath) ?? ".";
+        string outputDirectory = Path.Combine(sourceDirectory, "output");
+
+        // Ensure the output directory exists before writing to it.
+        // This is the direct fix for the DirectoryNotFoundException.
+        Directory.CreateDirectory(outputDirectory);
+
+        string outputAsmPath = Path.Combine(outputDirectory, "output.asm");
+
         File.WriteAllText(outputAsmPath, asmCode);
-        Console.WriteLine($"Compilation successful. Assembly code written to {outputAsmPath}");
+        Console.WriteLine($"Compilation successful. Assembly code written to {Path.GetFullPath(outputAsmPath)}");
         return outputAsmPath;
     }
 }
@@ -1970,6 +1880,7 @@ public class CodeGenerator
     internal VTableManager VTableManager { get; }
     internal MemoryLayoutManager MemoryLayoutManager { get; }
     internal SemanticAnalyzer SemanticAnalyzer { get; }
+    internal OptimizationOptions Options { get; }
     internal AssemblyBuilder Builder { get; } = new();
 
     private int _labelIdCounter;
@@ -1987,7 +1898,8 @@ public class CodeGenerator
         FunctionResolver functionResolver,
         VTableManager vtableManager,
         MemoryLayoutManager memoryLayoutManager,
-        SemanticAnalyzer semanticAnalyzer)
+        SemanticAnalyzer semanticAnalyzer,
+        OptimizationOptions options)
     {
         Program = program;
         TypeRepository = typeRepository;
@@ -1996,6 +1908,7 @@ public class CodeGenerator
         VTableManager = vtableManager;
         MemoryLayoutManager = memoryLayoutManager;
         SemanticAnalyzer = semanticAnalyzer;
+        Options = options;
 
         ExpressionGenerator = new ExpressionGenerator(this);
         StatementGenerator = new StatementGenerator(this);
@@ -2013,7 +1926,7 @@ public class CodeGenerator
             }
 
         var fasmWriter = new FasmWriter();
-        fasmWriter.WritePreamble(Builder);
+        fasmWriter.WritePreamble(Builder, Options.OutputType);
 
         GenerateVTables();
         fasmWriter.WriteDataSection(Builder, _stringLiterals);
@@ -2357,6 +2270,7 @@ public class ExpressionGenerator
 </file>
 
 <file path="Generator\FasmWriter.cs">
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -2365,9 +2279,15 @@ namespace CTilde;
 
 public class FasmWriter
 {
-    public void WritePreamble(AssemblyBuilder builder)
+    public void WritePreamble(AssemblyBuilder builder, OutputType outputType)
     {
-        builder.AppendDirective("format PE GUI 4.0");
+        string formatDirective = outputType switch
+        {
+            OutputType.Console => "format PE console",
+            OutputType.Gui => "format PE GUI 4.0",
+            _ => throw new ArgumentOutOfRangeException(nameof(outputType), $"Unsupported output type: {outputType}")
+        };
+        builder.AppendDirective(formatDirective);
         builder.AppendDirective("entry start");
         builder.AppendBlankLine();
         builder.AppendDirective("include 'win32a.inc'");
@@ -5663,6 +5583,300 @@ public class VariableExpressionAnalyzer : ExpressionAnalyzerBase
         }
 
         return null;
+    }
+}
+</file>
+
+<file path="Analysis\StatementAnalyzer\DeclarationStatementAnalyzer.cs">
+using CTilde.Diagnostics;
+
+namespace CTilde.Analysis.StatementAnalyzers;
+
+public class DeclarationStatementAnalyzer : StatementAnalyzerBase
+{
+    public DeclarationStatementAnalyzer(
+        SemanticAnalyzer semanticAnalyzer,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        MemoryLayoutManager memoryLayoutManager)
+        : base(semanticAnalyzer, typeRepository, typeResolver, functionResolver, memoryLayoutManager) { }
+
+    public override void Analyze(StatementNode stmt, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var decl = (DeclarationStatementNode)stmt;
+        string declaredTypeFqn;
+
+        try
+        {
+            declaredTypeFqn = _typeResolver.ResolveType(decl.Type, context.CurrentFunction.Namespace, context.CompilationUnit);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Token token = decl.Type.GetFirstToken();
+            diagnostics.Add(new(context.CompilationUnit.FilePath, ex.Message, token.Line, token.Column));
+            declaredTypeFqn = "unknown";
+        }
+
+        if (declaredTypeFqn == "unknown")
+        {
+            return;
+        }
+
+        if (decl.Initializer is InitializerListExpressionNode il)
+        {
+            StructDefinitionNode? structDef = _typeRepository.FindStruct(declaredTypeFqn);
+            if (structDef is null)
+            {
+                Token token = decl.Type.GetFirstToken();
+                diagnostics.Add(new(context.CompilationUnit.FilePath, $"Type '{declaredTypeFqn}' is not a struct and cannot be initialized with an initializer list.", token.Line, token.Column));
+                return;
+            }
+
+            List<(string name, string type, int offset, bool isConst)> members = _memoryLayoutManager.GetAllMembers(declaredTypeFqn, context.CompilationUnit);
+            if (il.Values.Count > members.Count)
+            {
+                diagnostics.Add(new(context.CompilationUnit.FilePath, $"Too many elements in initializer list for type '{structDef.Name}'.", il.OpeningBrace.Line, il.OpeningBrace.Column));
+            }
+
+            for (int i = 0; i < Math.Min(il.Values.Count, members.Count); i++)
+            {
+                (string name, string type, _, _) = members[i];
+                ExpressionNode valueExpr = il.Values[i];
+                string valueType = _semanticAnalyzer.AnalyzeExpressionType(valueExpr, context, diagnostics);
+
+                bool isIntToCharLiteralConversion = valueType == "int" && type == "char" && valueExpr is IntegerLiteralNode;
+                if (valueType != "unknown" && type != valueType && !isIntToCharLiteralConversion)
+                {
+                    Token token = AstHelper.GetFirstToken(valueExpr);
+                    diagnostics.Add(new(context.CompilationUnit.FilePath, $"Cannot initialize member '{name}' (type '{type}') with a value of type '{valueType}'.", token.Line, token.Column));
+                }
+            }
+        }
+        else if (decl.Initializer is not null)
+        {
+            string initializerType = _semanticAnalyzer.AnalyzeExpressionType(decl.Initializer, context, diagnostics);
+            bool isIntToCharLiteralConversion = declaredTypeFqn == "char" && initializerType == "int" && decl.Initializer is IntegerLiteralNode;
+            bool isIntToPointerConversion = declaredTypeFqn.EndsWith('*') && initializerType == "int";
+
+            if (initializerType == "unknown" || declaredTypeFqn == initializerType || isIntToCharLiteralConversion || isIntToPointerConversion)
+            {
+                return;
+            }
+
+            diagnostics.Add(new(context.CompilationUnit.FilePath, $"Cannot implicitly convert type '{initializerType}' to '{declaredTypeFqn}'.", AstHelper.GetFirstToken(decl.Initializer).Line, AstHelper.GetFirstToken(decl.Initializer).Column));
+        }
+        else if (decl.ConstructorArguments is not null)
+        {
+            foreach (ExpressionNode arg in decl.ConstructorArguments)
+            {
+                _semanticAnalyzer.AnalyzeExpressionType(arg, context, diagnostics);
+            }
+        }
+    }
+}
+</file>
+
+<file path="Analysis\StatementAnalyzer\DeleteStatementAnalyzer.cs">
+using CTilde.Diagnostics;
+
+namespace CTilde.Analysis.StatementAnalyzers;
+
+public class DeleteStatementAnalyzer : StatementAnalyzerBase
+{
+    public DeleteStatementAnalyzer(
+        SemanticAnalyzer semanticAnalyzer,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        MemoryLayoutManager memoryLayoutManager)
+        : base(semanticAnalyzer, typeRepository, typeResolver, functionResolver, memoryLayoutManager) { }
+
+    public override void Analyze(StatementNode stmt, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var deleteStmt = (DeleteStatementNode)stmt;
+        string exprType = _semanticAnalyzer.AnalyzeExpressionType(deleteStmt.Expression, context, diagnostics);
+
+        if (exprType == "unknown" || exprType.EndsWith('*'))
+        {
+            return;
+        }
+
+        Token token = AstHelper.GetFirstToken(deleteStmt.Expression);
+
+        diagnostics.Add(new(
+            context.CompilationUnit.FilePath,
+            $"'delete' operator can only be applied to pointers, not type '{exprType}'.",
+            token.Line,
+            token.Column));
+    }
+}
+</file>
+
+<file path="Analysis\StatementAnalyzer\ExpressionStatementAnalyzer.cs">
+using CTilde.Diagnostics;
+
+namespace CTilde.Analysis.StatementAnalyzers;
+
+public class ExpressionStatementAnalyzer : StatementAnalyzerBase
+{
+    public ExpressionStatementAnalyzer(
+        SemanticAnalyzer semanticAnalyzer,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        MemoryLayoutManager memoryLayoutManager)
+        : base(semanticAnalyzer, typeRepository, typeResolver, functionResolver, memoryLayoutManager) { }
+
+    public override void Analyze(StatementNode stmt, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var exprStmt = (ExpressionStatementNode)stmt;
+        _semanticAnalyzer.AnalyzeExpressionType(exprStmt.Expression, context, diagnostics);
+    }
+}
+</file>
+
+<file path="Analysis\StatementAnalyzer\IfStatementAnalyzer.cs">
+using CTilde.Diagnostics;
+
+namespace CTilde.Analysis.StatementAnalyzers;
+
+public class IfStatementAnalyzer : StatementAnalyzerBase
+{
+    public IfStatementAnalyzer(
+        SemanticAnalyzer semanticAnalyzer,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        MemoryLayoutManager memoryLayoutManager)
+        : base(semanticAnalyzer, typeRepository, typeResolver, functionResolver, memoryLayoutManager) { }
+
+    public override void Analyze(StatementNode stmt, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var ifStmt = (IfStatementNode)stmt;
+        _semanticAnalyzer.AnalyzeExpressionType(ifStmt.Condition, context, diagnostics);
+    }
+}
+</file>
+
+<file path="Analysis\StatementAnalyzer\IStatementAnalyzer.cs">
+using CTilde.Diagnostics;
+
+namespace CTilde.Analysis.StatementAnalyzers;
+
+public interface IStatementAnalyzer
+{
+    void Analyze(StatementNode stmt, AnalysisContext context, List<Diagnostic> diagnostics);
+}
+</file>
+
+<file path="Analysis\StatementAnalyzer\ReturnStatementAnalyzer.cs">
+using CTilde.Diagnostics;
+
+namespace CTilde.Analysis.StatementAnalyzers;
+
+public class ReturnStatementAnalyzer : StatementAnalyzerBase
+{
+    public ReturnStatementAnalyzer(
+        SemanticAnalyzer semanticAnalyzer,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        MemoryLayoutManager memoryLayoutManager)
+        : base(semanticAnalyzer, typeRepository, typeResolver, functionResolver, memoryLayoutManager) { }
+
+    public override void Analyze(StatementNode stmt, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var ret = (ReturnStatementNode)stmt;
+        string funcReturnType = _semanticAnalyzer.GetFunctionReturnType(context.CurrentFunction, context);
+
+        if (ret.Expression is null)
+        {
+            if (funcReturnType != "void")
+            {
+                Token _token = AstHelper.GetFirstToken(ret);
+                diagnostics.Add(new(context.CompilationUnit.FilePath, $"Non-void function '{context.CurrentFunction.Name}' must return a value.", _token.Line, _token.Column));
+            }
+            return;
+        }
+
+        if (funcReturnType == "void")
+        {
+            Token _token = AstHelper.GetFirstToken(ret);
+            diagnostics.Add(new(context.CompilationUnit.FilePath, $"Cannot return a value from void function '{context.CurrentFunction.Name}'.", _token.Line, _token.Column));
+            return;
+        }
+
+        string exprType = _semanticAnalyzer.AnalyzeExpressionType(ret.Expression, context, diagnostics);
+        if (exprType == "unknown" || exprType == funcReturnType)
+        {
+            return;
+        }
+
+        bool isIntToCharLiteralConversion = funcReturnType == "char" && exprType == "int" && ret.Expression is IntegerLiteralNode;
+        bool isGenericReturn = funcReturnType.Length == 1 && char.IsUpper(funcReturnType[0]) || exprType.Length == 1 && char.IsUpper(exprType[0]);
+
+        if (isIntToCharLiteralConversion || isGenericReturn)
+        {
+            return;
+        }
+
+        Token token = AstHelper.GetFirstToken(ret.Expression);
+        diagnostics.Add(new(context.CompilationUnit.FilePath, $"Cannot implicitly convert return type '{exprType}' to '{funcReturnType}'.", token.Line, token.Column));
+    }
+}
+</file>
+
+<file path="Analysis\StatementAnalyzer\StatementAnalyzerBase.cs">
+using CTilde.Diagnostics;
+
+namespace CTilde.Analysis.StatementAnalyzers;
+
+public abstract class StatementAnalyzerBase : IStatementAnalyzer
+{
+    protected readonly SemanticAnalyzer _semanticAnalyzer;
+    protected readonly TypeRepository _typeRepository;
+    protected readonly TypeResolver _typeResolver;
+    protected readonly FunctionResolver _functionResolver;
+    protected readonly MemoryLayoutManager _memoryLayoutManager;
+
+    protected StatementAnalyzerBase(
+        SemanticAnalyzer semanticAnalyzer,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        MemoryLayoutManager memoryLayoutManager)
+    {
+        _semanticAnalyzer = semanticAnalyzer;
+        _typeRepository = typeRepository;
+        _typeResolver = typeResolver;
+        _functionResolver = functionResolver;
+        _memoryLayoutManager = memoryLayoutManager;
+    }
+
+    public abstract void Analyze(StatementNode stmt, AnalysisContext context, List<Diagnostic> diagnostics);
+}
+</file>
+
+<file path="Analysis\StatementAnalyzer\WhileStatementAnalyzer.cs">
+using CTilde.Diagnostics;
+
+namespace CTilde.Analysis.StatementAnalyzers;
+
+public class WhileStatementAnalyzer : StatementAnalyzerBase
+{
+    public WhileStatementAnalyzer(
+        SemanticAnalyzer semanticAnalyzer,
+        TypeRepository typeRepository,
+        TypeResolver typeResolver,
+        FunctionResolver functionResolver,
+        MemoryLayoutManager memoryLayoutManager)
+        : base(semanticAnalyzer, typeRepository, typeResolver, functionResolver, memoryLayoutManager) { }
+
+    public override void Analyze(StatementNode stmt, AnalysisContext context, List<Diagnostic> diagnostics)
+    {
+        var whileStmt = (WhileStatementNode)stmt;
+        _semanticAnalyzer.AnalyzeExpressionType(whileStmt.Condition, context, diagnostics);
     }
 }
 </file>

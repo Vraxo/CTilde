@@ -51,7 +51,7 @@ public class Compiler
         }
 
         // 7. Output to file
-        string? outputAsmPath = OutputAssembly(asmCode);
+        string? outputAsmPath = OutputAssembly(asmCode, compilation.EntryFilePath);
 
         // 8. Execute FASM to assemble the code
         var assembler = new Assembler();
@@ -72,11 +72,20 @@ public class Compiler
         }
     }
 
-    private static string OutputAssembly(string asmCode)
+    private static string OutputAssembly(string asmCode, string entryFilePath)
     {
-        string? outputAsmPath = "Code/Output/output.asm";
+        // Place the output relative to the source file, which is more intuitive.
+        string sourceDirectory = Path.GetDirectoryName(entryFilePath) ?? ".";
+        string outputDirectory = Path.Combine(sourceDirectory, "output");
+
+        // Ensure the output directory exists before writing to it.
+        // This is the direct fix for the DirectoryNotFoundException.
+        Directory.CreateDirectory(outputDirectory);
+
+        string outputAsmPath = Path.Combine(outputDirectory, "output.asm");
+
         File.WriteAllText(outputAsmPath, asmCode);
-        Console.WriteLine($"Compilation successful. Assembly code written to {outputAsmPath}");
+        Console.WriteLine($"Compilation successful. Assembly code written to {Path.GetFullPath(outputAsmPath)}");
         return outputAsmPath;
     }
 }
